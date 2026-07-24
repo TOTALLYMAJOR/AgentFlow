@@ -666,6 +666,73 @@ export class ArtifactRepository {
       return this.getById(id);
     });
   }
+
+  replaceValidated(
+    id: string,
+    input: {
+      artifactType: string;
+      repositoryPath: string | null;
+      storagePath: string | null;
+      sha256: string | null;
+      metadata: Record<string, unknown>;
+    },
+    occurredAt = this.clock(),
+  ): ArtifactEntity {
+    return inImmediateTransaction(this.database, () => {
+      const artifact = this.getById(id);
+      if (artifact.status === "integrated") {
+        throw new Error(`Integrated artifact ${id} is immutable`);
+      }
+      this.database
+        .prepare<{
+          id: string;
+          artifactType: string;
+          repositoryPath: string | null;
+          storagePath: string | null;
+          sha256: string | null;
+          metadataJson: string;
+          occurredAt: string;
+        }>(
+          `UPDATE artifacts
+           SET artifact_type = @artifactType,
+               repository_path = @repositoryPath,
+               storage_path = @storagePath,
+               sha256 = @sha256,
+               status = 'validated',
+               metadata_json = @metadataJson,
+               created_at = @occurredAt,
+               integrated_at = NULL
+           WHERE id = @id AND status IN ('produced','validated','invalidated')`,
+        )
+        .run({
+          id,
+          artifactType: input.artifactType,
+          repositoryPath: input.repositoryPath,
+          storagePath: input.storagePath,
+          sha256: input.sha256,
+          metadataJson: encodeJson(input.metadata),
+          occurredAt,
+        });
+      insertBuildEvent(
+        this.database,
+        {
+          buildId: artifact.buildId,
+          taskId: artifact.producerTaskId,
+          type: "artifact.republished",
+          payload: {
+            artifactId: id,
+            name: artifact.name,
+            version: artifact.version,
+            previousSha256: artifact.sha256,
+            sha256: input.sha256,
+          },
+          occurredAt,
+        },
+        this.clock,
+      );
+      return this.getById(id);
+    });
+  }
 }
 
 export class ValidationRunRepository {

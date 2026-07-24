@@ -429,6 +429,42 @@ CREATE INDEX IF NOT EXISTS task_scheduler_state_by_build
 ON task_scheduler_state (build_id, ready_age_cycles DESC);
 `;
 
+const ATTEMPT_MANIFEST_SCHEMA = `
+DROP INDEX IF EXISTS task_manifests_by_build;
+ALTER TABLE task_manifests RENAME TO task_manifests_legacy;
+
+CREATE TABLE task_manifests (
+  id TEXT PRIMARY KEY,
+  build_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK (attempt >= 1),
+  status TEXT NOT NULL CHECK (status IN ('validated','integrated')),
+  schema_version TEXT NOT NULL,
+  manifest_path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  manifest_json TEXT NOT NULL CHECK (json_valid(manifest_json)),
+  created_at TEXT NOT NULL,
+  UNIQUE (task_id, status, attempt),
+  UNIQUE (manifest_path),
+  FOREIGN KEY (build_id) REFERENCES builds(id),
+  FOREIGN KEY (task_id, build_id) REFERENCES tasks(id, build_id)
+);
+
+INSERT INTO task_manifests (
+  id, build_id, task_id, attempt, status, schema_version, manifest_path,
+  sha256, manifest_json, created_at
+)
+SELECT
+  id, build_id, task_id, 1, status, schema_version, manifest_path,
+  sha256, manifest_json, created_at
+FROM task_manifests_legacy;
+
+DROP TABLE task_manifests_legacy;
+
+CREATE INDEX task_manifests_by_build
+ON task_manifests (build_id, task_id, status, attempt DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   {
     version: 1,
@@ -459,6 +495,11 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
     version: 6,
     name: "durable_scheduler_cycles",
     sql: SCHEDULER_SCHEMA,
+  },
+  {
+    version: 7,
+    name: "attempt_scoped_validated_manifests",
+    sql: ATTEMPT_MANIFEST_SCHEMA,
   },
 ]);
 

@@ -20,6 +20,7 @@ export interface HandoffManifest {
   buildId: string;
   taskId: string;
   backlogTaskId: string;
+  attempt: number;
   status: TaskManifestStatus;
   baseCommit: string;
   resultCommit: string;
@@ -38,6 +39,7 @@ export interface PublishHandoffInput {
   buildId: string;
   taskId: string;
   backlogTaskId: string;
+  attempt: number;
   status: TaskManifestStatus;
   baseCommit: string;
   resultCommit: string;

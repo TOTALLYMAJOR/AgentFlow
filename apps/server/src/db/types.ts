@@ -441,6 +441,7 @@ export interface TaskManifestEntity {
   id: string;
   buildId: string;
   taskId: string;
+  attempt: number;
   status: TaskManifestStatus;
   schemaVersion: string;
   manifestPath: string;
@@ -453,6 +454,7 @@ export interface CreateTaskManifestInput {
   id: string;
   buildId: string;
   taskId: string;
+  attempt: number;
   status: TaskManifestStatus;
   schemaVersion: string;
   manifestPath: string;

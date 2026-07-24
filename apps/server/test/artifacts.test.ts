@@ -38,6 +38,7 @@ describe("handoff manifests and artifact registry", () => {
       buildId: "build_1",
       taskId: "task_contract",
       backlogTaskId: "BL-100",
+      attempt: 1,
       baseCommit: "base",
       resultCommit: "result",
       branch: "agent/build_1/BL-100",
@@ -106,6 +107,7 @@ describe("handoff manifests and artifact registry", () => {
       buildId: "build_1",
       taskId: "task_contract",
       backlogTaskId: "BL-100",
+      attempt: 1,
       status: "validated",
       baseCommit: "base",
       resultCommit: "result-a",
@@ -123,6 +125,7 @@ describe("handoff manifests and artifact registry", () => {
         buildId: "build_1",
         taskId: "task_backend",
         backlogTaskId: "BL-101",
+        attempt: 1,
         status: "validated",
         baseCommit: "base",
         resultCommit: "result-b",
@@ -133,6 +136,75 @@ describe("handoff manifests and artifact registry", () => {
         produces: [
           { name: "checkout-api", type: "schema", version: "1.0.0" },
         ],
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_DUPLICATE" });
+  });
+
+  it("preserves attempt manifests while replacing only a non-integrated artifact revision", async () => {
+    fixture = createDatabaseFixture();
+    const store = createStore(fixture);
+    const worktree = path.join(fixture.directory, "worktree");
+    mkdirSync(path.join(worktree, "contracts"), { recursive: true });
+    const contractPath = path.join(worktree, "contracts", "checkout.json");
+    writeFileSync(contractPath, '{"revision":1}\n');
+    const service = new HandoffManifestService(
+      store,
+      path.join(fixture.directory, "artifacts"),
+    );
+    const publication = {
+      buildId: "build_1",
+      taskId: "task_contract",
+      backlogTaskId: "BL-100",
+      status: "validated" as const,
+      baseCommit: "base",
+      branch: "agent/build_1/BL-100",
+      worktreePath: worktree,
+      changedFiles: ["contracts/checkout.json"],
+      consumes: [],
+      produces: [
+        {
+          name: "checkout-api",
+          type: "json-schema",
+          version: "1.0.0",
+          path: "contracts/checkout.json",
+        },
+      ],
+    };
+
+    const first = await service.publish({
+      ...publication,
+      attempt: 1,
+      resultCommit: "result-1",
+    });
+    writeFileSync(contractPath, '{"revision":2}\n');
+    const second = await service.publish({
+      ...publication,
+      attempt: 2,
+      resultCommit: "result-2",
+    });
+
+    expect(second.artifacts[0]?.id).toBe(first.artifacts[0]?.id);
+    expect(second.artifacts[0]?.sha256).not.toBe(first.artifacts[0]?.sha256);
+    expect(store.manifests.listForBuild("build_1")).toHaveLength(2);
+    expect(
+      store.manifests
+        .listForBuild("build_1")
+        .map((manifest) => manifest.attempt),
+    ).toEqual([1, 2]);
+
+    await service.publish({
+      ...publication,
+      attempt: 2,
+      status: "integrated",
+      resultCommit: "result-2",
+      integrationCommit: "integration-2",
+    });
+    writeFileSync(contractPath, '{"revision":3}\n');
+    await expect(
+      service.publish({
+        ...publication,
+        attempt: 3,
+        resultCommit: "result-3",
       }),
     ).rejects.toMatchObject({ code: "ARTIFACT_DUPLICATE" });
   });

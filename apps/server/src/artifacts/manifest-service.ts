@@ -59,6 +59,7 @@ export class HandoffManifestService {
       buildId: input.buildId,
       taskId: input.taskId,
       backlogTaskId: input.backlogTaskId,
+      attempt: input.attempt,
       status: input.status,
       baseCommit: input.baseCommit,
       resultCommit: input.resultCommit,
@@ -78,6 +79,7 @@ export class HandoffManifestService {
     const existing = this.store.manifests.findForTask(
       input.taskId,
       input.status,
+      input.attempt,
     );
     if (existing !== undefined) {
       if (existing.sha256 !== sha256) {
@@ -104,6 +106,7 @@ export class HandoffManifestService {
         id: createId("manifest"),
         buildId: input.buildId,
         taskId: input.taskId,
+        attempt: input.attempt,
         status: input.status,
         schemaVersion: HANDOFF_MANIFEST_SCHEMA_VERSION,
         manifestPath,
@@ -114,6 +117,7 @@ export class HandoffManifestService {
       const raced = this.store.manifests.findForTask(
         input.taskId,
         input.status,
+        input.attempt,
       );
       if (raced === undefined || raced.sha256 !== sha256) {
         throw error;
@@ -173,7 +177,7 @@ export class HandoffManifestService {
       path.resolve(this.artifactsRoot),
       safeSegment(input.buildId),
       safeSegment(input.taskId),
-      `${input.status}.manifest.json`,
+      `attempt-${input.attempt}.${input.status}.manifest.json`,
     );
   }
 
@@ -214,18 +218,36 @@ export class HandoffManifestService {
         artifact.version,
       );
       if (existing !== undefined) {
-        if (
-          existing.producerTaskId !== input.taskId ||
-          existing.artifactType !== artifact.type ||
-          existing.repositoryPath !== (artifact.path ?? null) ||
-          existing.sha256 !== (artifact.sha256 ?? null)
-        ) {
+        if (existing.producerTaskId !== input.taskId) {
           throw new ArtifactRegistryError(
             "ARTIFACT_DUPLICATE",
-            `Artifact ${artifact.name}@${artifact.version} already has a different producer or payload`,
+            `Artifact ${artifact.name}@${artifact.version} already has a different producer`,
           );
         }
-        return existing;
+        const payloadMatches =
+          existing.artifactType === artifact.type &&
+          existing.repositoryPath === (artifact.path ?? null) &&
+          existing.sha256 === (artifact.sha256 ?? null);
+        if (payloadMatches && existing.status === "validated") {
+          return existing;
+        }
+        if (existing.status === "integrated") {
+          throw new ArtifactRegistryError(
+            "ARTIFACT_DUPLICATE",
+            `Integrated artifact ${artifact.name}@${artifact.version} is immutable; publish a new version`,
+          );
+        }
+        return this.store.artifacts.replaceValidated(existing.id, {
+          artifactType: artifact.type,
+          repositoryPath: artifact.path ?? null,
+          storagePath: manifestPath,
+          sha256: artifact.sha256 ?? null,
+          metadata: {
+            manifestPath,
+            manifestStatus: "validated",
+            attempt: input.attempt,
+          },
+        });
       }
       return this.store.artifacts.publish({
         id: createId("artifact"),
@@ -241,6 +263,7 @@ export class HandoffManifestService {
         metadata: {
           manifestPath,
           manifestStatus: "validated",
+          attempt: input.attempt,
         },
       });
     });
