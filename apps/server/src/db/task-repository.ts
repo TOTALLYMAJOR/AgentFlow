@@ -449,6 +449,85 @@ export class TaskRepository {
       .map(mapValidationCommand);
   }
 
+  setExecutionContext(
+    id: string,
+    input: {
+      branchName: string;
+      worktreePath: string;
+      baseCommit: string;
+    },
+  ): TaskEntity {
+    return inImmediateTransaction(this.database, () => {
+      const task = this.getById(id);
+      if (
+        task.branchName !== null &&
+        (task.branchName !== input.branchName ||
+          task.worktreePath !== input.worktreePath ||
+          task.baseCommit !== input.baseCommit)
+      ) {
+        throw new Error(`Task ${id} already has a different execution context`);
+      }
+      if (
+        !["ready", "running", "interrupted"].includes(task.state)
+      ) {
+        throw new Error(
+          `Task ${id} cannot receive an execution context from ${task.state}`,
+        );
+      }
+      this.database
+        .prepare<{
+          id: string;
+          branchName: string;
+          worktreePath: string;
+          baseCommit: string;
+        }>(
+          `UPDATE tasks
+           SET branch_name = @branchName,
+               worktree_path = @worktreePath,
+               base_commit = @baseCommit
+           WHERE id = @id`,
+        )
+        .run({ id, ...input });
+      insertBuildEvent(
+        this.database,
+        {
+          buildId: task.buildId,
+          taskId: id,
+          type: "task.execution_context_recorded",
+          payload: input,
+        },
+        this.clock,
+      );
+      return this.getById(id);
+    });
+  }
+
+  setRanking(
+    id: string,
+    rankingScore: number,
+    rankingExplanation: string,
+  ): TaskEntity {
+    if (!Number.isFinite(rankingScore)) {
+      throw new RangeError("Task ranking score must be finite");
+    }
+    const result = this.database
+      .prepare<{
+        id: string;
+        rankingScore: number;
+        rankingExplanation: string;
+      }>(
+        `UPDATE tasks
+         SET ranking_score = @rankingScore,
+             ranking_explanation = @rankingExplanation
+         WHERE id = @id`,
+      )
+      .run({ id, rankingScore, rankingExplanation });
+    if (result.changes !== 1) {
+      requireEntity("task", id, undefined);
+    }
+    return this.getById(id);
+  }
+
   transition(
     id: string,
     to: TaskStatus,
@@ -554,8 +633,6 @@ export class TaskRepository {
           `UPDATE tasks
            SET state = 'ready',
                attempt = @attempt,
-               branch_name = NULL,
-               worktree_path = NULL,
                result_commit = NULL,
                integration_commit = NULL,
                started_at = NULL,
@@ -752,6 +829,9 @@ export class TaskRepository {
     input: {
       status: AttemptStatus;
       workerId?: string | null;
+      promptPath?: string | null;
+      jsonlPath?: string | null;
+      logPath?: string | null;
       resultCommit?: string | null;
       errorCode?: string | null;
       errorMessage?: string | null;
@@ -766,6 +846,9 @@ export class TaskRepository {
         attempt: number;
         status: AttemptStatus;
         workerId: string | null;
+        promptPath: string | null;
+        jsonlPath: string | null;
+        logPath: string | null;
         resultCommit: string | null;
         errorCode: string | null;
         errorMessage: string | null;
@@ -775,6 +858,9 @@ export class TaskRepository {
         `UPDATE task_attempts
          SET status = @status,
              worker_id = @workerId,
+             prompt_path = @promptPath,
+             jsonl_path = @jsonlPath,
+             log_path = @logPath,
              result_commit = @resultCommit,
              error_code = @errorCode,
              error_message = @errorMessage,
@@ -788,6 +874,12 @@ export class TaskRepository {
         status: input.status,
         workerId:
           input.workerId === undefined ? current.workerId : input.workerId,
+        promptPath:
+          input.promptPath === undefined ? current.promptPath : input.promptPath,
+        jsonlPath:
+          input.jsonlPath === undefined ? current.jsonlPath : input.jsonlPath,
+        logPath:
+          input.logPath === undefined ? current.logPath : input.logPath,
         resultCommit:
           input.resultCommit === undefined
             ? current.resultCommit

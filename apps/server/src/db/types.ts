@@ -48,6 +48,7 @@ export type ApprovalType =
   | "breaking_contract"
   | "manual";
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "cancelled";
+export type TaskManifestStatus = "validated" | "integrated";
 export type FileChangeType =
   | "added"
   | "modified"
@@ -434,4 +435,28 @@ export interface CreateApprovalInput {
   decidedAt?: string | null;
   decidedBy?: string | null;
   decisionNote?: string | null;
+}
+
+export interface TaskManifestEntity {
+  id: string;
+  buildId: string;
+  taskId: string;
+  status: TaskManifestStatus;
+  schemaVersion: string;
+  manifestPath: string;
+  sha256: string;
+  manifest: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface CreateTaskManifestInput {
+  id: string;
+  buildId: string;
+  taskId: string;
+  status: TaskManifestStatus;
+  schemaVersion: string;
+  manifestPath: string;
+  sha256: string;
+  manifest: Record<string, unknown>;
+  createdAt?: string;
 }

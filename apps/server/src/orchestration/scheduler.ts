@@ -52,6 +52,7 @@ export function scheduleTasks(
   tasks: readonly SchedulingTask[],
   activeTaskIds: readonly string[],
   requestedWorkerLimit: number,
+  assignedWorkerCount = activeTaskIds.length,
 ): DispatchDecision {
   const workerLimit = Math.min(4, Math.max(1, requestedWorkerLimit));
   const byId = new Map(tasks.map((task) => [task.id, task]));
@@ -119,7 +120,7 @@ export function scheduleTasks(
     );
 
   const capacity = runnableBuildStates.includes(buildStatus)
-    ? Math.max(0, workerLimit - active.length)
+    ? Math.max(0, workerLimit - Math.max(0, assignedWorkerCount))
     : 0;
   const selected: SchedulingTask[] = [];
   for (const candidate of candidates) {

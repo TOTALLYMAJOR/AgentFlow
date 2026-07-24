@@ -31,6 +31,7 @@ describe("AgentFlow API smoke", () => {
     const environment = resolveEnvironment({
       AGENTFLOW_HOME: runtimeHome,
       AGENTFLOW_LOG_LEVEL: "silent",
+      AGENTFLOW_CODEX_BIN: "/definitely/missing/agentflow-test-codex",
     });
     const { app } = await buildApp({
       environment,
@@ -250,6 +251,34 @@ Implement the consumer.
 ### Acceptance Criteria
 
 - The consumer validates the example.
+`,
+  );
+  await writeFile(
+    path.join(root, ".agentflow.yaml"),
+    `version: 1
+repository:
+  name: agentflow-api-fixture
+  base_branch: main
+backlog:
+  path: BACKLOG.md
+workers:
+  maximum: 4
+contracts:
+  roots:
+    - contracts/
+validation:
+  task_default:
+    - npm run typecheck
+  integration:
+    - npm run typecheck
+docker:
+  enabled: false
+  compose_file: compose.yaml
+git:
+  remote: origin
+  push_task_branches: false
+  push_integration_branch: false
+  open_integration_pull_request: false
 `,
   );
   await execFileAsync("git", ["-C", root, "add", "."]);

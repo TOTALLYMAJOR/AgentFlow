@@ -35,6 +35,7 @@ export interface AgentFlowEnvironment {
   databasePath: string;
   logsPath: string;
   runsPath: string;
+  artifactsPath: string;
   worktreesPath: string;
   backupsPath: string;
   pidPath: string;
@@ -57,6 +58,7 @@ export function resolveEnvironment(
     databasePath: path.join(home, "agentflow.db"),
     logsPath: path.join(home, "logs"),
     runsPath: path.join(home, "runs"),
+    artifactsPath: path.join(home, "artifacts"),
     worktreesPath: path.join(home, "worktrees"),
     backupsPath: path.join(home, "backups"),
     pidPath: path.join(home, "agentflow.pid"),
@@ -71,6 +73,7 @@ export async function ensureRuntimeLayout(
       environment.home,
       environment.logsPath,
       environment.runsPath,
+      environment.artifactsPath,
       environment.worktreesPath,
       environment.backupsPath,
     ].map(async (directory) => mkdir(directory, { recursive: true, mode: 0o700 })),

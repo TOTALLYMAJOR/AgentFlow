@@ -387,6 +387,48 @@ ON approvals (build_id, task_id)
 WHERE status = 'pending';
 `;
 
+const MANIFEST_SCHEMA = `
+CREATE TABLE IF NOT EXISTS task_manifests (
+  id TEXT PRIMARY KEY,
+  build_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('validated','integrated')),
+  schema_version TEXT NOT NULL,
+  manifest_path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  manifest_json TEXT NOT NULL CHECK (json_valid(manifest_json)),
+  created_at TEXT NOT NULL,
+  UNIQUE (task_id, status),
+  UNIQUE (manifest_path),
+  FOREIGN KEY (build_id) REFERENCES builds(id),
+  FOREIGN KEY (task_id, build_id) REFERENCES tasks(id, build_id)
+);
+
+CREATE INDEX IF NOT EXISTS task_manifests_by_build
+ON task_manifests (build_id, task_id, status);
+`;
+
+const SCHEDULER_SCHEMA = `
+CREATE TABLE IF NOT EXISTS build_scheduler_state (
+  build_id TEXT PRIMARY KEY,
+  cycle INTEGER NOT NULL DEFAULT 0 CHECK (cycle >= 0),
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (build_id) REFERENCES builds(id)
+);
+
+CREATE TABLE IF NOT EXISTS task_scheduler_state (
+  task_id TEXT PRIMARY KEY,
+  build_id TEXT NOT NULL,
+  ready_age_cycles INTEGER NOT NULL DEFAULT 0
+    CHECK (ready_age_cycles >= 0),
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (task_id, build_id) REFERENCES tasks(id, build_id)
+);
+
+CREATE INDEX IF NOT EXISTS task_scheduler_state_by_build
+ON task_scheduler_state (build_id, ready_age_cycles DESC);
+`;
+
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   {
     version: 1,
@@ -407,6 +449,16 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
     version: 4,
     name: "attempt_approval_changed_file_audit_schema",
     sql: AUDIT_SCHEMA,
+  },
+  {
+    version: 5,
+    name: "immutable_task_handoff_manifests",
+    sql: MANIFEST_SCHEMA,
+  },
+  {
+    version: 6,
+    name: "durable_scheduler_cycles",
+    sql: SCHEDULER_SCHEMA,
   },
 ]);
 

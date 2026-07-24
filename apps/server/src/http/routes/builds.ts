@@ -1,4 +1,6 @@
 import type { ServerResponse } from "node:http";
+import { open, realpath, stat } from "node:fs/promises";
+import path from "node:path";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import type {
@@ -7,7 +9,11 @@ import type {
   TaskEntity,
 } from "../../db/index.js";
 import type { PlannedTask } from "../../domain/types.js";
-import { runGit } from "../../repositories/index.js";
+import {
+  AgentFlowRepositoryConfigSchema,
+  runGit,
+} from "../../repositories/index.js";
+import { GitCommandRunner, isPathInside } from "../../git/index.js";
 import { createId } from "../../util/ids.js";
 import { AgentFlowError } from "../errors.js";
 import type { AgentFlowContext } from "../context.js";
@@ -19,6 +25,30 @@ const BuildIdParameters = z.object({
 const TaskIdParameters = z.object({
   id: z.string().min(1),
   taskId: z.string().min(1),
+});
+
+const ApprovalParameters = z.object({
+  id: z.string().min(1),
+  approvalId: z.string().min(1),
+});
+
+const ApprovalDecisionBody = z.object({
+  status: z.enum(["approved", "rejected", "cancelled"]),
+  decidedBy: z.string().trim().min(1).max(128).default("local-user"),
+  note: z.string().trim().max(4_096).optional(),
+});
+
+const AttemptDocumentParameters = z.object({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  attempt: z.coerce.number().int().min(1),
+  document: z.enum([
+    "prompt",
+    "jsonl",
+    "stderr",
+    "result",
+    "outcome",
+  ]),
 });
 
 const CreateBuildBody = z.object({
@@ -39,6 +69,9 @@ export function registerBuildRoutes(
       );
     }
     const plan = context.store.plans.getById(planId);
+    const repositoryConfig = AgentFlowRepositoryConfigSchema.parse(
+      plan.repositoryConfig,
+    );
     const repository = await context.repositoryService.get(plan.repositoryId);
     const baseCommit = (
       await runGit(repository.localPath, [
@@ -64,7 +97,7 @@ export function registerBuildRoutes(
       baseCommit,
       integrationBranch: `agent-integration/${buildId}`,
       status: "ready",
-      workerLimit: Math.min(4, plan.normalizedPlan.estimates.maximumTheoreticalConcurrency),
+      workerLimit: repositoryConfig.workers.maximum,
       tasks,
     });
     for (let slot = 1; slot <= build.workerLimit; slot += 1) {
@@ -73,6 +106,17 @@ export function registerBuildRoutes(
         buildId,
         status: "idle",
       });
+    }
+    for (const task of context.store.tasks.listForBuild(build.id)) {
+      if (task.requiresApproval) {
+        context.store.approvals.create({
+          id: createId("approval"),
+          buildId: build.id,
+          taskId: task.id,
+          approvalType: "manual",
+          reason: `Task ${task.backlogTaskId} requires approval before dispatch`,
+        });
+      }
     }
     await reply.status(201).send(await serializeBuild(context, build));
   });
@@ -94,9 +138,7 @@ export function registerBuildRoutes(
     const { id } = BuildIdParameters.parse(request.params);
     return serializeBuild(
       context,
-      context.store.builds.transition(id, "running", {
-        eventType: "build.started",
-      }),
+      await context.coordinator.start(id),
     );
   });
 
@@ -104,9 +146,7 @@ export function registerBuildRoutes(
     const { id } = BuildIdParameters.parse(request.params);
     return serializeBuild(
       context,
-      context.store.builds.transition(id, "paused", {
-        eventType: "build.paused",
-      }),
+      context.coordinator.pause(id),
     );
   });
 
@@ -114,18 +154,13 @@ export function registerBuildRoutes(
     const { id } = BuildIdParameters.parse(request.params);
     return serializeBuild(
       context,
-      context.store.builds.transition(id, "running", {
-        eventType: "build.resumed",
-      }),
+      await context.coordinator.resume(id),
     );
   });
 
   app.post("/api/builds/:id/cancel", async (request) => {
     const { id } = BuildIdParameters.parse(request.params);
-    const build = context.store.builds.transition(id, "cancelled", {
-      eventType: "build.cancelled",
-    });
-    cancelNonTerminalTasks(context, id);
+    const build = context.coordinator.cancel(id);
     return serializeBuild(context, build);
   });
 
@@ -144,17 +179,76 @@ export function registerBuildRoutes(
       ownership: context.store.tasks.listOwnedPaths(task.id),
       validationCommands: context.store.tasks.listValidationCommands(task.id),
       attempts: context.store.tasks.listAttempts(task.id),
-      approvals: context.store.approvals.listPending(id, task.id),
+      approvals: context.store.approvals
+        .listForBuild(id)
+        .filter((approval) => approval.taskId === task.id),
       artifacts: context.store.artifacts
         .listForBuild(id)
         .filter((artifact) => artifact.producerTaskId === task.id),
+      manifests: context.store.manifests
+        .listForBuild(id)
+        .filter((manifest) => manifest.taskId === task.id),
+      validations: context.store.validations
+        .listForBuild(id)
+        .filter((validation) => validation.taskId === task.id),
+      changedFiles: context.store.tasks
+        .listAttempts(task.id)
+        .flatMap((attempt) =>
+          context.store.tasks.listChangedFiles(task.id, attempt.attempt),
+        ),
+      events: context.store.events
+        .listForBuild(id, { limit: 10_000 })
+        .filter((event) => event.taskId === task.id),
     };
   });
 
   app.post("/api/builds/:id/tasks/:taskId/retry", async (request) => {
     const { id, taskId } = TaskIdParameters.parse(request.params);
     assertTaskInBuild(context, id, taskId);
-    return context.store.tasks.retry(taskId);
+    return context.coordinator.retry(id, taskId);
+  });
+
+  app.get(
+    "/api/builds/:id/tasks/:taskId/attempts/:attempt/:document",
+    async (request) => {
+      const parameters = AttemptDocumentParameters.parse(request.params);
+      const task = assertTaskInBuild(context, parameters.id, parameters.taskId);
+      const attempt = context.store.tasks.getAttempt(
+        task.id,
+        parameters.attempt,
+      );
+      const documentPath = resolveAttemptDocumentPath(
+        attempt,
+        parameters.document,
+      );
+      return readRuntimeDocument(
+        context.environment.runsPath,
+        documentPath,
+      );
+    },
+  );
+
+  app.get("/api/builds/:id/tasks/:taskId/diff", async (request) => {
+    const { id, taskId } = TaskIdParameters.parse(request.params);
+    const task = assertTaskInBuild(context, id, taskId);
+    if (task.worktreePath === null || task.baseCommit === null) {
+      return { available: false, reason: "Task worktree is not available" };
+    }
+    const target = task.resultCommit ?? "working-tree";
+    const result = await new GitCommandRunner().run(task.worktreePath, [
+      "diff",
+      "--no-ext-diff",
+      "--unified=3",
+      task.baseCommit,
+      ...(task.resultCommit === null ? [] : [task.resultCommit]),
+      "--",
+    ]);
+    return {
+      available: true,
+      baseCommit: task.baseCommit,
+      target,
+      diff: result.stdout,
+    };
   });
 
   app.get("/api/builds/:id/artifacts", async (request) => {
@@ -162,6 +256,38 @@ export function registerBuildRoutes(
     context.store.builds.getById(id);
     return context.store.artifacts.listForBuild(id);
   });
+
+  app.get("/api/builds/:id/manifests", async (request) => {
+    const { id } = BuildIdParameters.parse(request.params);
+    context.store.builds.getById(id);
+    return context.store.manifests.listForBuild(id);
+  });
+
+  app.get("/api/builds/:id/approvals", async (request) => {
+    const { id } = BuildIdParameters.parse(request.params);
+    context.store.builds.getById(id);
+    return context.store.approvals.listForBuild(id);
+  });
+
+  app.post(
+    "/api/builds/:id/approvals/:approvalId/decision",
+    async (request) => {
+      const { id, approvalId } = ApprovalParameters.parse(request.params);
+      const body = ApprovalDecisionBody.parse(request.body);
+      const approval = context.store.approvals.getById(approvalId);
+      if (approval.buildId !== id) {
+        throw new AgentFlowError(
+          "APPROVAL_BUILD_MISMATCH",
+          `Approval ${approvalId} does not belong to build ${id}`,
+          404,
+        );
+      }
+      return context.store.approvals.decide(approvalId, body.status, {
+        decidedBy: body.decidedBy,
+        decisionNote: body.note ?? null,
+      });
+    },
+  );
 
   app.get("/api/builds/:id/metrics", async (request) => {
     const { id } = BuildIdParameters.parse(request.params);
@@ -235,7 +361,7 @@ function createTaskInput(
     title: task.title,
     description: task.description,
     acceptanceCriteria: task.acceptanceCriteria,
-    state: task.dependsOn.length === 0 ? "ready" : "blocked",
+    state: dependencies.length === 0 ? "ready" : "blocked",
     estimateHours: task.estimateHours,
     allowNoChanges: task.allowNoChanges,
     riskScore: task.riskScore,
@@ -300,30 +426,6 @@ function assertTaskInBuild(
     );
   }
   return task;
-}
-
-function cancelNonTerminalTasks(
-  context: AgentFlowContext,
-  buildId: string,
-): void {
-  for (const task of context.store.tasks.listForBuild(buildId)) {
-    if (
-      ["integrated", "failed", "cancelled", "blocked_failed"].includes(
-        task.state,
-      )
-    ) {
-      continue;
-    }
-    try {
-      context.store.tasks.transition(task.id, "cancelled", {
-        eventType: "task.cancelled",
-      });
-    } catch {
-      context.store.tasks.transition(task.id, "interrupted", {
-        eventType: "task.interrupted_for_cancellation",
-      });
-    }
-  }
 }
 
 function countOwnershipViolations(
@@ -402,4 +504,85 @@ function writeEvent(
 
 function safeId(value: string): string {
   return value.toLowerCase().replaceAll(/[^a-z0-9_-]+/g, "-");
+}
+
+function resolveAttemptDocumentPath(
+  attempt: ReturnType<AgentFlowContext["store"]["tasks"]["getAttempt"]>,
+  document: z.infer<typeof AttemptDocumentParameters>["document"],
+): string {
+  const known = {
+    prompt: attempt.promptPath,
+    jsonl: attempt.jsonlPath,
+    stderr: attempt.logPath,
+  } as const;
+  if (document in known) {
+    const selected = known[document as keyof typeof known];
+    if (selected === null) {
+      throw new AgentFlowError(
+        "ATTEMPT_DOCUMENT_UNAVAILABLE",
+        `Attempt ${attempt.attempt} has no ${document} document`,
+        404,
+      );
+    }
+    return selected;
+  }
+  if (attempt.promptPath === null) {
+    throw new AgentFlowError(
+      "ATTEMPT_DOCUMENT_UNAVAILABLE",
+      `Attempt ${attempt.attempt} has no runtime directory`,
+      404,
+    );
+  }
+  return path.join(
+    path.dirname(attempt.promptPath),
+    document === "result" ? "worker-result.json" : "worker-outcome.json",
+  );
+}
+
+async function readRuntimeDocument(
+  runsRoot: string,
+  documentPath: string,
+): Promise<{
+  path: string;
+  content: string;
+  truncated: boolean;
+  sizeBytes: number;
+}> {
+  const canonicalRoot = await realpath(runsRoot);
+  const canonicalDocument = await realpath(documentPath);
+  if (!isPathInside(canonicalRoot, canonicalDocument)) {
+    throw new AgentFlowError(
+      "RUNTIME_PATH_OUTSIDE_ROOT",
+      "Attempt document is outside the AgentFlow runs directory",
+      403,
+    );
+  }
+  const metadata = await stat(canonicalDocument);
+  if (!metadata.isFile()) {
+    throw new AgentFlowError(
+      "ATTEMPT_DOCUMENT_INVALID",
+      "Attempt document is not a regular file",
+      400,
+    );
+  }
+  const maximumBytes = 2 * 1024 * 1024;
+  const start = Math.max(0, metadata.size - maximumBytes);
+  const handle = await open(canonicalDocument, "r");
+  try {
+    const buffer = Buffer.alloc(Math.min(metadata.size, maximumBytes));
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      buffer.length,
+      start,
+    );
+    return {
+      path: canonicalDocument,
+      content: buffer.subarray(0, bytesRead).toString("utf8"),
+      truncated: start > 0,
+      sizeBytes: metadata.size,
+    };
+  } finally {
+    await handle.close();
+  }
 }

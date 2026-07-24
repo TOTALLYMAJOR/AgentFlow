@@ -54,6 +54,11 @@ export {
   type AssignWorkerInput,
 } from "./runtime-repositories.js";
 export { BuildEventRepository } from "./event-repository.js";
+export { TaskManifestRepository } from "./manifest-repository.js";
+export {
+  SchedulerStateRepository,
+  type SchedulerCycle,
+} from "./scheduler-repository.js";
 export {
   AgentFlowStore,
   DatabaseRepositories,

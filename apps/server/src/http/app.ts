@@ -8,6 +8,7 @@ import Fastify, {
 import cors from "@fastify/cors";
 import sensible from "@fastify/sensible";
 import fastifyStatic from "@fastify/static";
+import { HandoffManifestService } from "../artifacts/index.js";
 import {
   ensureRuntimeLayout,
   resolveEnvironment,
@@ -21,6 +22,8 @@ import {
   adaptRepositoryPersistence,
   RepositoryService,
 } from "../repositories/index.js";
+import { RecoveryService } from "../recovery/index.js";
+import { BuildCoordinator } from "../orchestration/coordinator.js";
 import { registerErrorHandling } from "./errors.js";
 import type { AgentFlowContext } from "./context.js";
 import { registerBuildRoutes } from "./routes/builds.js";
@@ -50,12 +53,43 @@ export async function buildApp(
   const repositoryService = new RepositoryService(
     adaptRepositoryPersistence(store.repositories),
   );
+  const handoffService = new HandoffManifestService(
+    store,
+    environment.artifactsPath,
+  );
+  const coordinator = new BuildCoordinator({
+    environment,
+    store,
+    repositoryService,
+    handoffService,
+  });
+  const recoveryService = new RecoveryService({
+    store,
+    resolveRepositoryPath: async (repositoryId) =>
+      (await repositoryService.get(repositoryId)).localPath,
+    monitorExistingProcess: (build, task, worker) =>
+      coordinator.monitorExistingProcess(build, task, worker),
+    resumeValidation: (build, task) =>
+      coordinator.resumeValidation(build, task),
+    queueIntegration: (build, task) =>
+      coordinator.queueIntegration(build, task),
+    recoveredIntegration: (build, task) =>
+      coordinator.recoverIntegratedManifest(build, task),
+  });
   const context: AgentFlowContext = {
     environment,
     database,
     store,
     repositoryService,
+    handoffService,
+    recoveryService,
+    coordinator,
   };
+  await recoveryService.reconcileActiveBuilds();
+  const recoveredBuild = store.builds.findActive();
+  if (recoveredBuild?.status === "running") {
+    coordinator.requestTick(recoveredBuild.id);
+  }
   const app = Fastify({
     logger:
       options.logger ??
@@ -130,6 +164,7 @@ export async function buildApp(
   }
 
   app.addHook("onClose", async () => {
+    await coordinator.shutdown();
     if (database.open) {
       database.close();
     }

@@ -440,6 +440,20 @@ export class WorkerRepository {
     return this.getById(id);
   }
 
+  updateProcessId(id: string, processId: number): WorkerEntity {
+    const result = this.database
+      .prepare<{ id: string; processId: number }>(
+        `UPDATE workers
+         SET process_id = @processId
+         WHERE id = @id AND status = 'running'`,
+      )
+      .run({ id, processId });
+    if (result.changes !== 1) {
+      throw new Error(`Worker ${id} is not running`);
+    }
+    return this.getById(id);
+  }
+
   release(
     id: string,
     status: Extract<WorkerStatus, "stopped" | "failed"> = "stopped",
@@ -467,6 +481,39 @@ export class WorkerRepository {
           taskId: worker.taskId,
           type: status === "failed" ? "worker.failed" : "worker.stopped",
           payload: { workerId: id, from: worker.status, to: status },
+          occurredAt,
+        },
+        this.clock,
+      );
+      return this.getById(id);
+    });
+  }
+
+  recycle(id: string, occurredAt = this.clock()): WorkerEntity {
+    return inImmediateTransaction(this.database, () => {
+      const worker = this.getById(id);
+      if (!["stopped", "failed"].includes(worker.status)) {
+        throw new Error(`Worker ${id} must be stopped before it is recycled`);
+      }
+      this.database
+        .prepare<{ id: string; occurredAt: string }>(
+          `UPDATE workers
+           SET task_id = NULL,
+               process_id = NULL,
+               status = 'idle',
+               started_at = NULL,
+               heartbeat_at = @occurredAt,
+               stopped_at = NULL
+           WHERE id = @id AND status IN ('stopped','failed')`,
+        )
+        .run({ id, occurredAt });
+      insertBuildEvent(
+        this.database,
+        {
+          buildId: worker.buildId,
+          taskId: worker.taskId,
+          type: "worker.recycled",
+          payload: { workerId: id, from: worker.status, to: "idle" },
           occurredAt,
         },
         this.clock,
@@ -562,6 +609,62 @@ export class ArtifactRepository {
       )
       .all(buildId)
       .map(mapArtifact);
+  }
+
+  findExact(
+    buildId: string,
+    name: string,
+    version: string,
+  ): ArtifactEntity | undefined {
+    const row = this.database
+      .prepare<[string, string, string], ArtifactRow>(
+        `${ARTIFACT_SELECT}
+         WHERE build_id = ? AND name = ? AND version = ?`,
+      )
+      .get(buildId, name, version);
+    return row === undefined ? undefined : mapArtifact(row);
+  }
+
+  setStatus(
+    id: string,
+    status: ArtifactStatus,
+    occurredAt = this.clock(),
+  ): ArtifactEntity {
+    return inImmediateTransaction(this.database, () => {
+      const artifact = this.getById(id);
+      this.database
+        .prepare<{
+          id: string;
+          status: ArtifactStatus;
+          integratedAt: string | null;
+        }>(
+          `UPDATE artifacts
+           SET status = @status, integrated_at = @integratedAt
+           WHERE id = @id`,
+        )
+        .run({
+          id,
+          status,
+          integratedAt:
+            status === "integrated" ? occurredAt : artifact.integratedAt,
+        });
+      insertBuildEvent(
+        this.database,
+        {
+          buildId: artifact.buildId,
+          taskId: artifact.producerTaskId,
+          type: "artifact.status_changed",
+          payload: {
+            artifactId: id,
+            from: artifact.status,
+            to: status,
+          },
+          occurredAt,
+        },
+        this.clock,
+      );
+      return this.getById(id);
+    });
   }
 }
 
@@ -789,6 +892,17 @@ export class ApprovalRepository {
          ORDER BY requested_at, id`,
       )
       .all(buildId, taskId)
+      .map(mapApproval);
+  }
+
+  listForBuild(buildId: string): ApprovalEntity[] {
+    return this.database
+      .prepare<[string], ApprovalRow>(
+        `${APPROVAL_SELECT}
+         WHERE build_id = ?
+         ORDER BY requested_at, id`,
+      )
+      .all(buildId)
       .map(mapApproval);
   }
 

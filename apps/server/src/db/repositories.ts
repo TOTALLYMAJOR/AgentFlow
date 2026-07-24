@@ -4,8 +4,10 @@ import {
   type BuildTransitionOptions,
 } from "./build-repository.js";
 import { BuildEventRepository } from "./event-repository.js";
+import { TaskManifestRepository } from "./manifest-repository.js";
 import { PlanRepository } from "./plan-repository.js";
 import { RepositoryRepository } from "./repository-repository.js";
+import { SchedulerStateRepository } from "./scheduler-repository.js";
 import {
   ApprovalRepository,
   ArtifactRepository,
@@ -45,6 +47,8 @@ export class DatabaseRepositories {
   readonly validations: ValidationRunRepository;
   readonly approvals: ApprovalRepository;
   readonly events: BuildEventRepository;
+  readonly manifests: TaskManifestRepository;
+  readonly scheduler: SchedulerStateRepository;
 
   constructor(
     readonly database: Database.Database,
@@ -59,6 +63,8 @@ export class DatabaseRepositories {
     this.validations = new ValidationRunRepository(database, clock);
     this.approvals = new ApprovalRepository(database, clock);
     this.events = new BuildEventRepository(database, clock);
+    this.manifests = new TaskManifestRepository(database, clock);
+    this.scheduler = new SchedulerStateRepository(database, clock);
   }
 
   transaction<T>(operation: (repositories: DatabaseRepositories) => T): T {

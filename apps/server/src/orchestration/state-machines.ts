@@ -13,9 +13,9 @@ const buildTransitions: Readonly<Record<BuildStatus, readonly BuildStatus[]>> = 
 };
 
 const taskTransitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
-  pending: ["blocked", "ready", "cancelled", "blocked_failed"],
-  blocked: ["ready", "cancelled", "blocked_failed"],
-  ready: ["running", "cancelled"],
+  pending: ["blocked", "ready", "failed", "cancelled", "blocked_failed"],
+  blocked: ["ready", "failed", "cancelled", "blocked_failed"],
+  ready: ["running", "failed", "cancelled"],
   running: ["validating", "failed", "cancelled", "interrupted"],
   validating: ["validated", "failed", "cancelled", "interrupted"],
   validated: ["integrating", "failed", "cancelled"],
