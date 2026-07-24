@@ -1,8 +1,19 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
+import {
+  access,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  unlink,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Command } from "commander";
 import {
@@ -14,15 +25,17 @@ import {
   getDatabaseDiagnostics,
   openDatabase,
 } from "./db/index.js";
+import { GitWorktreeManager } from "./git/index.js";
 import { buildApp } from "./http/app.js";
 
 const execFileAsync = promisify(execFile);
+const installation = await locateAgentFlowInstallation();
 const program = new Command();
 
 program
   .name("agentflow")
   .description("Local-first control plane for parallel Codex engineering")
-  .version("0.3.0");
+  .version(installation.version);
 
 program
   .command("serve")
@@ -46,14 +59,19 @@ program
           available: await commandAvailable(command),
         })),
       );
+      const installedContent = await inspectInstalledContent(installation.root);
       printJson({
         ok:
           diagnostics.ok &&
-          commands.find(({ command }) => command === "git")?.available === true,
+          commands.find(({ command }) => command === "git")?.available ===
+            true &&
+          installedContent.ok,
+        version: installation.version,
         binding: `http://${environment.host}:${environment.port}`,
         home: environment.home,
         database: diagnostics,
         commands,
+        installedContent,
         notes: [
           "Codex and Docker are optional until a build requires them.",
           "AgentFlow never binds to an external network interface.",
@@ -194,6 +212,57 @@ program
     );
   });
 
+const worktrees = program
+  .command("worktrees")
+  .description("Inspect or safely clean AgentFlow-managed Git worktrees");
+
+worktrees
+  .command("list")
+  .argument("<build-id>")
+  .description("Reconcile the expected integration and task worktrees")
+  .action(async (buildId: string) => {
+    const { build, manager } = await managerForBuild(buildId);
+    printJson(
+      await manager.reconcileBuild(
+        build.tasks.map((task) => ({
+          taskId: task.id,
+          ...(task.baseCommit === null ? {} : { baseCommit: task.baseCommit }),
+        })),
+        build.baseCommit,
+      ),
+    );
+  });
+
+worktrees
+  .command("clean")
+  .argument("<build-id>")
+  .option(
+    "--force",
+    "allow active-build cleanup and removal of dirty managed worktrees",
+  )
+  .description("Remove managed worktrees while preserving their branches")
+  .action(async (buildId: string, options: { force?: boolean }) => {
+    const { build, manager } = await managerForBuild(buildId);
+    const force = options.force === true;
+    if (
+      ["planning", "ready", "running", "paused", "interrupted"].includes(
+        build.status,
+      ) &&
+      !force
+    ) {
+      throw new Error(
+        `Build ${buildId} is ${build.status}; pass --force only after confirming no worker is running`,
+      );
+    }
+    printJson({
+      buildId,
+      removals: await manager.cleanBuildWorktrees(
+        build.tasks.map((task) => task.id),
+        force,
+      ),
+    });
+  });
+
 program
   .command("backup")
   .description("Create and integrity-check an online SQLite backup")
@@ -220,6 +289,7 @@ service
   .action(async () => {
     const paths = await installUserService();
     await runSystemctl(["daemon-reload"]);
+    await runSystemctl(["enable", "agentflow.service"]);
     printJson(paths);
   });
 
@@ -240,15 +310,22 @@ for (const action of ["start", "stop", "status"] as const) {
 
 program
   .command("upgrade")
+  .argument("[package-specifier]", "reviewed npm package, file, or URL to install")
   .description("Upgrade the globally installed AgentFlow npm package")
-  .action(async () => {
-    await runForeground("npm", ["install", "--global", "agentflow@latest"]);
+  .action(async (packageSpecifier?: string) => {
+    if (packageSpecifier === undefined) {
+      throw new Error(
+        "Registry upgrades require a published AgentFlow release. Pass a reviewed local tarball or explicit package specifier; for example: agentflow upgrade /absolute/path/agentflow-0.3.0.tgz",
+      );
+    }
+    await runForeground("npm", ["install", "--global", packageSpecifier]);
   });
 
 program
   .command("uninstall")
   .description("Uninstall the executable while preserving runtime data")
   .action(async () => {
+    await removeUserService();
     process.stdout.write(
       "Runtime data and worktrees will be preserved under AGENTFLOW_HOME.\n",
     );
@@ -300,7 +377,7 @@ async function commandAvailable(command: string): Promise<boolean> {
       continue;
     }
     try {
-      await access(path.join(entry, command));
+      await access(path.join(entry, command), fsConstants.X_OK);
       return true;
     } catch {
       // Continue searching PATH entries.
@@ -314,28 +391,34 @@ async function installUserService(): Promise<{
   environmentPath: string;
 }> {
   const environment = resolveEnvironment();
-  const userConfig = path.join(homedir(), ".config", "agentflow");
-  const systemdDirectory = path.join(homedir(), ".config", "systemd", "user");
+  const configRoot = resolveUserConfigRoot();
+  const userConfig = path.join(configRoot, "agentflow");
+  const systemdConfig = path.join(configRoot, "systemd");
+  const systemdDirectory = path.join(systemdConfig, "user");
   const environmentPath = path.join(userConfig, "environment");
   const unitPath = path.join(systemdDirectory, "agentflow.service");
-  await Promise.all([
-    mkdir(userConfig, { recursive: true, mode: 0o700 }),
-    mkdir(systemdDirectory, { recursive: true, mode: 0o700 }),
-  ]);
-  await writeFile(
+  await ensureServiceDirectory(userConfig);
+  await ensureServiceDirectory(systemdConfig);
+  await ensureServiceDirectory(systemdDirectory);
+  await writeServiceFileAtomic(
     environmentPath,
     [
-      `AGENTFLOW_HOME=${systemdEscapeEnvironment(environment.home)}`,
-      `AGENTFLOW_HOST=${environment.host}`,
-      `AGENTFLOW_PORT=${environment.port}`,
+      environmentFileAssignment("AGENTFLOW_HOME", environment.home),
+      environmentFileAssignment("AGENTFLOW_HOST", environment.host),
+      environmentFileAssignment("AGENTFLOW_PORT", String(environment.port)),
+      environmentFileAssignment("AGENTFLOW_LOG_LEVEL", environment.logLevel),
+      environmentFileAssignment("AGENTFLOW_CODEX_BIN", environment.codexBinary),
+      environmentFileAssignment(
+        "AGENTFLOW_WORKER_TIMEOUT_MS",
+        String(environment.workerTimeoutMs),
+      ),
       "",
     ].join("\n"),
-    { encoding: "utf8", mode: 0o600 },
+    0o600,
   );
-  await chmod(environmentPath, 0o600);
 
   const cliPath = path.resolve(process.argv[1] ?? "agentflow");
-  await writeFile(
+  await writeServiceFileAtomic(
     unitPath,
     [
       "[Unit]",
@@ -344,8 +427,8 @@ async function installUserService(): Promise<{
       "",
       "[Service]",
       "Type=simple",
-      `EnvironmentFile=${systemdEscapeUnit(environmentPath)}`,
-      `ExecStart=${systemdEscapeUnit(process.execPath)} ${systemdEscapeUnit(cliPath)} serve`,
+      `EnvironmentFile=${systemdQuote(environmentPath)}`,
+      `ExecStart=${systemdQuote(process.execPath)} ${systemdQuote(cliPath)} serve`,
       "Restart=on-failure",
       "RestartSec=3",
       "",
@@ -353,9 +436,44 @@ async function installUserService(): Promise<{
       "WantedBy=default.target",
       "",
     ].join("\n"),
-    { encoding: "utf8", mode: 0o644 },
+    0o644,
   );
   return { unitPath, environmentPath };
+}
+
+async function removeUserService(): Promise<void> {
+  const configRoot = resolveUserConfigRoot();
+  const environmentPath = path.join(configRoot, "agentflow", "environment");
+  const unitPath = path.join(configRoot, "systemd", "user", "agentflow.service");
+  const unitExists = await fileExists(unitPath);
+  if (unitExists) {
+    if (!(await commandAvailable("systemctl"))) {
+      throw new Error(
+        `Refusing to uninstall while ${unitPath} exists because systemctl is unavailable. Stop and disable agentflow.service, then retry.`,
+      );
+    }
+    try {
+      await runSystemctl(["disable", "--now", "agentflow.service"]);
+    } catch (error) {
+      throw new Error(
+        "Refusing to remove AgentFlow because the user service could not be stopped and disabled",
+        { cause: error },
+      );
+    }
+  }
+  await Promise.all([
+    unlink(unitPath).catch(ignoreMissingFile),
+    unlink(environmentPath).catch(ignoreMissingFile),
+  ]);
+  if (unitExists && (await commandAvailable("systemctl"))) {
+    try {
+      await runSystemctl(["daemon-reload"]);
+    } catch (error) {
+      process.stderr.write(
+        `Warning: unable to reload user services: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  }
 }
 
 async function runSystemctl(
@@ -378,12 +496,89 @@ async function runForeground(
   process.stderr.write(result.stderr);
 }
 
-function systemdEscapeEnvironment(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll("\n", "");
+function resolveUserConfigRoot(): string {
+  const xdgConfig = process.env.XDG_CONFIG_HOME?.trim();
+  if (xdgConfig !== undefined && xdgConfig.length > 0) {
+    if (!path.isAbsolute(xdgConfig)) {
+      throw new Error("XDG_CONFIG_HOME must be an absolute path");
+    }
+    return path.resolve(xdgConfig);
+  }
+  return path.join(homedir(), ".config");
 }
 
-function systemdEscapeUnit(value: string): string {
-  return value.replaceAll("%", "%%").replaceAll(" ", "\\x20");
+async function ensureServiceDirectory(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const details = await lstat(directory);
+  if (details.isSymbolicLink() || !details.isDirectory()) {
+    throw new Error(
+      `Refusing unsafe service configuration directory: ${directory}`,
+    );
+  }
+}
+
+async function writeServiceFileAtomic(
+  filename: string,
+  contents: string,
+  mode: 0o600 | 0o644,
+): Promise<void> {
+  await assertSafeServiceFileTarget(filename);
+  const temporaryPath = path.join(
+    path.dirname(filename),
+    `.${path.basename(filename)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(temporaryPath, "wx", mode);
+    await handle.chmod(mode);
+    await handle.writeFile(contents, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+
+    // Re-check immediately before rename. rename replaces a directory entry
+    // atomically rather than following a destination symlink.
+    await assertSafeServiceFileTarget(filename);
+    await rename(temporaryPath, filename);
+  } finally {
+    if (handle !== undefined) {
+      await handle.close().catch(() => undefined);
+    }
+    await unlink(temporaryPath).catch(ignoreMissingFile);
+  }
+}
+
+async function assertSafeServiceFileTarget(filename: string): Promise<void> {
+  try {
+    const details = await lstat(filename);
+    if (details.isSymbolicLink()) {
+      throw new Error(`Refusing to replace service symlink: ${filename}`);
+    }
+    if (!details.isFile()) {
+      throw new Error(`Refusing to replace non-file service path: ${filename}`);
+    }
+  } catch (error) {
+    if (!isMissingFile(error)) {
+      throw error;
+    }
+  }
+}
+
+function environmentFileAssignment(name: string, value: string): string {
+  if (/[\r\n\0]/.test(value)) {
+    throw new Error(`${name} contains a character unsafe for systemd`);
+  }
+  return `${name}="${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
+function systemdQuote(value: string): string {
+  if (/[\r\n\0]/.test(value)) {
+    throw new Error("A systemd unit path contains an unsafe character");
+  }
+  return `"${value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("%", "%%")}"`;
 }
 
 function printJson(value: unknown): void {
@@ -394,6 +589,155 @@ function capitalize(value: string): string {
   return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
 }
 
-// Keep a tiny read dependency here so packagers retain docs referenced by the
-// CLI's installed help without executing or mutating them.
-void readFile;
+interface CliBuild {
+  id: string;
+  repositoryId: string;
+  baseCommit: string;
+  status: string;
+  tasks: Array<{
+    id: string;
+    baseCommit: string | null;
+  }>;
+}
+
+interface CliRepository {
+  id: string;
+  localPath: string;
+}
+
+async function managerForBuild(buildId: string): Promise<{
+  build: CliBuild;
+  manager: GitWorktreeManager;
+}> {
+  const build = await callApi<CliBuild>(
+    "GET",
+    `/api/builds/${encodeURIComponent(buildId)}`,
+  );
+  const repository = await callApi<CliRepository>(
+    "GET",
+    `/api/repositories/${encodeURIComponent(build.repositoryId)}`,
+  );
+  const environment = resolveEnvironment();
+  await ensureRuntimeLayout(environment);
+  return {
+    build,
+    manager: await GitWorktreeManager.create({
+      repositoryRoot: repository.localPath,
+      worktreesRoot: environment.worktreesPath,
+      repositoryId: repository.id,
+      buildId,
+    }),
+  };
+}
+
+async function locateAgentFlowInstallation(): Promise<{
+  root: string;
+  version: string;
+}> {
+  let directory = path.dirname(fileURLToPath(import.meta.url));
+  for (let depth = 0; depth < 8; depth += 1) {
+    const metadataPath = path.join(directory, "package.json");
+    try {
+      const metadata = JSON.parse(await readFile(metadataPath, "utf8")) as {
+        name?: unknown;
+        version?: unknown;
+      };
+      if (
+        metadata.name === "agentflow" &&
+        typeof metadata.version === "string"
+      ) {
+        return { root: directory, version: metadata.version };
+      }
+    } catch (error) {
+      if (!isMissingFile(error)) {
+        throw error;
+      }
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) {
+      break;
+    }
+    directory = parent;
+  }
+  throw new Error("Unable to locate the installed AgentFlow package metadata");
+}
+
+async function inspectInstalledContent(packageRoot: string): Promise<{
+  ok: boolean;
+  checks: Array<{
+    path: string;
+    present: boolean;
+    sha256?: string;
+    expectedSha256?: string;
+    checksumMatches?: boolean;
+  }>;
+}> {
+  const required = [
+    "dist/web/index.html",
+    "dist/migrations/manifest.json",
+    "docs/architecture/SPEC-1-AgentFlow-Local-Agentic-Engineering-Platform.md",
+    "docs/implementation/AgentFlow-Codex-Implementation-Prompts.md",
+    "examples/.agentflow.yaml",
+    "examples/BACKLOG.md",
+  ];
+  const expectedHashes = new Map([
+    [
+      "docs/architecture/SPEC-1-AgentFlow-Local-Agentic-Engineering-Platform.md",
+      "341dac47141bfcd67a4d373e1bcfd22be4357f9676d7f4cabec86e3d14c19fad",
+    ],
+    [
+      "docs/implementation/AgentFlow-Codex-Implementation-Prompts.md",
+      "93114c0040f8bebc0278fe253744193db60fe854908e7447760f42b4bad7c3bd",
+    ],
+  ]);
+  const checks = await Promise.all(
+    required.map(async (relativePath) => {
+      const absolutePath = path.join(packageRoot, relativePath);
+      const present = await fileExists(absolutePath);
+      const expectedSha256 = expectedHashes.get(relativePath);
+      if (!present || expectedSha256 === undefined) {
+        return { path: relativePath, present };
+      }
+      const sha256 = createHash("sha256")
+        .update(await readFile(absolutePath))
+        .digest("hex");
+      return {
+        path: relativePath,
+        present,
+        sha256,
+        expectedSha256,
+        checksumMatches: sha256 === expectedSha256,
+      };
+    }),
+  );
+  return {
+    ok: checks.every(
+      ({ present, checksumMatches }) =>
+        present && checksumMatches !== false,
+    ),
+    checks,
+  };
+}
+
+async function fileExists(filename: string): Promise<boolean> {
+  try {
+    await access(filename);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ignoreMissingFile(error: unknown): void {
+  if (!isMissingFile(error)) {
+    throw error;
+  }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}

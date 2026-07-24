@@ -25,6 +25,7 @@ must remain bound to `127.0.0.1`.
 ## Install from a release tarball
 
 ```bash
+sha256sum --check SHA256SUMS
 npm install --global ./agentflow-0.3.0.tgz
 agentflow doctor
 agentflow serve
@@ -34,6 +35,11 @@ Open `http://127.0.0.1:4782`.
 
 Runtime state is written to `$AGENTFLOW_HOME` when it is set. The default is
 `~/.agentflow`.
+
+The package installs the built dashboard, exported SQL migrations, examples,
+the supplied architecture specification, and the complete supplied
+implementation prompt suite. No external download is required to read those
+contracts after installation.
 
 ## Develop from source
 
@@ -56,6 +62,20 @@ npm run build
 npm start
 ```
 
+Create the deterministic npm tarball, source ZIP, release manifest, and SHA-256
+checksums from a clean Git tree:
+
+```bash
+npm run pack:release
+```
+
+Verify a tarball through a clean isolated npm prefix without changing the
+machine-wide installation:
+
+```bash
+npm run smoke:install -- ./release/agentflow-0.3.0.tgz
+```
+
 ## First repository
 
 ```bash
@@ -70,6 +90,16 @@ agentflow status
 `repo init` creates `.agentflow.yaml` only when it is missing. `repo remove`
 deletes registry metadata only. AgentFlow never deletes a registered source
 repository.
+
+Managed worktrees can be reconciled or explicitly cleaned without deleting
+their branches:
+
+```bash
+agentflow worktrees list <build-id>
+agentflow worktrees clean <build-id>
+```
+
+Cleaning an active build or a dirty managed worktree requires `--force`.
 
 See:
 

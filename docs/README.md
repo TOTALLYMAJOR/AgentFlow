@@ -9,3 +9,7 @@ installation guidance, and repository templates remain available offline.
 - `TROUBLESHOOTING.md` records verified recovery steps.
 - `SECURITY.md` defines the local trust boundary.
 - `ASSUMPTIONS.md` resolves protocol gaps in the source specification.
+
+Release packages also include checksummed SQL migration files under
+`dist/migrations/`, the built dashboard under `dist/web/`, and repository
+templates under `examples/`.

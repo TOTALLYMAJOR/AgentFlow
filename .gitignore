@@ -2,6 +2,10 @@ node_modules/
 dist/
 apps/web/dist/
 coverage/
+output/
+.playwright-cli/
+release/
+.agentflow-release-stage-*/
 *.tgz
 *.zip
 *.log
