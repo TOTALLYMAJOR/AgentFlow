@@ -1,5 +1,11 @@
-import { Button, Flash, SkeletonBox } from "@primer/react";
-import { PauseIcon, PlayIcon } from "@phosphor-icons/react";
+import { useState } from "react";
+import { Button, Flash } from "@primer/react";
+import {
+  ArrowClockwiseIcon,
+  PauseIcon,
+  PlayIcon,
+} from "@phosphor-icons/react";
+import type { Icon } from "@phosphor-icons/react";
 import useSWR from "swr";
 import { apiFetch, postJson } from "../api/client.js";
 import type {
@@ -8,6 +14,7 @@ import type {
   RepositorySummary,
 } from "../api/types.js";
 import { EmptyState } from "../components/EmptyState.js";
+import { LoadingState } from "../components/LoadingState.js";
 import { Metric } from "../components/Metric.js";
 import { PageTitle } from "../components/PageTitle.js";
 import { StatusBadge } from "../components/StatusBadge.js";
@@ -15,6 +22,15 @@ import { useBuildEvents } from "../hooks/use-build-events.js";
 
 interface OverviewScreenProps {
   onNavigateRepositories: () => void;
+}
+
+type OverviewBuildAction = "start" | "pause" | "resume";
+
+interface OverviewBuildControl {
+  action: OverviewBuildAction;
+  label: string;
+  pendingLabel: string;
+  icon: Icon;
 }
 
 export function OverviewScreen({
@@ -37,17 +53,35 @@ export function OverviewScreen({
       ),
     ) ?? null;
   const stream = useBuildEvents(activeBuild?.id ?? null);
+  const [controlPending, setControlPending] = useState(false);
+  const [controlError, setControlError] = useState<string | null>(null);
+  const buildControl = getBuildControl(activeBuild?.status ?? null);
 
-  async function toggleBuild(): Promise<void> {
+  async function controlBuild(action: OverviewBuildAction): Promise<void> {
     if (activeBuild === null) {
       return;
     }
-    const action = activeBuild.status === "paused" ? "resume" : "pause";
-    await postJson(`/api/builds/${activeBuild.id}/${action}`);
-    await builds.mutate();
+    setControlPending(true);
+    setControlError(null);
+    try {
+      await postJson(`/api/builds/${activeBuild.id}/${action}`);
+      await builds.mutate();
+    } catch (cause) {
+      setControlError(
+        cause instanceof Error
+          ? cause.message
+          : `The ${action} action could not be confirmed.`,
+      );
+    } finally {
+      setControlPending(false);
+    }
   }
 
-  if (health.error !== undefined || builds.error !== undefined) {
+  if (
+    health.error !== undefined ||
+    builds.error !== undefined ||
+    repositories.error !== undefined
+  ) {
     return (
       <Flash variant="danger">
         AgentFlow could not load local system state. The API remains the source
@@ -62,18 +96,25 @@ export function OverviewScreen({
         title="Engineering control plane"
         description="Plan dependency-aware work, supervise isolated agents, and integrate only validated changes."
         actions={
-          activeBuild === null ? null : (
+          activeBuild === null || buildControl === null ? null : (
             <Button
-              leadingVisual={
-                activeBuild.status === "paused" ? PlayIcon : PauseIcon
-              }
-              onClick={() => void toggleBuild()}
+              leadingVisual={buildControl.icon}
+              disabled={controlPending}
+              onClick={() => {
+                void controlBuild(buildControl.action);
+              }}
             >
-              {activeBuild.status === "paused" ? "Resume" : "Pause"}
+              {controlPending ? buildControl.pendingLabel : buildControl.label}
             </Button>
           )
         }
       />
+
+      {controlError === null ? null : (
+        <Flash variant="danger" className="spaced-flash" role="alert">
+          {controlError}
+        </Flash>
+      )}
 
       <section className="metrics-grid" aria-label="System summary">
         <Metric
@@ -83,23 +124,35 @@ export function OverviewScreen({
         />
         <Metric
           label="Repositories"
-          value={String(repositories.data?.length ?? 0)}
+          value={
+            repositories.data === undefined
+              ? "checking"
+              : String(repositories.data.length)
+          }
           detail="registered locally"
         />
         <Metric
           label="Active build"
-          value={activeBuild?.status ?? "none"}
+          value={
+            builds.data === undefined ? "checking" : (activeBuild?.status ?? "none")
+          }
           detail={activeBuild?.integrationBranch ?? "one build maximum"}
         />
         <Metric
           label="Event stream"
-          value={stream.connected ? "live" : "idle"}
+          value={
+            builds.data === undefined
+              ? "checking"
+              : stream.connected
+                ? "live"
+                : "idle"
+          }
           detail={`${stream.events.length} recent events`}
         />
       </section>
 
-      {builds.isLoading ? (
-        <SkeletonBox height="240px" width="100%" />
+      {builds.isLoading || health.isLoading || repositories.isLoading ? (
+        <LoadingState label="Loading system overview" height="240px" />
       ) : activeBuild === null ? (
         <EmptyState
           title="No build is active"
@@ -134,4 +187,33 @@ export function OverviewScreen({
       )}
     </>
   );
+}
+
+function getBuildControl(status: string | null): OverviewBuildControl | null {
+  switch (status) {
+    case "ready":
+      return {
+        action: "start",
+        label: "Start",
+        pendingLabel: "Starting…",
+        icon: PlayIcon,
+      };
+    case "running":
+      return {
+        action: "pause",
+        label: "Pause",
+        pendingLabel: "Pausing…",
+        icon: PauseIcon,
+      };
+    case "paused":
+    case "interrupted":
+      return {
+        action: "resume",
+        label: "Resume",
+        pendingLabel: "Resuming…",
+        icon: ArrowClockwiseIcon,
+      };
+    default:
+      return null;
+  }
 }

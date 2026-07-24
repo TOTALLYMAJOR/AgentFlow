@@ -20,6 +20,7 @@ export function useBuildEvents(buildId: string | null): BuildEventsState {
       return;
     }
 
+    setState({ events: [], connected: false });
     const stream = new EventSource(`/api/builds/${buildId}/events/stream`);
     const handleOpen = (): void => {
       setState((current) => ({ ...current, connected: true }));
@@ -29,7 +30,14 @@ export function useBuildEvents(buildId: string | null): BuildEventsState {
         const event = JSON.parse(message.data) as BuildEvent;
         setState((current) => ({
           connected: true,
-          events: [...current.events, event].slice(-MAX_EVENTS),
+          events: [
+            ...current.events.filter(
+              (candidate) => candidate.sequence !== event.sequence,
+            ),
+            event,
+          ]
+            .sort((first, second) => first.sequence - second.sequence)
+            .slice(-MAX_EVENTS),
         }));
       } catch {
         // The raw server event remains durable. Ignore only malformed UI data.

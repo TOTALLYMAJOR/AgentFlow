@@ -35,7 +35,16 @@ export function App(): React.JSX.Element {
             />
           ) : null}
           {screen === "repositories" ? <RepositoriesScreen /> : null}
-          {screen === "planner" ? <PlannerScreen /> : null}
+          {screen === "planner" ? (
+            <PlannerScreen
+              onNavigateRepositories={() => {
+                setScreen("repositories");
+              }}
+              onBuildStarted={() => {
+                setScreen("build");
+              }}
+            />
+          ) : null}
           {screen === "build" ? <BuildScreen /> : null}
           {screen === "results" ? <ResultsScreen /> : null}
         </Suspense>

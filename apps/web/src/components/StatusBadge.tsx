@@ -4,7 +4,18 @@ interface StatusBadgeProps {
   status: string;
 }
 
-const successStatuses = new Set(["ok", "ready", "validated", "integrated", "completed"]);
+const successStatuses = new Set([
+  "ok",
+  "ready",
+  "validated",
+  "integrated",
+  "completed",
+  "passed",
+  "approved",
+  "produced",
+  "within ownership",
+  "succeeded",
+]);
 const attentionStatuses = new Set([
   "planning",
   "running",
@@ -12,8 +23,22 @@ const attentionStatuses = new Set([
   "integrating",
   "paused",
   "interrupted",
+  "recovering",
+  "pending",
+  "queued",
+  "starting",
+  "awaiting_approval",
 ]);
-const dangerStatuses = new Set(["failed", "blocked_failed", "invalid", "unavailable"]);
+const dangerStatuses = new Set([
+  "failed",
+  "blocked_failed",
+  "invalid",
+  "unavailable",
+  "violation",
+  "conflict",
+  "rejected",
+  "timed_out",
+]);
 
 export function StatusBadge({ status }: StatusBadgeProps): React.JSX.Element {
   const variant = successStatuses.has(status)

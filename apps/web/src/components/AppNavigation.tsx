@@ -49,6 +49,8 @@ export function AppNavigation({
               type="button"
               className={active === id ? "nav-button is-active" : "nav-button"}
               aria-current={active === id ? "page" : undefined}
+              aria-label={label}
+              title={label}
               onClick={() => {
                 onNavigate(id);
               }}
