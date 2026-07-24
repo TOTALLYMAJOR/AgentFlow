@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node", "vitest/globals"],
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": [
+    "apps/server/src/**/*.ts",
+    "apps/server/test/**/*.ts",
+    "tests/**/*.ts",
+    "scripts/**/*.mjs",
+    "vitest.config.ts",
+    "vitest.integration.config.ts"
+  ]
+}

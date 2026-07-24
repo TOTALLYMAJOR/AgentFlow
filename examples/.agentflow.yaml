@@ -1,0 +1,36 @@
+version: 1
+
+repository:
+  name: example-service
+  base_branch: main
+
+backlog:
+  path: BACKLOG.md
+
+workers:
+  maximum: 4
+
+contracts:
+  roots:
+    - contracts/
+    - packages/contracts/
+
+validation:
+  task_default:
+    - npm run lint
+    - npm run typecheck
+  integration:
+    - npm run lint
+    - npm run typecheck
+    - npm test
+    - npm run build
+
+docker:
+  enabled: false
+  compose_file: compose.yaml
+
+git:
+  remote: origin
+  push_task_branches: false
+  push_integration_branch: false
+  open_integration_pull_request: false

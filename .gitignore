@@ -1,0 +1,9 @@
+node_modules/
+dist/
+apps/web/dist/
+coverage/
+*.tgz
+*.zip
+*.log
+.agentflow-dev/
+.DS_Store
