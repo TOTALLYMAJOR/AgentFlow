@@ -192,13 +192,24 @@ describe("IntegrationManager", () => {
       },
     };
     const manager = createIntegrationManager(fixture, runner);
+    let evidencePersistedBeforeFailure = false;
 
-    const result = await manager.integrate({ taskId: "BL-301" });
+    const result = await manager.integrate({
+      taskId: "BL-301",
+      onValidationCompleted(validation) {
+        expect(validation.status).toBe("failed");
+        expect(fixture.store.tasks.getById("BL-301").state).toBe(
+          "integrating",
+        );
+        evidencePersistedBeforeFailure = true;
+      },
+    });
 
     expect(result).toMatchObject({
       status: "validation_failed",
       errorCode: "INTEGRATION_VALIDATION_FAILED",
     });
+    expect(evidencePersistedBeforeFailure).toBe(true);
     expect(await gitOutput(fixture.integrationPath, ["rev-parse", "HEAD"])).toBe(
       result.previousHead,
     );
@@ -222,6 +233,35 @@ describe("IntegrationManager", () => {
     expect(fixture.store.tasks.getById("BL-301")).toMatchObject({
       state: "failed",
       errorCode: "INTEGRATION_VALIDATION_FAILED",
+    });
+  });
+
+  it("rolls back when durable integration evidence cannot be persisted", async () => {
+    const fixture = await createFixture("evidence-failure", [
+      { id: "BL-302", files: { "evidence.txt": "must not integrate\n" } },
+    ]);
+    const manager = createIntegrationManager(fixture, passingRunner());
+
+    const result = await manager.integrate({
+      taskId: "BL-302",
+      onValidationCompleted() {
+        throw new Error("evidence store unavailable");
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "persistence_failed",
+      errorCode: "INTEGRATION_EVIDENCE_PERSISTENCE_FAILED",
+    });
+    expect(await gitOutput(fixture.integrationPath, ["rev-parse", "HEAD"])).toBe(
+      result.previousHead,
+    );
+    await expect(
+      access(path.join(fixture.integrationPath, "evidence.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(fixture.store.tasks.getById("BL-302")).toMatchObject({
+      state: "failed",
+      errorCode: "INTEGRATION_EVIDENCE_PERSISTENCE_FAILED",
     });
   });
 
@@ -377,6 +417,79 @@ describe("IntegrationManager", () => {
         "refs/heads/agent-integration/build-test",
       ]),
     ).toBe(result.integrationCommit);
+  });
+
+  it("rolls back a cancelled integration and does not push either branch", async () => {
+    const fixture = await createFixture("cancelled", [
+      { id: "BL-701", files: { "cancelled.txt": "must be rolled back\n" } },
+    ]);
+    const remote = path.join(fixture.root, "remote.git");
+    await git(fixture.root, ["init", "--bare", remote]);
+    await git(fixture.repository, ["remote", "add", "origin", remote]);
+    const validationStarted = deferredSignal();
+    const controller = new AbortController();
+    const runner: IntegrationValidationRunner = {
+      async run(request) {
+        validationStarted.resolve();
+        await new Promise<void>((resolve) => {
+          if (request.signal?.aborted === true) {
+            resolve();
+            return;
+          }
+          request.signal?.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+        return summary("cancelled", "integration validation was cancelled");
+      },
+    };
+    const manager = createIntegrationManager(fixture, runner);
+
+    const integration = manager.integrate({
+      taskId: "BL-701",
+      signal: controller.signal,
+      push: {
+        remote: "origin",
+        taskBranch: true,
+        integrationBranch: true,
+      },
+    });
+    await validationStarted.promise;
+    controller.abort();
+    const result = await integration;
+
+    expect(result).toMatchObject({
+      status: "cancelled",
+      errorCode: "INTEGRATION_CANCELLED",
+      mergePerformed: true,
+      pushes: {
+        task: { attempted: false },
+        integration: { attempted: false },
+      },
+    });
+    expect(await gitOutput(fixture.integrationPath, ["rev-parse", "HEAD"])).toBe(
+      result.previousHead,
+    );
+    expect(
+      await gitOutput(fixture.integrationPath, [
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+      ]),
+    ).toBe("");
+    await expect(
+      access(path.join(fixture.integrationPath, "cancelled.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(fixture.store.tasks.getById("BL-701")).toMatchObject({
+      state: "cancelled",
+      errorCode: "INTEGRATION_CANCELLED",
+    });
+    const remoteReferences = await execFileAsync(
+      "git",
+      ["ls-remote", "--heads", remote],
+      { encoding: "utf8" },
+    );
+    expect(remoteReferences.stdout.trim()).toBe("");
   });
 });
 

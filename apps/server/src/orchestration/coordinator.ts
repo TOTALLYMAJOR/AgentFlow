@@ -1,4 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   BuildEntity,
@@ -42,6 +44,7 @@ import {
   type WorkerRuntimeEvent,
 } from "../workers/index.js";
 import { createId } from "../util/ids.js";
+import { AgentFlowError } from "../http/errors.js";
 import { scheduleTasks, type SchedulingTask } from "./scheduler.js";
 import { TaskCommitService } from "./task-commit.js";
 
@@ -73,6 +76,7 @@ export class BuildCoordinator {
   private readonly tickRequested = new Set<string>();
   private readonly tickOperations = new Map<string, Promise<void>>();
   private readonly taskOperations = new Map<string, Promise<void>>();
+  private readonly taskAbortControllers = new Map<string, AbortController>();
   private readonly shuttingDownTasks = new Set<string>();
   private readonly monitorTimers = new Map<string, NodeJS.Timeout>();
   private closed = false;
@@ -109,6 +113,18 @@ export class BuildCoordinator {
       throw new Error(`Build ${buildId} cannot resume from ${build.status}`);
     }
     await this.ensureRuntime(build);
+    for (const task of this.store.tasks.listForBuild(buildId)) {
+      if (
+        task.state === "integrated" &&
+        this.store.manifests.findForTask(
+          task.id,
+          "integrated",
+          task.attempt,
+        ) === undefined
+      ) {
+        await this.recoverIntegratedManifest(build, task);
+      }
+    }
     const running = this.store.builds.transition(buildId, "running", {
       eventType: "build.resumed",
     });
@@ -120,6 +136,9 @@ export class BuildCoordinator {
     const build = this.store.builds.transition(buildId, "cancelled", {
       eventType: "build.cancelled",
     });
+    for (const task of this.store.tasks.listForBuild(buildId)) {
+      this.taskAbortControllers.get(task.id)?.abort();
+    }
     for (const active of this.activeWorkers.values()) {
       if (active.buildId === buildId) {
         active.handle.cancel();
@@ -136,9 +155,6 @@ export class BuildCoordinator {
       ) {
         continue;
       }
-      if (task.state === "integrating") {
-        continue;
-      }
       this.store.tasks.transition(task.id, "cancelled", {
         eventType: "task.cancelled",
       });
@@ -146,28 +162,144 @@ export class BuildCoordinator {
     return build;
   }
 
-  retry(buildId: string, taskId: string): TaskEntity {
+  async retry(buildId: string, taskId: string): Promise<TaskEntity> {
     const task = this.store.tasks.getById(taskId);
     if (task.buildId !== buildId) {
       throw new Error(`Task ${taskId} does not belong to build ${buildId}`);
     }
-    const retried = this.store.tasks.retry(taskId);
+    if (
+      this.taskOperations.has(taskId) ||
+      this.taskAbortControllers.has(taskId) ||
+      this.dispatching.has(taskId) ||
+      this.activeWorkers.has(taskId)
+    ) {
+      throw new AgentFlowError(
+        "TASK_OPERATION_IN_PROGRESS",
+        `Task ${taskId} still has an active execution operation`,
+        409,
+      );
+    }
+    if (!["failed", "blocked_failed", "interrupted"].includes(task.state)) {
+      throw new AgentFlowError(
+        "TASK_NOT_RETRYABLE",
+        `Task ${taskId} cannot be retried from ${task.state}`,
+        409,
+      );
+    }
+    const build = this.store.builds.getById(buildId);
+    if (
+      !["ready", "running", "paused", "interrupted", "failed"].includes(
+        build.status,
+      )
+    ) {
+      throw new AgentFlowError(
+        "BUILD_NOT_RETRYABLE",
+        `Build ${buildId} cannot accept a retry from ${build.status}`,
+        409,
+      );
+    }
+    let reactivated = false;
+    if (build.status === "failed") {
+      const activeBuild = this.store.builds.findActive();
+      if (activeBuild !== undefined && activeBuild.id !== buildId) {
+        throw new AgentFlowError(
+          "ACTIVE_BUILD_EXISTS",
+          `Build ${buildId} cannot be retried while ${activeBuild.id} is active`,
+          409,
+        );
+      }
+      this.store.builds.transition(buildId, "running", {
+        eventType: "build.retry_started",
+        payload: { taskId },
+        actualElapsedSeconds: null,
+      });
+      reactivated = true;
+      try {
+        await this.ensureRuntime(build);
+      } catch (error) {
+        if (this.store.builds.getById(buildId).status === "running") {
+          this.store.builds.transition(buildId, "failed", {
+            eventType: "build.retry_setup_failed",
+            payload: { taskId, message: errorMessage(error) },
+            actualElapsedSeconds: build.actualElapsedSeconds,
+          });
+        }
+        throw error;
+      }
+      if (this.store.builds.getById(buildId).status !== "running") {
+        throw new AgentFlowError(
+          "BUILD_RETRY_INTERRUPTED",
+          `Build ${buildId} changed state while preparing the retry`,
+          409,
+        );
+      }
+    }
+    let retried: TaskEntity;
+    try {
+      retried = this.store.tasks.retry(taskId);
+    } catch (error) {
+      if (
+        reactivated &&
+        this.store.builds.getById(buildId).status === "running"
+      ) {
+        this.store.builds.transition(buildId, "failed", {
+          eventType: "build.retry_task_failed",
+          payload: { taskId, message: errorMessage(error) },
+          actualElapsedSeconds: build.actualElapsedSeconds,
+        });
+      }
+      throw error;
+    }
     this.requestTick(buildId);
     return retried;
   }
 
   async resumeValidation(build: BuildEntity, task: TaskEntity): Promise<void> {
     await this.ensureRuntime(build);
-    void this.validateCommitAndIntegrate(build.id, task.id, true).finally(() => {
-      this.requestTick(build.id);
-    });
+    this.startRecoveredTaskOperation(build.id, task.id, (signal) =>
+      this.validateCommitAndIntegrate(build.id, task.id, true, signal),
+    );
   }
 
   async queueIntegration(build: BuildEntity, task: TaskEntity): Promise<void> {
     await this.ensureRuntime(build);
-    void this.integrateValidatedTask(build.id, task.id).finally(() => {
-      this.requestTick(build.id);
-    });
+    this.startRecoveredTaskOperation(build.id, task.id, (signal) =>
+      this.integrateValidatedTask(build.id, task.id, signal),
+    );
+  }
+
+  private startRecoveredTaskOperation(
+    buildId: string,
+    taskId: string,
+    run: (signal: AbortSignal) => Promise<void>,
+  ): void {
+    if (this.taskOperations.has(taskId)) {
+      return;
+    }
+    const controller = new AbortController();
+    this.taskAbortControllers.set(taskId, controller);
+    const operation = run(controller.signal)
+      .catch((error: unknown) => {
+        if (!this.closed) {
+          this.store.events.append({
+            buildId,
+            taskId,
+            type: "task.recovered_pipeline_unhandled_error",
+            payload: { message: errorMessage(error) },
+          });
+        }
+      })
+      .finally(() => {
+        if (this.taskOperations.get(taskId) === operation) {
+          this.taskOperations.delete(taskId);
+          if (this.taskAbortControllers.get(taskId) === controller) {
+            this.taskAbortControllers.delete(taskId);
+          }
+        }
+        this.requestTick(buildId);
+      });
+    this.taskOperations.set(taskId, operation);
+    void operation;
   }
 
   async recoverIntegratedManifest(
@@ -175,14 +307,21 @@ export class BuildCoordinator {
     task: TaskEntity,
   ): Promise<void> {
     if (
-      this.store.manifests.findForTask(task.id, "integrated") !== undefined
+      this.store.manifests.findForTask(
+        task.id,
+        "integrated",
+        task.attempt,
+      ) !== undefined
     ) {
       return;
     }
     const latest = this.store.tasks.getById(task.id);
     const plannedTask = findPlannedTask(build, latest);
     const worktreePath =
-      latest.worktreePath ?? build.integrationWorktree;
+      latest.worktreePath !== null &&
+      (await pathExists(latest.worktreePath))
+        ? latest.worktreePath
+        : build.integrationWorktree;
     if (
       worktreePath === null ||
       latest.baseCommit === null ||
@@ -241,6 +380,25 @@ export class BuildCoordinator {
           errorMessage:
             "A worker preserved across restart ended without a recorded result",
         });
+        const attempt = this.store.tasks
+          .listAttempts(task.id)
+          .find((candidate) => candidate.attempt === current.attempt);
+        if (attempt?.status === "running") {
+          this.store.tasks.updateAttempt(task.id, current.attempt, {
+            status: "interrupted",
+            errorCode: "WORKER_PROCESS_DISAPPEARED",
+            errorMessage:
+              "The recovered worker process ended without a recorded result",
+            completedAt: new Date().toISOString(),
+          });
+        }
+      }
+      const latestWorker = this.store.workers.getById(worker.id);
+      if (
+        ["starting", "running", "stopping"].includes(latestWorker.status)
+      ) {
+        this.store.workers.release(worker.id, "failed");
+        this.store.workers.recycle(worker.id);
       }
       this.requestTick(build.id);
     }, 5_000);
@@ -277,7 +435,24 @@ export class BuildCoordinator {
     this.monitorTimers.clear();
     await Promise.allSettled(this.tickOperations.values());
     const completions: Promise<WorkerOutcome>[] = [];
+    for (const taskId of this.taskOperations.keys()) {
+      const active = this.activeWorkers.get(taskId);
+      if (active !== undefined) {
+        this.shuttingDownTasks.add(taskId);
+        active.handle.cancel();
+        completions.push(active.handle.completion);
+        continue;
+      }
+      const task = this.store.tasks.getById(taskId);
+      if (task.state === "running") {
+        this.shuttingDownTasks.add(taskId);
+        this.taskAbortControllers.get(taskId)?.abort();
+      }
+    }
     for (const active of this.activeWorkers.values()) {
+      if (this.shuttingDownTasks.has(active.taskId)) {
+        continue;
+      }
       this.shuttingDownTasks.add(active.taskId);
       active.handle.cancel();
       completions.push(active.handle.completion);
@@ -313,6 +488,9 @@ export class BuildCoordinator {
       return;
     }
     await this.ensureRuntime(build);
+    if (this.store.builds.getById(buildId).status !== "running") {
+      return;
+    }
     const tasks = this.store.tasks.listForBuild(buildId);
     if (this.completeBuildIfTerminal(build, tasks)) {
       return;
@@ -425,7 +603,14 @@ export class BuildCoordinator {
         break;
       }
       this.dispatching.add(taskId);
-      const operation = this.executeTask(buildId, taskId, worker.id)
+      const controller = new AbortController();
+      this.taskAbortControllers.set(taskId, controller);
+      const operation = this.executeTask(
+        buildId,
+        taskId,
+        worker.id,
+        controller.signal,
+      )
         .catch((error: unknown) => {
           if (!this.closed) {
             this.store.events.append({
@@ -437,8 +622,13 @@ export class BuildCoordinator {
           }
         })
         .finally(() => {
-          this.dispatching.delete(taskId);
-          this.taskOperations.delete(taskId);
+          if (this.taskOperations.get(taskId) === operation) {
+            this.dispatching.delete(taskId);
+            this.taskOperations.delete(taskId);
+            if (this.taskAbortControllers.get(taskId) === controller) {
+              this.taskAbortControllers.delete(taskId);
+            }
+          }
           this.requestTick(buildId);
         });
       this.taskOperations.set(taskId, operation);
@@ -459,6 +649,7 @@ export class BuildCoordinator {
     buildId: string,
     taskId: string,
     workerId: string,
+    signal: AbortSignal,
   ): Promise<void> {
     let assigned = false;
     try {
@@ -482,6 +673,22 @@ export class BuildCoordinator {
         baseCommit: worktree.baseCommit,
       });
       if (this.closed) {
+        this.shuttingDownTasks.delete(taskId);
+        return;
+      }
+      if (
+        isAbortRequested(signal) ||
+        this.store.builds.getById(buildId).status === "cancelled"
+      ) {
+        const current = this.store.tasks.getById(taskId);
+        if (current.attempt > 0) {
+          this.store.tasks.updateAttempt(taskId, current.attempt, {
+            status: "cancelled",
+            errorCode: "TASK_CANCELLED",
+            errorMessage: "Task execution was cancelled before worker start",
+            completedAt: new Date().toISOString(),
+          });
+        }
         return;
       }
       this.store.workers.assign({ workerId, taskId });
@@ -500,12 +707,31 @@ export class BuildCoordinator {
         runningTask,
         plannedTask,
       );
+      if (
+        isAbortRequested(signal) ||
+        this.store.builds.getById(buildId).status === "cancelled" ||
+        this.store.tasks.getById(taskId).state === "cancelled"
+      ) {
+        if (this.shuttingDownTasks.has(taskId)) {
+          this.interruptTaskForShutdown(taskId, new Date().toISOString());
+        } else {
+          this.store.tasks.updateAttempt(taskId, runningTask.attempt, {
+            status: "cancelled",
+            errorCode: "TASK_CANCELLED",
+            errorMessage: "Task execution was cancelled before worker start",
+            completedAt: new Date().toISOString(),
+          });
+        }
+        this.stopAndRecycleWorker(workerId, false);
+        return;
+      }
       const handle = await startCodexWorker({
         executable: this.environment.codexBinary,
         worktreePath: worktree.path,
         attemptDirectory,
         prompt: promptContext,
         timeoutMs: this.environment.workerTimeoutMs,
+        signal,
         onStarted: (processId) => {
           try {
             this.store.workers.updateProcessId(workerId, processId);
@@ -541,7 +767,9 @@ export class BuildCoordinator {
         handle,
       });
       const outcome = await handle.completion;
-      this.activeWorkers.delete(taskId);
+      if (this.activeWorkers.get(taskId)?.handle === handle) {
+        this.activeWorkers.delete(taskId);
+      }
       this.persistWorkerOutcome(runningTask, outcome);
       this.stopAndRecycleWorker(workerId, outcome.success);
       const current = this.store.tasks.getById(taskId);
@@ -549,17 +777,7 @@ export class BuildCoordinator {
         return;
       }
       if (this.shuttingDownTasks.delete(taskId)) {
-        if (current.state === "running") {
-          this.store.tasks.transition(taskId, "interrupted", {
-            eventType: "task.interrupted_for_shutdown",
-            errorCode: "AGENTFLOW_SHUTDOWN",
-            errorMessage: "AgentFlow stopped while the worker was active",
-          });
-        }
-        this.store.tasks.updateAttempt(taskId, current.attempt, {
-          status: "interrupted",
-          completedAt: outcome.completedAt,
-        });
+        this.interruptTaskForShutdown(taskId, outcome.completedAt);
         return;
       }
       if (!outcome.success) {
@@ -572,10 +790,41 @@ export class BuildCoordinator {
         }
         return;
       }
-      await this.validateCommitAndIntegrate(buildId, taskId, true);
+      await this.validateCommitAndIntegrate(
+        buildId,
+        taskId,
+        true,
+        signal,
+      );
     } catch (error) {
       const task = this.store.tasks.getById(taskId);
       if (this.closed && !assigned) {
+        this.shuttingDownTasks.delete(taskId);
+        return;
+      }
+      if (this.shuttingDownTasks.has(taskId)) {
+        if (assigned) {
+          this.stopAndRecycleWorker(workerId, false);
+        }
+        this.interruptTaskForShutdown(taskId, new Date().toISOString());
+        return;
+      }
+      if (
+        isAbortRequested(signal) ||
+        this.store.builds.getById(buildId).status === "cancelled" ||
+        task.state === "cancelled"
+      ) {
+        if (assigned) {
+          this.stopAndRecycleWorker(workerId, false);
+        }
+        if (task.attempt > 0) {
+          this.store.tasks.updateAttempt(taskId, task.attempt, {
+            status: "cancelled",
+            errorCode: "TASK_CANCELLED",
+            errorMessage: "Task execution was cancelled",
+            completedAt: new Date().toISOString(),
+          });
+        }
         return;
       }
       if (
@@ -608,6 +857,7 @@ export class BuildCoordinator {
     buildId: string,
     taskId: string,
     workerCompletedSuccessfully: boolean,
+    signal?: AbortSignal,
   ): Promise<void> {
     const build = this.store.builds.getById(buildId);
     let task = this.store.tasks.getById(taskId);
@@ -646,6 +896,7 @@ export class BuildCoordinator {
         composeFile: config.docker.compose_file,
         cleanup: true,
       },
+      ...(signal === undefined ? {} : { signal }),
     });
     await this.persistValidationSummary(
       build,
@@ -653,6 +904,34 @@ export class BuildCoordinator {
       summary,
       "task",
     );
+    if (
+      summary.status === "cancelled" ||
+      isAbortRequested(signal) ||
+      this.store.tasks.getById(taskId).state === "cancelled" ||
+      this.store.builds.getById(buildId).status === "cancelled"
+    ) {
+      this.recordChangedFiles(task, summary, false);
+      if (this.shuttingDownTasks.has(taskId)) {
+        this.interruptTaskForShutdown(taskId, summary.completedAt);
+        return;
+      }
+      this.store.tasks.updateAttempt(taskId, task.attempt, {
+        status: "cancelled",
+        errorCode: summary.errorCode ?? "VALIDATION_CANCELLED",
+        errorMessage: summary.errorMessage ?? "Task validation was cancelled",
+        completedAt: summary.completedAt,
+      });
+      const current = this.store.tasks.getById(taskId);
+      if (current.state === "validating") {
+        this.store.tasks.transition(taskId, "cancelled", {
+          eventType: "task.validation_cancelled",
+          errorCode: summary.errorCode ?? "VALIDATION_CANCELLED",
+          errorMessage:
+            summary.errorMessage ?? "Task validation was cancelled",
+        });
+      }
+      return;
+    }
     if (!summary.readyForCommit) {
       this.recordChangedFiles(task, summary, false);
       this.store.tasks.updateAttempt(taskId, task.attempt, {
@@ -690,6 +969,27 @@ export class BuildCoordinator {
       task.attempt,
       committed.changedFiles,
     );
+    if (
+      isAbortRequested(signal) ||
+      this.store.tasks.getById(taskId).state !== "validating" ||
+      this.store.builds.getById(buildId).status === "cancelled"
+    ) {
+      this.store.tasks.updateAttempt(taskId, task.attempt, {
+        status: "cancelled",
+        errorCode: "VALIDATION_CANCELLED",
+        errorMessage: "Task validation was cancelled before handoff",
+        completedAt: new Date().toISOString(),
+      });
+      const current = this.store.tasks.getById(taskId);
+      if (current.state === "validating") {
+        this.store.tasks.transition(taskId, "cancelled", {
+          eventType: "task.validation_cancelled",
+          errorCode: "VALIDATION_CANCELLED",
+          errorMessage: "Task validation was cancelled before handoff",
+        });
+      }
+      return;
+    }
     await this.handoffService.publish({
       buildId,
       taskId,
@@ -718,6 +1018,24 @@ export class BuildCoordinator {
       errorCode: null,
       errorMessage: null,
     });
+    if (
+      isAbortRequested(signal) ||
+      this.store.builds.getById(buildId).status === "cancelled"
+    ) {
+      const current = this.store.tasks.getById(taskId);
+      if (current.state === "validated") {
+        this.store.tasks.transition(taskId, "cancelled", {
+          eventType: "task.cancelled_before_integration",
+        });
+      }
+      this.store.tasks.updateAttempt(taskId, task.attempt, {
+        status: "cancelled",
+        errorCode: "TASK_CANCELLED",
+        errorMessage: "Task was cancelled before integration",
+        completedAt: new Date().toISOString(),
+      });
+      return;
+    }
     if (config.git.push_task_branches) {
       try {
         await this.commitService.pushTaskBranch(
@@ -740,12 +1058,13 @@ export class BuildCoordinator {
         });
       }
     }
-    await this.integrateValidatedTask(buildId, taskId);
+    await this.integrateValidatedTask(buildId, taskId, signal);
   }
 
   private async integrateValidatedTask(
     buildId: string,
     taskId: string,
+    signal?: AbortSignal,
   ): Promise<void> {
     const build = this.store.builds.getById(buildId);
     const task = this.store.tasks.getById(taskId);
@@ -766,12 +1085,21 @@ export class BuildCoordinator {
         taskBranch: false,
         integrationBranch: config.git.push_integration_branch,
       },
+      onValidationCompleted: (summary) =>
+        this.persistIntegrationValidation(build, task, summary),
+      ...(signal === undefined ? {} : { signal }),
     });
-    await this.persistIntegrationValidation(build, task, result);
     if (
       result.status !== "integrated" ||
       result.integrationCommit === null
     ) {
+      this.store.tasks.updateAttempt(taskId, task.attempt, {
+        status: result.status === "cancelled" ? "cancelled" : "failed",
+        errorCode: result.errorCode ?? "INTEGRATION_FAILED",
+        errorMessage:
+          result.errorMessage ?? `Integration ended with ${result.status}`,
+        completedAt: new Date().toISOString(),
+      });
       return;
     }
     try {
@@ -785,7 +1113,14 @@ export class BuildCoordinator {
         resultCommit: task.resultCommit ?? build.baseCommit,
         integrationCommit: result.integrationCommit,
         branch: task.branchName ?? build.integrationBranch,
-        worktreePath: task.worktreePath ?? result.previousHead,
+        worktreePath:
+          task.worktreePath ??
+          build.integrationWorktree ??
+          (() => {
+            throw new Error(
+              `Task ${taskId} has no worktree for integrated manifest publication`,
+            );
+          })(),
         changedFiles: this.store.tasks
           .listChangedFiles(taskId, task.attempt)
           .map((change) => change.path),
@@ -927,9 +1262,19 @@ export class BuildCoordinator {
           artifact.repositoryPath !== null &&
           build.integrationWorktree !== null
         ) {
-          content = await readBoundedArtifact(
+          const producer = this.store.tasks.getById(
+            artifact.producerTaskId,
+          );
+          if (producer.integrationCommit === null) {
+            throw new Error(
+              `Artifact ${artifact.name}@${artifact.version} has no producer integration commit`,
+            );
+          }
+          content = await readVersionedArtifact(
             build.integrationWorktree,
             artifact.repositoryPath,
+            producer.integrationCommit,
+            artifact.sha256,
           );
         }
         return {
@@ -944,6 +1289,10 @@ export class BuildCoordinator {
         };
       }),
     );
+    const previousAttempt =
+      task.attempt <= 1
+        ? undefined
+        : this.store.tasks.getAttempt(task.id, task.attempt - 1);
     const contractKinds = /contract|openapi|schema|generated|ui-state/iu;
     const exampleKinds = /example|fixture|mock/iu;
     return {
@@ -962,6 +1311,19 @@ export class BuildCoordinator {
       repositoryInstructions: await readRepositoryInstructions(
         (await this.repositoryService.get(build.repositoryId)).localPath,
       ),
+      ...(previousAttempt === undefined
+        ? {}
+        : {
+            previousAttempt: {
+              name: `attempt-${previousAttempt.attempt}-failure`,
+              content: {
+                status: previousAttempt.status,
+                errorCode: previousAttempt.errorCode,
+                errorMessage: previousAttempt.errorMessage,
+                resultCommit: previousAttempt.resultCommit,
+              },
+            },
+          }),
       dependencyManifests,
       consumedContracts: documents
         .filter((document) => contractKinds.test(document.artifactType))
@@ -978,7 +1340,11 @@ export class BuildCoordinator {
     outcome: WorkerOutcome,
   ): void {
     this.store.tasks.updateAttempt(task.id, task.attempt, {
-      status: outcome.success ? "running" : "failed",
+      status: outcome.success
+        ? "running"
+        : outcome.status === "cancelled"
+          ? "cancelled"
+          : "failed",
       promptPath: outcome.paths.prompt,
       jsonlPath: outcome.paths.jsonl,
       logPath: outcome.paths.stderr,
@@ -996,6 +1362,34 @@ export class BuildCoordinator {
     const stopped = this.store.workers.getById(workerId);
     if (["stopped", "failed"].includes(stopped.status)) {
       this.store.workers.recycle(workerId);
+    }
+  }
+
+  private interruptTaskForShutdown(
+    taskId: string,
+    completedAt: string,
+  ): void {
+    this.shuttingDownTasks.delete(taskId);
+    const current = this.store.tasks.getById(taskId);
+    if (
+      !["running", "validating", "validated", "integrating"].includes(
+        current.state,
+      )
+    ) {
+      return;
+    }
+    this.store.tasks.transition(taskId, "interrupted", {
+      eventType: "task.interrupted_for_shutdown",
+      errorCode: "AGENTFLOW_SHUTDOWN",
+      errorMessage: "AgentFlow stopped while task execution was active",
+    });
+    if (current.attempt > 0) {
+      this.store.tasks.updateAttempt(taskId, current.attempt, {
+        status: "interrupted",
+        errorCode: "AGENTFLOW_SHUTDOWN",
+        errorMessage: "AgentFlow stopped while task execution was active",
+        completedAt,
+      });
     }
   }
 
@@ -1049,18 +1443,15 @@ export class BuildCoordinator {
   private async persistIntegrationValidation(
     build: BuildEntity,
     task: TaskEntity,
-    result: IntegrationResult,
+    summary: NonNullable<IntegrationResult["validation"]>,
   ): Promise<void> {
-    if (result.validation === null) {
-      return;
-    }
     const directory = path.join(
       this.environment.runsPath,
       safeSegment(build.id),
       "integration",
       safeSegment(task.id),
     );
-    for (const outcome of result.validation.commands) {
+    for (const outcome of summary.commands) {
       await this.persistValidationOutcome(
         build.id,
         task.id,
@@ -1109,6 +1500,23 @@ export class BuildCoordinator {
       return false;
     }
     if (tasks.every((task) => task.state === "integrated")) {
+      const missingManifestTaskIds = tasks
+        .filter(
+          (task) =>
+            this.store.manifests.findForTask(
+              task.id,
+              "integrated",
+              task.attempt,
+            ) === undefined,
+        )
+        .map((task) => task.id);
+      if (missingManifestTaskIds.length > 0) {
+        this.store.builds.transition(build.id, "paused", {
+          eventType: "build.paused_for_manifest_recovery",
+          payload: { taskIds: missingManifestTaskIds },
+        });
+        return true;
+      }
       this.store.builds.transition(build.id, "completed", {
         eventType: "build.completed",
         actualElapsedSeconds: elapsedSeconds(build.startedAt),
@@ -1223,25 +1631,93 @@ async function readRepositoryInstructions(
   return instructions.join("\n\n");
 }
 
-async function readBoundedArtifact(
+export async function readVersionedArtifact(
   integrationWorktree: string,
   repositoryPath: string,
+  integrationCommit: string,
+  expectedSha256: string | null,
 ): Promise<unknown> {
-  const candidate = path.resolve(integrationWorktree, repositoryPath);
-  const relative = path.relative(integrationWorktree, candidate);
+  const normalized = repositoryPath.replaceAll("\\", "/").replace(/^\.\//u, "");
   if (
-    relative === ".." ||
-    relative.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relative)
+    path.posix.isAbsolute(normalized) ||
+    normalized.length === 0 ||
+    normalized.split("/").some((segment) => segment === "..")
   ) {
     throw new Error(`Artifact path escapes integration worktree`);
   }
-  const contents = await readFile(candidate);
-  if (contents.length > 512 * 1024) {
+  const git = new GitCommandRunner();
+  const object = `${integrationCommit}:${normalized}`;
+  const treeEntry = (
+    await git.run(integrationWorktree, [
+      "ls-tree",
+      integrationCommit,
+      "--",
+      normalized,
+    ])
+  ).stdout.trim();
+  const mode = treeEntry.split(/\s+/u, 1)[0];
+  if (mode === "120000") {
+    throw new Error(
+      `Artifact ${repositoryPath} is a symbolic link and cannot be consumed`,
+    );
+  }
+  const objectType = (
+    await git.run(integrationWorktree, ["cat-file", "-t", object])
+  ).stdout.trim();
+  if (objectType === "tree") {
+    const listing = (
+      await git.run(integrationWorktree, [
+        "ls-tree",
+        "-r",
+        "--name-only",
+        integrationCommit,
+        "--",
+        normalized,
+      ])
+    ).stdout
+      .split("\n")
+      .filter(Boolean);
     return {
       path: repositoryPath,
+      kind: "directory",
+      integrationCommit,
+      fileCount: listing.length,
+      files: listing.slice(0, 200),
+      truncated: listing.length > 200,
+    };
+  }
+  if (objectType !== "blob") {
+    throw new Error(
+      `Artifact ${repositoryPath} has unsupported Git object type ${objectType}`,
+    );
+  }
+  if (expectedSha256 === null) {
+    throw new Error(
+      `File artifact ${repositoryPath} has no validated SHA-256 digest`,
+    );
+  }
+  const sizeText = (
+    await git.run(integrationWorktree, ["cat-file", "-s", object])
+  ).stdout.trim();
+  const sizeBytes = Number.parseInt(sizeText, 10);
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
+    throw new Error(`Artifact ${repositoryPath} has an invalid Git object size`);
+  }
+  const contents = await readAndVerifyGitBlob(
+    integrationWorktree,
+    object,
+    expectedSha256,
+    sizeBytes <= 512 * 1024,
+  );
+  if (contents === null) {
+    return {
+      path: repositoryPath,
+      kind: "file",
       truncated: true,
-      sizeBytes: contents.length,
+      sizeBytes,
+      sha256: expectedSha256,
+      verified: true,
+      integrationCommit,
     };
   }
   const text = contents.toString("utf8");
@@ -1250,6 +1726,58 @@ async function readBoundedArtifact(
   } catch {
     return text;
   }
+}
+
+async function readAndVerifyGitBlob(
+  workingDirectory: string,
+  object: string,
+  expectedSha256: string,
+  collect: boolean,
+): Promise<Buffer | null> {
+  const hash = createHash("sha256");
+  const chunks: Buffer[] = [];
+  let stderr = "";
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      "git",
+      ["-C", workingDirectory, "cat-file", "blob", object],
+      {
+        shell: false,
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    child.stdout.on("data", (chunk: Buffer) => {
+      hash.update(chunk);
+      if (collect) {
+        chunks.push(chunk);
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (stderr.length < 8 * 1024) {
+        stderr += chunk.toString("utf8");
+      }
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(
+          new Error(
+            `Git could not read artifact object${stderr.trim().length === 0 ? "" : `: ${stderr.trim()}`}`,
+          ),
+        );
+      }
+    });
+  });
+  const actualSha256 = hash.digest("hex");
+  if (actualSha256 !== expectedSha256) {
+    throw new Error(
+      `Artifact SHA-256 mismatch: expected ${expectedSha256}, received ${actualSha256}`,
+    );
+  }
+  return collect ? Buffer.concat(chunks) : null;
 }
 
 function stripArtifactType(document: {
@@ -1289,6 +1817,19 @@ function isProcessAlive(processId: number | null): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isAbortRequested(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted ?? false;
+}
+
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function taskStateIsActive(state: TaskStatus): boolean {

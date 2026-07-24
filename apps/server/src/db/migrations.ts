@@ -455,9 +455,33 @@ INSERT INTO task_manifests (
   sha256, manifest_json, created_at
 )
 SELECT
-  id, build_id, task_id, 1, status, schema_version, manifest_path,
-  sha256, manifest_json, created_at
-FROM task_manifests_legacy;
+  id,
+  build_id,
+  task_id,
+  resolved_attempt,
+  status,
+  schema_version,
+  manifest_path,
+  sha256,
+  json_set(manifest_json, '$.attempt', resolved_attempt),
+  created_at
+FROM (
+  SELECT
+    legacy.*,
+    COALESCE(
+      (
+        SELECT task_attempts.attempt
+        FROM task_attempts
+        WHERE task_attempts.task_id = legacy.task_id
+          AND task_attempts.result_commit =
+            json_extract(legacy.manifest_json, '$.resultCommit')
+        ORDER BY task_attempts.attempt DESC
+        LIMIT 1
+      ),
+      1
+    ) AS resolved_attempt
+  FROM task_manifests_legacy AS legacy
+);
 
 DROP TABLE task_manifests_legacy;
 

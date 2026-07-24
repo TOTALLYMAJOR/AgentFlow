@@ -32,28 +32,36 @@ export class HandoffManifestService {
   ) {}
 
   async publish(input: PublishHandoffInput): Promise<HandoffPublication> {
-    const consumed = input.consumes.map(({ name, version }) => {
-      const artifact = this.requireIntegratedArtifact(
-        input.buildId,
-        name,
-        version,
-      );
-      return {
-        name: artifact.name,
-        type: artifact.artifactType,
-        version: artifact.version,
-        ...(artifact.repositoryPath === null
-          ? {}
-          : { path: artifact.repositoryPath }),
-        ...(artifact.sha256 === null ? {} : { sha256: artifact.sha256 }),
-        producerTaskId: artifact.producerTaskId,
-      } satisfies ManifestArtifactReference;
-    });
-    const produced = await Promise.all(
-      input.produces.map(async (artifact) =>
-        this.describeProducedArtifact(input.worktreePath, artifact),
-      ),
-    );
+    const validated =
+      input.status === "integrated"
+        ? this.requireValidatedManifest(input)
+        : undefined;
+    const consumed =
+      validated?.consumes ??
+      input.consumes.map(({ name, version }) => {
+        const artifact = this.requireIntegratedArtifact(
+          input.buildId,
+          name,
+          version,
+        );
+        return {
+          name: artifact.name,
+          type: artifact.artifactType,
+          version: artifact.version,
+          ...(artifact.repositoryPath === null
+            ? {}
+            : { path: artifact.repositoryPath }),
+          ...(artifact.sha256 === null ? {} : { sha256: artifact.sha256 }),
+          producerTaskId: artifact.producerTaskId,
+        } satisfies ManifestArtifactReference;
+      });
+    const produced =
+      validated?.produces ??
+      (await Promise.all(
+        input.produces.map(async (artifact) =>
+          this.describeProducedArtifact(input.worktreePath, artifact),
+        ),
+      ));
     const manifest: HandoffManifest = {
       schemaVersion: HANDOFF_MANIFEST_SCHEMA_VERSION,
       buildId: input.buildId,
@@ -65,7 +73,9 @@ export class HandoffManifestService {
       resultCommit: input.resultCommit,
       integrationCommit: input.integrationCommit ?? null,
       branch: input.branch,
-      changedFiles: [...new Set(input.changedFiles)].sort(),
+      changedFiles:
+        validated?.changedFiles ??
+        [...new Set(input.changedFiles)].sort(),
       consumes: consumed.sort(compareArtifactReferences),
       produces: produced.sort(compareArtifactReferences),
       validation: {
@@ -99,7 +109,7 @@ export class HandoffManifestService {
     const artifacts =
       input.status === "validated"
         ? this.registerValidatedArtifacts(input, produced, manifestPath)
-        : this.promoteIntegratedArtifacts(input);
+        : this.promoteIntegratedArtifacts(input, produced);
     let record: TaskManifestEntity;
     try {
       record = this.store.manifests.create({
@@ -206,6 +216,38 @@ export class HandoffManifestService {
     };
   }
 
+  private requireValidatedManifest(
+    input: PublishHandoffInput,
+  ): HandoffManifest {
+    const record = this.store.manifests.findForTask(
+      input.taskId,
+      "validated",
+      input.attempt,
+    );
+    if (record === undefined) {
+      throw new ArtifactRegistryError(
+        "VALIDATED_MANIFEST_MISSING",
+        `Task ${input.taskId} attempt ${input.attempt} has no validated handoff manifest`,
+      );
+    }
+    const manifest = record.manifest as unknown as HandoffManifest;
+    if (
+      manifest.buildId !== input.buildId ||
+      manifest.taskId !== input.taskId ||
+      manifest.backlogTaskId !== input.backlogTaskId ||
+      manifest.attempt !== input.attempt ||
+      manifest.baseCommit !== input.baseCommit ||
+      manifest.resultCommit !== input.resultCommit ||
+      manifest.branch !== input.branch
+    ) {
+      throw new ArtifactRegistryError(
+        "MANIFEST_CONTEXT_MISMATCH",
+        `Integrated handoff context differs from the validated manifest for ${input.taskId} attempt ${input.attempt}`,
+      );
+    }
+    return manifest;
+  }
+
   private registerValidatedArtifacts(
     input: PublishHandoffInput,
     produced: readonly ManifestArtifactReference[],
@@ -271,8 +313,9 @@ export class HandoffManifestService {
 
   private promoteIntegratedArtifacts(
     input: PublishHandoffInput,
+    produced: readonly ManifestArtifactReference[],
   ): ArtifactEntity[] {
-    return input.produces.map((artifact) => {
+    return produced.map((artifact) => {
       const existing = this.store.artifacts.findExact(
         input.buildId,
         artifact.name,
@@ -288,6 +331,16 @@ export class HandoffManifestService {
         throw new ArtifactRegistryError(
           "ARTIFACT_PRODUCER_MISMATCH",
           `Artifact ${artifact.name}@${artifact.version} belongs to another producer`,
+        );
+      }
+      if (
+        existing.artifactType !== artifact.type ||
+        existing.repositoryPath !== (artifact.path ?? null) ||
+        existing.sha256 !== (artifact.sha256 ?? null)
+      ) {
+        throw new ArtifactRegistryError(
+          "ARTIFACT_PAYLOAD_MISMATCH",
+          `Artifact ${artifact.name}@${artifact.version} differs from its validated handoff`,
         );
       }
       return existing.status === "integrated"

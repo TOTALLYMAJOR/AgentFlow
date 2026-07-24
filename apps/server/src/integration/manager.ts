@@ -85,6 +85,9 @@ export class IntegrationManager {
       taskBranch,
       expectedTaskCommit: taskCommit,
     });
+    if (isAbortRequested(input.signal)) {
+      return this.#handleCancellation(task, previousHead, false, null);
+    }
     this.#store.transitionTask(task.id, "integrating", {
       eventType: "task.integration_started",
       payload: { previousHead, taskBranch },
@@ -109,6 +112,14 @@ export class IntegrationManager {
         );
       }
     }
+    if (isAbortRequested(input.signal)) {
+      return this.#handleCancellation(
+        task,
+        previousHead,
+        mergePerformed,
+        null,
+      );
+    }
 
     const validationCommands =
       input.validationCommands ?? integrationCommands(build.repositoryConfig);
@@ -122,6 +133,46 @@ export class IntegrationManager {
         : { timeoutMs: input.validationTimeoutMs }),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
+    try {
+      await input.onValidationCompleted?.(validation);
+    } catch (error) {
+      const rollbackError = await this.#rollback(previousHead);
+      const errorCode =
+        rollbackError === null
+          ? "INTEGRATION_EVIDENCE_PERSISTENCE_FAILED"
+          : "INTEGRATION_ROLLBACK_FAILED";
+      const errorMessage = `Could not persist integration validation evidence: ${message(
+        error,
+      )}${
+        rollbackError === null ? "" : `; rollback failed: ${rollbackError}`
+      }`;
+      this.#recordFailure(task.id, errorCode, errorMessage, {
+        previousHead,
+        attemptedCommit: integrationCommit,
+        validationStatus: validation.status,
+      });
+      return this.#result({
+        task,
+        status:
+          rollbackError === null ? "persistence_failed" : "rollback_failed",
+        previousHead,
+        mergePerformed,
+        validation,
+        errorCode,
+        errorMessage,
+      });
+    }
+    if (
+      validation.status === "cancelled" ||
+      isAbortRequested(input.signal)
+    ) {
+      return this.#handleCancellation(
+        task,
+        previousHead,
+        mergePerformed,
+        validation,
+      );
+    }
     if (validation.status !== "passed") {
       const rollbackError = await this.#rollback(previousHead);
       const errorCode =
@@ -149,6 +200,14 @@ export class IntegrationManager {
       });
     }
 
+    if (isAbortRequested(input.signal)) {
+      return this.#handleCancellation(
+        task,
+        previousHead,
+        mergePerformed,
+        validation,
+      );
+    }
     let releasedTaskIds: string[];
     try {
       releasedTaskIds = this.#recordSuccess(
@@ -189,6 +248,17 @@ export class IntegrationManager {
       });
     }
 
+    if (isAbortRequested(input.signal)) {
+      return this.#result({
+        task,
+        status: "integrated",
+        previousHead,
+        integrationCommit,
+        mergePerformed,
+        validation,
+        releasedTaskIds,
+      });
+    }
     const pushes = await this.#pushValidatedBranches(
       taskBranch,
       build.integrationBranch,
@@ -208,6 +278,68 @@ export class IntegrationManager {
       }),
       pushes,
     };
+  }
+
+  async #handleCancellation(
+    task: TaskEntity,
+    previousHead: string,
+    mergePerformed: boolean,
+    validation: IntegrationValidationSummary | null,
+  ): Promise<IntegrationResult> {
+    const rollbackError = mergePerformed
+      ? await this.#rollback(previousHead)
+      : null;
+    if (rollbackError !== null) {
+      if (this.#store.tasks.getById(task.id).state === "integrating") {
+        this.#recordFailure(
+          task.id,
+          "INTEGRATION_ROLLBACK_FAILED",
+          `Integration was cancelled but rollback failed: ${rollbackError}`,
+          { previousHead },
+        );
+      } else {
+        this.#store.events.append({
+          buildId: task.buildId,
+          taskId: task.id,
+          type: "integration.rollback_failed_after_cancel",
+          payload: { previousHead, error: rollbackError },
+        });
+      }
+      return this.#result({
+        task,
+        status: "rollback_failed",
+        previousHead,
+        mergePerformed,
+        validation,
+        errorCode: "INTEGRATION_ROLLBACK_FAILED",
+        errorMessage: rollbackError,
+      });
+    }
+    this.#store.transaction((store) => {
+      const current = store.tasks.getById(task.id);
+      if (["validated", "integrating"].includes(current.state)) {
+        store.tasks.transition(task.id, "cancelled", {
+          eventType: "task.integration_cancelled",
+          errorCode: "INTEGRATION_CANCELLED",
+          errorMessage: "Integration was cancelled and rolled back",
+        });
+      }
+      store.events.append({
+        buildId: task.buildId,
+        taskId: task.id,
+        type: "integration.cancelled",
+        payload: { previousHead, mergePerformed },
+      });
+    });
+    return this.#result({
+      task,
+      status: "cancelled",
+      previousHead,
+      mergePerformed,
+      validation,
+      errorCode: "INTEGRATION_CANCELLED",
+      errorMessage: "Integration was cancelled and rolled back",
+    });
   }
 
   #assertContext(
@@ -609,4 +741,8 @@ function disabledPush(branch: string): IntegrationPushResult {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isAbortRequested(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted ?? false;
 }

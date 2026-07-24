@@ -219,6 +219,28 @@ describe("worker prompt and command contract", () => {
     expect(prompt).toContain("Modify the backlog");
   });
 
+  it("includes the previous attempt failure in retry prompts", () => {
+    const context = promptContext();
+    context.attempt = 2;
+    context.previousAttempt = {
+      name: "attempt-1-failure",
+      content: {
+        status: "failed",
+        errorCode: "INTEGRATION_VALIDATION_FAILED",
+        errorMessage: "amount_cents must be a number",
+        resultCommit: "deadbeef",
+      },
+    };
+
+    const prompt = buildWorkerPrompt(context);
+
+    expect(prompt).toContain("PREVIOUS ATTEMPT FAILURE");
+    expect(prompt).toContain("attempt-1-failure");
+    expect(prompt).toContain("INTEGRATION_VALIDATION_FAILED");
+    expect(prompt).toContain("amount_cents must be a number");
+    expect(prompt).toContain("deadbeef");
+  });
+
   it("locks JSONL, sandbox, schema, cwd, and stdin command arguments", () => {
     expect(buildCodexArguments("/run/result.schema.json", ["--model", "fake"])).toEqual([
       "exec",

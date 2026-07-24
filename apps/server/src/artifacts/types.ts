@@ -71,7 +71,10 @@ export class ArtifactRegistryError extends Error {
       | "ARTIFACT_NOT_INTEGRATED"
       | "ARTIFACT_DUPLICATE"
       | "ARTIFACT_PATH_INVALID"
+      | "ARTIFACT_PAYLOAD_MISMATCH"
       | "ARTIFACT_PRODUCER_MISMATCH"
+      | "VALIDATED_MANIFEST_MISSING"
+      | "MANIFEST_CONTEXT_MISMATCH"
       | "MANIFEST_IMMUTABLE_CONFLICT",
     message: string,
   ) {

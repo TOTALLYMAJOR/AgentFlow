@@ -8,7 +8,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveEnvironment } from "../src/config/environment.js";
 import { buildApp } from "../src/http/app.js";
 
@@ -113,6 +113,204 @@ describe("AgentFlow API smoke", () => {
     }
   });
 
+  it("rejects retry races before reactivating a terminal failed build", async () => {
+    const { app, context, build } =
+      await createReadyBuildApplication("retry");
+    const failedTask = build.tasks[0];
+    const dependentTask = build.tasks[1];
+    expect(failedTask).toBeDefined();
+    expect(dependentTask).toBeDefined();
+
+    try {
+      context.store.builds.transition(build.id, "running", {
+        eventType: "test.build_started",
+      });
+      context.store.tasks.transition(failedTask?.id ?? "", "running");
+      context.store.tasks.transition(failedTask?.id ?? "", "failed", {
+        errorCode: "TEST_FAILURE",
+        errorMessage: "The first attempt failed.",
+      });
+      context.store.tasks.transition(
+        dependentTask?.id ?? "",
+        "blocked_failed",
+      );
+      context.store.builds.transition(build.id, "failed", {
+        eventType: "test.build_failed",
+        actualElapsedSeconds: 73,
+      });
+      const internals = context.coordinator as unknown as {
+        closed: boolean;
+        taskOperations: Map<string, Promise<void>>;
+      };
+      internals.closed = true;
+      internals.taskOperations.set(
+        failedTask?.id ?? "",
+        Promise.resolve(),
+      );
+
+      const racingRetry = await app.inject({
+        method: "POST",
+        url: `/api/builds/${build.id}/tasks/${failedTask?.id ?? ""}/retry`,
+      });
+
+      expect(racingRetry.statusCode).toBe(409);
+      expect(racingRetry.json()).toMatchObject({
+        error: { code: "TASK_OPERATION_IN_PROGRESS" },
+      });
+      expect(context.store.builds.getById(build.id)).toMatchObject({
+        status: "failed",
+        actualElapsedSeconds: 73,
+      });
+      expect(context.store.tasks.getById(failedTask?.id ?? "")).toMatchObject({
+        state: "failed",
+        attempt: 0,
+      });
+
+      internals.taskOperations.delete(failedTask?.id ?? "");
+      const retried = await app.inject({
+        method: "POST",
+        url: `/api/builds/${build.id}/tasks/${failedTask?.id ?? ""}/retry`,
+      });
+
+      expect(retried.statusCode).toBe(200);
+      expect(retried.json()).toMatchObject({
+        state: "ready",
+        attempt: 1,
+        resultCommit: null,
+        integrationCommit: null,
+        errorCode: null,
+        errorMessage: null,
+      });
+      expect(context.store.builds.getById(build.id)).toMatchObject({
+        status: "running",
+        actualElapsedSeconds: null,
+        completedAt: null,
+      });
+      expect(
+        context.store.tasks.listAttempts(failedTask?.id ?? ""),
+      ).toEqual([
+        expect.objectContaining({
+          attempt: 1,
+          status: "queued",
+        }),
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("recycles a recovered worker slot when its process disappears", async () => {
+    const { app, context, build } =
+      await createReadyBuildApplication("dead-worker");
+    const task = build.tasks[0];
+    expect(task).toBeDefined();
+
+    try {
+      context.store.builds.transition(build.id, "running", {
+        eventType: "test.build_started",
+      });
+      const idleWorker = context.store.workers.listForBuild(build.id)[0];
+      expect(idleWorker).toBeDefined();
+      const assigned = context.store.workers.assign({
+        workerId: idleWorker?.id ?? "",
+        taskId: task?.id ?? "",
+        processId: 2_147_483_647,
+      });
+      (
+        context.coordinator as unknown as { closed: boolean }
+      ).closed = true;
+      vi.useFakeTimers();
+
+      context.coordinator.monitorExistingProcess(
+        context.store.builds.getById(build.id),
+        context.store.tasks.getById(task?.id ?? ""),
+        assigned,
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(context.store.tasks.getById(task?.id ?? "")).toMatchObject({
+        state: "interrupted",
+        errorCode: "WORKER_PROCESS_DISAPPEARED",
+      });
+      expect(context.store.tasks.getAttempt(task?.id ?? "", 1)).toMatchObject({
+        status: "interrupted",
+        errorCode: "WORKER_PROCESS_DISAPPEARED",
+      });
+      expect(context.store.workers.getById(assigned.id)).toMatchObject({
+        status: "idle",
+        taskId: null,
+        processId: null,
+      });
+      expect(
+        context.store.events
+          .listForBuild(build.id)
+          .map((event) => event.type),
+      ).toEqual(
+        expect.arrayContaining([
+          "recovery.monitored_process_ended",
+          "worker.failed",
+          "worker.recycled",
+        ]),
+      );
+    } finally {
+      vi.useRealTimers();
+      await app.close();
+    }
+  });
+
+  it("aborts registered task operations and cancels active pipeline states", async () => {
+    const { app, context, build } =
+      await createReadyBuildApplication("cancel-active");
+    const validatingTask = build.tasks[0];
+    const integratingTask = build.tasks[1];
+    expect(validatingTask).toBeDefined();
+    expect(integratingTask).toBeDefined();
+
+    try {
+      context.store.builds.transition(build.id, "running", {
+        eventType: "test.build_started",
+      });
+      context.store.tasks.transition(validatingTask?.id ?? "", "running");
+      context.store.tasks.transition(validatingTask?.id ?? "", "validating");
+      context.store.tasks.transition(integratingTask?.id ?? "", "ready");
+      context.store.tasks.transition(integratingTask?.id ?? "", "running");
+      context.store.tasks.transition(integratingTask?.id ?? "", "validating");
+      context.store.tasks.transition(integratingTask?.id ?? "", "validated");
+      context.store.tasks.transition(integratingTask?.id ?? "", "integrating");
+      const validatingController = new AbortController();
+      const integratingController = new AbortController();
+      const internals = context.coordinator as unknown as {
+        taskAbortControllers: Map<string, AbortController>;
+      };
+      internals.taskAbortControllers.set(
+        validatingTask?.id ?? "",
+        validatingController,
+      );
+      internals.taskAbortControllers.set(
+        integratingTask?.id ?? "",
+        integratingController,
+      );
+
+      const cancelled = await app.inject({
+        method: "POST",
+        url: `/api/builds/${build.id}/cancel`,
+      });
+
+      expect(cancelled.statusCode).toBe(200);
+      expect(cancelled.json()).toMatchObject({ status: "cancelled" });
+      expect(validatingController.signal.aborted).toBe(true);
+      expect(integratingController.signal.aborted).toBe(true);
+      expect(
+        context.store.tasks.getById(validatingTask?.id ?? "").state,
+      ).toBe("cancelled");
+      expect(
+        context.store.tasks.getById(integratingTask?.id ?? "").state,
+      ).toBe("cancelled");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("serves the built application from the production server", async () => {
     const runtimeHome = await temporaryRoot("runtime-static");
     const staticRoot = await temporaryRoot("static");
@@ -175,6 +373,65 @@ describe("AgentFlow API smoke", () => {
     }
   });
 });
+
+async function createReadyBuildApplication(label: string) {
+  const runtimeHome = await temporaryRoot(`runtime-${label}`);
+  const repositoryPath = await createFixtureRepository();
+  const environment = resolveEnvironment({
+    AGENTFLOW_HOME: runtimeHome,
+    AGENTFLOW_LOG_LEVEL: "silent",
+    AGENTFLOW_CODEX_BIN: "/definitely/missing/agentflow-test-codex",
+  });
+  const application = await buildApp({
+    environment,
+    staticRoot: false,
+    logger: false,
+  });
+
+  try {
+    const registered = await application.app.inject({
+      method: "POST",
+      url: "/api/repositories",
+      payload: { path: repositoryPath },
+    });
+    if (registered.statusCode !== 201) {
+      throw new Error(`Repository registration failed: ${registered.body}`);
+    }
+    const repository = registered.json<{ id: string }>();
+    const planned = await application.app.inject({
+      method: "POST",
+      url: "/api/plans",
+      payload: { repositoryId: repository.id },
+    });
+    if (planned.statusCode !== 201) {
+      throw new Error(`Planning failed: ${planned.body}`);
+    }
+    const plan = planned.json<{ id: string }>();
+    const buildResponse = await application.app.inject({
+      method: "POST",
+      url: "/api/builds",
+      payload: { planId: plan.id },
+    });
+    if (buildResponse.statusCode !== 201) {
+      throw new Error(`Build creation failed: ${buildResponse.body}`);
+    }
+    return {
+      ...application,
+      build: buildResponse.json<{
+        id: string;
+        tasks: Array<{
+          id: string;
+          backlogTaskId: string;
+          state: string;
+          attempt: number;
+        }>;
+      }>(),
+    };
+  } catch (error) {
+    await application.app.close();
+    throw error;
+  }
+}
 
 async function createFixtureRepository(): Promise<string> {
   const root = await temporaryRoot("repository");

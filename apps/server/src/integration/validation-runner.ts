@@ -27,6 +27,16 @@ export class ProcessIntegrationValidationRunner
     let status: IntegrationValidationStatus = "passed";
     let errorMessage: string | null = null;
 
+    if (isAbortRequested(request.signal)) {
+      return {
+        status: "cancelled",
+        commands,
+        errorMessage: "Integration validation was cancelled",
+        startedAt,
+        completedAt: new Date().toISOString(),
+        durationMs: Math.max(0, performance.now() - started),
+      };
+    }
     for (const [index, definition] of request.commands.entries()) {
       const command = normalizeValidationCommand(definition);
       const result = await runValidationProcess({
@@ -56,6 +66,10 @@ export class ProcessIntegrationValidationRunner
         `${outcome.command} exited with ${outcome.exitCode ?? "no exit code"}`;
       break;
     }
+    if (isAbortRequested(request.signal) && status === "passed") {
+      status = "cancelled";
+      errorMessage = "Integration validation was cancelled";
+    }
 
     return {
       status,
@@ -66,6 +80,10 @@ export class ProcessIntegrationValidationRunner
       durationMs: Math.max(0, performance.now() - started),
     };
   }
+}
+
+function isAbortRequested(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted ?? false;
 }
 
 function mapStatus(

@@ -28,6 +28,7 @@ export interface WorkerPromptContext {
     validationCommands: string[];
   };
   repositoryInstructions: string;
+  previousAttempt?: WorkerContextDocument;
   dependencyManifests: WorkerContextDocument[];
   consumedContracts: WorkerContextDocument[];
   consumedArtifacts: WorkerContextDocument[];

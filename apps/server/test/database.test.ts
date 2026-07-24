@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import BetterSqlite3 from "better-sqlite3";
 import {
   MIGRATIONS,
   createDatabaseRepositories,
@@ -120,5 +121,136 @@ describe("SQLite database foundation", () => {
         status: "planning",
       }),
     ).toThrow(/UNIQUE constraint failed/i);
+  });
+
+  it("migrates legacy manifests to the attempt that produced their result commit", () => {
+    const database = new BetterSqlite3(":memory:");
+    database.pragma("foreign_keys = ON");
+    try {
+      for (const migration of MIGRATIONS.filter(
+        (candidate) => candidate.version <= 6,
+      )) {
+        database.exec(migration.sql);
+      }
+      const createdAt = "2026-07-24T00:00:00.000Z";
+      database
+        .prepare(
+          `INSERT INTO repositories (
+             id, name, local_path, config_path, base_branch, status,
+             detected_stack_json, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "repository_migration",
+          "Migration fixture",
+          "/tmp/agentflow-migration-repository",
+          "/tmp/agentflow-migration-repository/.agentflow.yaml",
+          "main",
+          "ready",
+          "{}",
+          createdAt,
+          createdAt,
+        );
+      database
+        .prepare(
+          `INSERT INTO builds (
+             id, repository_id, backlog_path, base_commit,
+             integration_branch, status, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "build_migration",
+          "repository_migration",
+          "BACKLOG.md",
+          "base",
+          "agent-integration/build_migration",
+          "running",
+          createdAt,
+        );
+      database
+        .prepare(
+          `INSERT INTO tasks (
+             id, build_id, backlog_task_id, title, description,
+             acceptance_criteria, state, attempt, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "task_migration",
+          "build_migration",
+          "BL-MIGRATION",
+          "Migration fixture",
+          "Verify migration provenance.",
+          "[]",
+          "validated",
+          3,
+          createdAt,
+        );
+      const insertAttempt = database.prepare(
+        `INSERT INTO task_attempts (
+           id, task_id, build_id, attempt, status, result_commit, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      );
+      insertAttempt.run(
+        "attempt_old",
+        "task_migration",
+        "build_migration",
+        1,
+        "succeeded",
+        "result-old",
+        createdAt,
+      );
+      insertAttempt.run(
+        "attempt_current",
+        "task_migration",
+        "build_migration",
+        3,
+        "succeeded",
+        "result-current",
+        createdAt,
+      );
+      database
+        .prepare(
+          `INSERT INTO task_manifests (
+             id, build_id, task_id, status, schema_version, manifest_path,
+             sha256, manifest_json, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "manifest_legacy",
+          "build_migration",
+          "task_migration",
+          "validated",
+          "1.0.0",
+          "/tmp/task-manifest.json",
+          "sha256",
+          JSON.stringify({
+            taskId: "task_migration",
+            resultCommit: "result-current",
+          }),
+          createdAt,
+        );
+
+      const migration = MIGRATIONS.find((candidate) => candidate.version === 7);
+      expect(migration).toBeDefined();
+      database.exec(migration?.sql ?? "");
+
+      const migrated = database
+        .prepare(
+          `SELECT attempt, manifest_json
+           FROM task_manifests
+           WHERE id = ?`,
+        )
+        .get("manifest_legacy") as
+        | { attempt: number; manifest_json: string }
+        | undefined;
+      expect(migrated?.attempt).toBe(3);
+      expect(JSON.parse(migrated?.manifest_json ?? "{}")).toMatchObject({
+        taskId: "task_migration",
+        attempt: 3,
+        resultCommit: "result-current",
+      });
+    } finally {
+      database.close();
+    }
   });
 });

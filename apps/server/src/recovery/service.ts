@@ -45,8 +45,18 @@ export class RecoveryService {
     task: TaskEntity,
     repositoryPath: string,
   ): Promise<RecoveryDecision> {
+    if (task.state === "integrated") {
+      const recovered = await this.recoverMissingIntegratedManifest(
+        build,
+        task,
+      );
+      return (
+        recovered ??
+        this.record(build, task, "no_action", "task is integrated")
+      );
+    }
     if (
-      ["integrated", "failed", "cancelled", "blocked_failed"].includes(
+      ["failed", "cancelled", "blocked_failed"].includes(
         task.state,
       )
     ) {
@@ -87,7 +97,13 @@ export class RecoveryService {
       const integrated = this.store.tasks.markIntegrationSuccess(task.id, {
         integrationCommit: task.integrationCommit,
       });
-      await this.options.recoveredIntegration?.(build, integrated);
+      const recovered = await this.recoverMissingIntegratedManifest(
+        build,
+        integrated,
+      );
+      if (recovered !== null) {
+        return recovered;
+      }
       return this.record(
         build,
         integrated,
@@ -171,6 +187,43 @@ export class RecoveryService {
       task,
       "no_action",
       `task is safely waiting in ${task.state}`,
+    );
+  }
+
+  private async recoverMissingIntegratedManifest(
+    build: BuildEntity,
+    task: TaskEntity,
+  ): Promise<RecoveryDecision | null> {
+    if (
+      this.store.manifests.findForTask(
+        task.id,
+        "integrated",
+        task.attempt,
+      ) !== undefined
+    ) {
+      return null;
+    }
+    if (this.options.recoveredIntegration === undefined) {
+      return this.pauseForReview(
+        build,
+        task,
+        "integrated task has no durable integrated handoff manifest",
+      );
+    }
+    try {
+      await this.options.recoveredIntegration(build, task);
+    } catch (error) {
+      return this.pauseForReview(
+        build,
+        task,
+        `integrated handoff manifest recovery failed: ${errorMessage(error)}`,
+      );
+    }
+    return this.record(
+      build,
+      task,
+      "recover_integrated_manifest",
+      "integrated task handoff manifest was recovered",
     );
   }
 
@@ -354,4 +407,8 @@ async function defaultCommitExists(
     child.once("error", () => resolve(false));
     child.once("close", (code) => resolve(code === 0));
   });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

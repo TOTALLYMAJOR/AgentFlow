@@ -33,6 +33,29 @@ describe("startup recovery", () => {
       processId: 111,
       status: "running",
     });
+    store.manifests.create({
+      id: "manifest_integrated_evidence",
+      buildId: "build_1",
+      taskId: "task_integrated_evidence",
+      attempt: 1,
+      status: "integrated",
+      schemaVersion: "1.0.0",
+      manifestPath: "runs/build_1/task_integrated_evidence/attempt-1/integrated.json",
+      sha256: "integrated-evidence",
+      manifest: { taskId: "task_integrated_evidence", attempt: 1 },
+    });
+    store.manifests.create({
+      id: "manifest_integrated_stale",
+      buildId: "build_1",
+      taskId: "task_integrated_missing_manifest",
+      attempt: 1,
+      status: "integrated",
+      schemaVersion: "1.0.0",
+      manifestPath:
+        "runs/build_1/task_integrated_missing_manifest/attempt-1/integrated.json",
+      sha256: "stale-integrated-evidence",
+      manifest: { taskId: "task_integrated_missing_manifest", attempt: 1 },
+    });
     store.workers.create({
       id: "worker_missing",
       buildId: "build_1",
@@ -80,12 +103,23 @@ describe("startup recovery", () => {
           taskId: "task_integrated_evidence",
           action: "mark_integrated",
         }),
+        expect.objectContaining({
+          taskId: "task_integrated_missing_manifest",
+          action: "recover_integrated_manifest",
+        }),
       ]),
     );
     expect(monitor).toHaveBeenCalledOnce();
     expect(resumeValidation).toHaveBeenCalledOnce();
     expect(queueIntegration).toHaveBeenCalledOnce();
     expect(recoveredIntegration).toHaveBeenCalledOnce();
+    expect(recoveredIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "build_1" }),
+      expect.objectContaining({
+        id: "task_integrated_missing_manifest",
+        attempt: 2,
+      }),
+    );
     expect(store.tasks.getById("task_missing").state).toBe("interrupted");
     expect(store.tasks.getById("task_validate").state).toBe("validating");
     expect(store.tasks.getById("task_integrate").state).toBe("validated");
@@ -160,6 +194,13 @@ function createStore(fixture: DatabaseFixture) {
       task("task_integrated_evidence", {
         resultCommit: "result-integrated",
         integrationCommit: "integration",
+        attempt: 1,
+      }),
+      task("task_integrated_missing_manifest", {
+        resultCommit: "result-integrated-current-attempt",
+        integrationCommit: "integration-current-attempt",
+        state: "integrated",
+        attempt: 2,
       }),
     ],
   });
@@ -168,7 +209,12 @@ function createStore(fixture: DatabaseFixture) {
 
 function task(
   id: string,
-  commits: { resultCommit?: string; integrationCommit?: string } = {},
+  commits: {
+    resultCommit?: string;
+    integrationCommit?: string;
+    state?: "running" | "integrated";
+    attempt?: number;
+  } = {},
 ) {
   return {
     id,
@@ -176,7 +222,8 @@ function task(
     title: id,
     description: id,
     acceptanceCriteria: ["recovered"],
-    state: "running" as const,
+    state: commits.state ?? ("running" as const),
+    ...(commits.attempt === undefined ? {} : { attempt: commits.attempt }),
     ...(commits.resultCommit === undefined
       ? {}
       : { resultCommit: commits.resultCommit }),

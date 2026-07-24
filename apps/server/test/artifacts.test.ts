@@ -192,13 +192,17 @@ describe("handoff manifests and artifact registry", () => {
         .map((manifest) => manifest.attempt),
     ).toEqual([1, 2]);
 
-    await service.publish({
+    const validatedSha256 = second.manifest.produces[0]?.sha256;
+    writeFileSync(contractPath, '{"revision":"mutated-after-validation"}\n');
+    const integrated = await service.publish({
       ...publication,
       attempt: 2,
       status: "integrated",
       resultCommit: "result-2",
       integrationCommit: "integration-2",
     });
+    expect(integrated.manifest.produces[0]?.sha256).toBe(validatedSha256);
+    expect(integrated.artifacts[0]?.sha256).toBe(validatedSha256);
     writeFileSync(contractPath, '{"revision":3}\n');
     await expect(
       service.publish({

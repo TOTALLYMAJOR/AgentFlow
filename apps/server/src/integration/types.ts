@@ -44,11 +44,15 @@ export interface IntegrateTaskInput {
   validationCommands?: readonly ValidationCommandInput[];
   validationTimeoutMs?: number;
   signal?: AbortSignal;
+  onValidationCompleted?: (
+    summary: IntegrationValidationSummary,
+  ) => void | Promise<void>;
   push?: IntegrationPushOptions;
 }
 
 export type IntegrationResultStatus =
   | "integrated"
+  | "cancelled"
   | "merge_conflict"
   | "merge_failed"
   | "validation_failed"

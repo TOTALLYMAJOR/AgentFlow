@@ -35,6 +35,8 @@ function task(
 describe("state machines", () => {
   it("accepts legal build transitions and rejects illegal transitions", () => {
     expect(canTransitionBuild("running", "paused")).toBe(true);
+    expect(canTransitionBuild("failed", "running")).toBe(true);
+    expect(() => assertBuildTransition("failed", "running")).not.toThrow();
     expect(canTransitionBuild("completed", "running")).toBe(false);
     expect(() => assertBuildTransition("completed", "running")).toThrow(
       "cannot transition",

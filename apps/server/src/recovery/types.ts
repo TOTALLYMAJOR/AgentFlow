@@ -11,6 +11,7 @@ export type RecoveryAction =
   | "resume_validation"
   | "queue_integration"
   | "mark_integrated"
+  | "recover_integrated_manifest"
   | "pause_for_review"
   | "no_action";
 

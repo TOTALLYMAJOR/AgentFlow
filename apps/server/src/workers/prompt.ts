@@ -102,6 +102,9 @@ ${renderList(context.task.validationCommands)}
 REPOSITORY INSTRUCTIONS
 ${context.repositoryInstructions.trim() || "No additional repository instructions supplied."}
 
+PREVIOUS ATTEMPT FAILURE
+${context.previousAttempt === undefined ? "None." : renderDocuments([context.previousAttempt])}
+
 INTEGRATED DEPENDENCY MANIFESTS
 ${renderDocuments(context.dependencyManifests)}
 
