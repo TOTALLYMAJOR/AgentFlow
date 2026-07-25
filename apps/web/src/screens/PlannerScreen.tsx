@@ -1,10 +1,25 @@
-import { useState } from "react";
-import { Button, Flash, FormControl, Select, TextInput } from "@primer/react";
-import { GitBranchIcon, PlayIcon } from "@phosphor-icons/react";
+import { useMemo, useState } from "react";
+import {
+  Button,
+  Checkbox,
+  Flash,
+  FormControl,
+  Select,
+  Textarea,
+  TextInput,
+} from "@primer/react";
+import {
+  CheckCircleIcon,
+  GitBranchIcon,
+  MagnifyingGlassIcon,
+  PencilSimpleIcon,
+  PlayIcon,
+} from "@phosphor-icons/react";
 import useSWR from "swr";
 import { apiFetch, postJson } from "../api/client.js";
 import type {
   BuildSummary,
+  BacklogGenerationResult,
   PlanSummary,
   RepositorySummary,
 } from "../api/types.js";
@@ -30,10 +45,64 @@ export function PlannerScreen({
   const [repositoryId, setRepositoryId] = useState("");
   const [backlogPath, setBacklogPath] = useState("");
   const [plan, setPlan] = useState<PlanSummary | null>(null);
+  const [generationMode, setGenerationMode] = useState<"objective" | "auto">(
+    "auto",
+  );
+  const [objective, setObjective] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [generation, setGeneration] =
+    useState<BacklogGenerationResult | null>(null);
+  const [reviewConfirmed, setReviewConfirmed] = useState(false);
   const [planning, setPlanning] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorDetails, setErrorDetails] = useState<unknown>(null);
+  const selectedRepository = useMemo(
+    () =>
+      repositories.data?.find(
+        (repository) => repository.id === repositoryId,
+      ) ?? null,
+    [repositories.data, repositoryId],
+  );
+
+  async function generateBacklog(): Promise<void> {
+    if (repositoryId.length === 0) {
+      return;
+    }
+    setGenerating(true);
+    setError(null);
+    setErrorDetails(null);
+    setPlan(null);
+    setGeneration(null);
+    setReviewConfirmed(false);
+    try {
+      const result = await postJson<BacklogGenerationResult>(
+        `/api/repositories/${repositoryId}/backlog/generate`,
+        {
+          mode: generationMode,
+          ...(generationMode === "objective"
+            ? { objective: objective.trim() }
+            : {}),
+          ...(backlogPath.trim().length === 0 ? {} : { backlogPath }),
+        },
+      );
+      setGeneration(result);
+      if (backlogPath.length === 0) {
+        setBacklogPath(result.backlogPath);
+      }
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Backlog generation failed",
+      );
+      setErrorDetails(
+        typeof cause === "object" && cause !== null && "details" in cause
+          ? (cause as { details?: unknown }).details
+          : null,
+      );
+    } finally {
+      setGenerating(false);
+    }
+  }
 
   async function createPlan(
     event: React.SyntheticEvent<HTMLFormElement>,
@@ -159,6 +228,8 @@ export function PlannerScreen({
             onChange={(event) => {
               setRepositoryId(event.target.value);
               setPlan(null);
+              setGeneration(null);
+              setReviewConfirmed(false);
             }}
           >
             <Select.Option value="">Select repository</Select.Option>
@@ -187,11 +258,221 @@ export function PlannerScreen({
         <Button
           variant="primary"
           type="submit"
-          disabled={repositoryId.length === 0 || planning}
+          disabled={
+            repositoryId.length === 0 ||
+            planning ||
+            (generation !== null && !reviewConfirmed)
+          }
         >
           {planning ? "Validating…" : "Validate plan"}
         </Button>
       </form>
+      <section
+        className="workflow-guide"
+        aria-labelledby="workflow-guide-title"
+      >
+        <header className="section-heading">
+          <div>
+            <h2 id="workflow-guide-title">From repository to running build</h2>
+            <span className="workflow-guide__subtitle">
+              Follow the four gates in order. AgentFlow will stop before unsafe
+              work.
+            </span>
+          </div>
+          <StatusBadge
+            status={
+              plan !== null
+                ? "validated"
+                : generation !== null
+                  ? "review"
+                  : "ready"
+            }
+          />
+        </header>
+
+        <ol className="workflow-steps">
+          <li className={repositoryId.length > 0 ? "is-complete" : "is-current"}>
+            <span className="workflow-step__number">1</span>
+            <div>
+              <strong>Choose a clean checkout</strong>
+              <p>
+                Register a clean Git worktree. AgentFlow will not generate a
+                backlog in a checkout with uncommitted changes.
+              </p>
+              {selectedRepository === null ? null : (
+                <code>{selectedRepository.localPath}</code>
+              )}
+            </div>
+          </li>
+          <li
+            className={
+              generation !== null
+                ? "is-complete"
+                : repositoryId.length > 0
+                  ? "is-current"
+                  : ""
+            }
+          >
+            <span className="workflow-step__number">2</span>
+            <div>
+              <strong>Create the backlog</strong>
+              <p>
+                Let Codex choose from repository evidence, or give it one clear
+                outcome. Only the backlog file may change.
+              </p>
+            </div>
+          </li>
+          <li
+            className={
+              reviewConfirmed
+                ? "is-complete"
+                : generation !== null
+                  ? "is-current"
+                  : ""
+            }
+          >
+            <span className="workflow-step__number">3</span>
+            <div>
+              <strong>Review and commit</strong>
+              <p>
+                Inspect dependencies, ownership, commands, and acceptance
+                criteria. Workers only receive committed source.
+              </p>
+            </div>
+          </li>
+          <li className={plan !== null ? "is-complete" : reviewConfirmed ? "is-current" : ""}>
+            <span className="workflow-step__number">4</span>
+            <div>
+              <strong>Validate and start</strong>
+              <p>
+                Create an immutable plan, review its execution waves, then
+                explicitly start the build.
+              </p>
+            </div>
+          </li>
+        </ol>
+
+        <div className="backlog-builder">
+          <div className="backlog-mode-picker" role="group" aria-label="Backlog creation mode">
+            <button
+              type="button"
+              className={generationMode === "auto" ? "mode-card is-selected" : "mode-card"}
+              aria-pressed={generationMode === "auto"}
+              onClick={() => {
+                setGenerationMode("auto");
+                setGeneration(null);
+                setReviewConfirmed(false);
+              }}
+            >
+              <MagnifyingGlassIcon size={22} aria-hidden="true" />
+              <span>
+                <strong>Discover for me</strong>
+                <small>
+                  Codex selects the highest-value evidence-backed program.
+                </small>
+              </span>
+            </button>
+            <button
+              type="button"
+              className={generationMode === "objective" ? "mode-card is-selected" : "mode-card"}
+              aria-pressed={generationMode === "objective"}
+              onClick={() => {
+                setGenerationMode("objective");
+                setGeneration(null);
+                setReviewConfirmed(false);
+              }}
+            >
+              <PencilSimpleIcon size={22} aria-hidden="true" />
+              <span>
+                <strong>Guide the outcome</strong>
+                <small>
+                  You choose the product outcome; Codex designs the task graph.
+                </small>
+              </span>
+            </button>
+          </div>
+
+          {generationMode === "objective" ? (
+            <FormControl required>
+              <FormControl.Label>What outcome should this program deliver?</FormControl.Label>
+              <Textarea
+                block
+                rows={4}
+                value={objective}
+                placeholder="Build athlete goals with coach review, organization isolation, accessible UI, API contracts, migrations, and focused tests."
+                onChange={(event) => {
+                  setObjective(event.target.value);
+                }}
+              />
+              <FormControl.Caption>
+                Describe the user outcome and important boundaries. Codex will
+                inspect the repository for implementation details.
+              </FormControl.Caption>
+            </FormControl>
+          ) : (
+            <div className="auto-discovery-note">
+              <MagnifyingGlassIcon size={20} aria-hidden="true" />
+              <p>
+                Codex will compare documented gaps, queues, tests, TODOs, recent
+                history, user impact, readiness, and dependency-unblocking
+                value before choosing.
+              </p>
+            </div>
+          )}
+
+          <Button
+            variant="primary"
+            disabled={
+              repositoryId.length === 0 ||
+              generating ||
+              (generationMode === "objective" && objective.trim().length < 10)
+            }
+            onClick={() => {
+              void generateBacklog();
+            }}
+          >
+            {generating
+              ? "Codex is inspecting the repository…"
+              : generationMode === "auto"
+                ? "Discover and draft backlog"
+                : "Draft backlog"}
+          </Button>
+        </div>
+
+        {generation === null ? null : (
+          <div className="backlog-review" role="status">
+            <div className="backlog-review__heading">
+              <CheckCircleIcon size={24} aria-hidden="true" />
+              <div>
+                <strong>Backlog drafted at {generation.backlogPath}</strong>
+                <p>{generation.nextAction}</p>
+              </div>
+            </div>
+            {generation.summary.length === 0 ? null : (
+              <details>
+                <summary>Read Codex’s selection summary</summary>
+                <pre>{generation.summary}</pre>
+              </details>
+            )}
+            <div className="commit-instructions">
+              <span>Review and commit from the registered checkout:</span>
+              <code>
+                git add {generation.backlogPath} &amp;&amp; git commit -m
+                &quot;docs: define AgentFlow backlog&quot;
+              </code>
+            </div>
+            <label className="review-confirmation">
+              <Checkbox
+                checked={reviewConfirmed}
+                onChange={(event) => {
+                  setReviewConfirmed(event.target.checked);
+                }}
+              />
+              <span>I reviewed and committed this backlog.</span>
+            </label>
+          </div>
+        )}
+      </section>
       {error === null ? null : (
         <Flash variant="danger" className="spaced-flash" role="alert">
           <strong>Plan not confirmed</strong>

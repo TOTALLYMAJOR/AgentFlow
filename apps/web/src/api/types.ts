@@ -143,6 +143,16 @@ export interface PlanSummary {
   };
 }
 
+export interface BacklogGenerationResult {
+  repositoryId: string;
+  backlogPath: string;
+  mode: "objective" | "auto";
+  changed: boolean;
+  summary: string;
+  warnings: string;
+  nextAction: string;
+}
+
 export interface TaskDependency {
   taskId: string;
   dependencyTaskId: string;

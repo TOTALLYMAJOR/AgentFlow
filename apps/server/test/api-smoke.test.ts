@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import {
+  chmod,
   mkdtemp,
   mkdir,
   rm,
@@ -25,6 +26,69 @@ afterEach(async () => {
 });
 
 describe("AgentFlow API smoke", () => {
+  it("generates a review-only backlog through Codex for a clean repository", async () => {
+    const runtimeHome = await temporaryRoot("runtime-backlog");
+    const repositoryPath = await createFixtureRepository();
+    const fakeCodexRoot = await temporaryRoot("fake-codex");
+    const fakeCodexPath = path.join(fakeCodexRoot, "codex");
+    await writeFile(
+      fakeCodexPath,
+      `#!/usr/bin/env node
+const arguments_ = process.argv.slice(2);
+const directoryIndex = arguments_.indexOf("--cd");
+const repository = arguments_[directoryIndex + 1];
+require("node:fs").writeFileSync(
+  repository + "/BACKLOG.md",
+  "# Generated backlog\\n\\n## AUTO-001 - Deliver selected program\\n\\n\\\`\\\`\\\`yaml\\nestimate_hours: 2\\ndepends_on: []\\nowns:\\n  - src/\\nvalidate:\\n  - npm run typecheck\\n\\\`\\\`\\\`\\n\\nImplement the selected program.\\n\\n### Acceptance Criteria\\n\\n- Focused validation passes.\\n",
+);
+process.stdout.write("Selected the repository-grounded program.");
+`,
+    );
+    await chmod(fakeCodexPath, 0o755);
+    const environment = resolveEnvironment({
+      AGENTFLOW_HOME: runtimeHome,
+      AGENTFLOW_LOG_LEVEL: "silent",
+      AGENTFLOW_CODEX_BIN: fakeCodexPath,
+    });
+    const { app } = await buildApp({
+      environment,
+      staticRoot: false,
+      logger: false,
+    });
+
+    try {
+      const registered = await app.inject({
+        method: "POST",
+        url: "/api/repositories",
+        payload: { path: repositoryPath },
+      });
+      const repository = registered.json<{ id: string }>();
+      const generated = await app.inject({
+        method: "POST",
+        url: `/api/repositories/${repository.id}/backlog/generate`,
+        payload: { mode: "auto" },
+      });
+
+      expect(generated.statusCode).toBe(200);
+      expect(generated.json()).toMatchObject({
+        repositoryId: repository.id,
+        backlogPath: "BACKLOG.md",
+        mode: "auto",
+        changed: true,
+        summary: "Selected the repository-grounded program.",
+      });
+      const status = await execFileAsync("git", [
+        "-C",
+        repositoryPath,
+        "status",
+        "--porcelain",
+      ]);
+      expect(status.stdout.trim()).toBe("M BACKLOG.md");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("serves health, repository registration, planning, and build creation", async () => {
     const runtimeHome = await temporaryRoot("runtime");
     const repositoryPath = await createFixtureRepository();

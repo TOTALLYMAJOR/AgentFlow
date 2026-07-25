@@ -244,6 +244,7 @@ select {
 .empty-state,
 .build-board,
 .plan-result,
+.workflow-guide,
 .inline-form,
 .planner-form,
 .result-list > article {
@@ -391,6 +392,231 @@ td:first-child {
 
 .plan-result {
   overflow: hidden;
+}
+
+.workflow-guide {
+  margin-bottom: 28px;
+  overflow: hidden;
+}
+
+.workflow-guide__subtitle {
+  color: var(--af-muted);
+  font-size: 12px;
+}
+
+.workflow-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--af-border);
+  list-style: none;
+}
+
+.workflow-steps li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-content: start;
+  gap: 10px;
+  min-height: 150px;
+  padding: 18px;
+  border-right: 1px solid var(--af-border);
+}
+
+.workflow-steps li:last-child {
+  border-right: 0;
+}
+
+.workflow-steps li.is-current {
+  background: color-mix(in srgb, var(--af-accent) 7%, var(--af-canvas));
+  box-shadow: inset 0 3px 0 var(--af-accent);
+}
+
+.workflow-steps li.is-complete .workflow-step__number {
+  border-color: var(--af-accent);
+  background: var(--af-accent);
+  color: #ffffff;
+}
+
+.workflow-step__number {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 1px solid var(--af-border);
+  border-radius: 50%;
+  background: var(--af-subtle);
+  color: var(--af-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.workflow-steps li > div {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.workflow-steps p,
+.auto-discovery-note p,
+.backlog-review p {
+  margin: 0;
+  color: var(--af-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.workflow-steps code {
+  overflow: hidden;
+  color: var(--af-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backlog-builder {
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+}
+
+.backlog-builder > button {
+  justify-self: start;
+}
+
+.backlog-mode-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mode-card {
+  display: flex;
+  min-height: 92px;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius);
+  background: var(--af-canvas);
+  color: var(--af-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.mode-card:hover,
+.mode-card:focus-visible {
+  border-color: var(--af-accent);
+  background: var(--af-subtle);
+}
+
+.mode-card:active {
+  transform: translateY(1px);
+}
+
+.mode-card.is-selected {
+  border-color: var(--af-accent);
+  box-shadow: inset 3px 0 0 var(--af-accent);
+  background: color-mix(in srgb, var(--af-accent) 7%, var(--af-canvas));
+}
+
+.mode-card > span {
+  display: grid;
+  gap: 5px;
+}
+
+.mode-card small {
+  color: var(--af-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.auto-discovery-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px;
+  border-left: 3px solid var(--af-accent);
+  background: var(--af-subtle);
+}
+
+.backlog-review {
+  display: grid;
+  gap: 16px;
+  padding: 20px 22px;
+  border-top: 1px solid var(--af-border);
+  background: color-mix(in srgb, var(--af-accent) 5%, var(--af-canvas));
+}
+
+.backlog-review__heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.backlog-review__heading > svg {
+  flex: 0 0 auto;
+  color: var(--af-accent);
+}
+
+.backlog-review__heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.backlog-review details {
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius);
+  background: var(--af-canvas);
+}
+
+.backlog-review summary {
+  padding: 12px 14px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.backlog-review pre {
+  max-height: 260px;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  border-top: 1px solid var(--af-border);
+  color: var(--af-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.commit-instructions {
+  display: grid;
+  gap: 7px;
+}
+
+.commit-instructions span {
+  color: var(--af-muted);
+  font-size: 12px;
+}
+
+.commit-instructions code {
+  padding: 12px 14px;
+  overflow-x: auto;
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius);
+  background: var(--af-sidebar);
+  color: #f0f6fc;
+  white-space: nowrap;
+}
+
+.review-confirmation {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: fit-content;
+  cursor: pointer;
+  font-weight: 600;
 }
 
 .plan-result .metrics-grid {
@@ -1444,6 +1670,18 @@ td:first-child {
     grid-template-columns: 1fr;
   }
 
+  .workflow-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workflow-steps li:nth-child(2) {
+    border-right: 0;
+  }
+
+  .workflow-steps li:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--af-border);
+  }
+
   .result-detail-grid > section:first-child {
     border-right: 0;
     border-bottom: 1px solid var(--af-border);
@@ -1532,6 +1770,7 @@ td:first-child {
   }
 
   .all-task-grid,
+  .backlog-mode-picker,
   .metadata-grid,
   .inspector-split,
   .attempt-list dl,
@@ -1541,6 +1780,21 @@ td:first-child {
   .resource-columns,
   .planned-task-list li {
     grid-template-columns: 1fr;
+  }
+
+  .workflow-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-steps li,
+  .workflow-steps li:nth-child(2) {
+    min-height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--af-border);
+  }
+
+  .workflow-steps li:last-child {
+    border-bottom: 0;
   }
 
   .all-task-grid li,
