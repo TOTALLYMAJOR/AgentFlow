@@ -15,7 +15,13 @@ export const WORKER_RESULT_JSON_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
   additionalProperties: false,
-  required: ["status", "summary", "validation_notes", "handoff_notes"],
+  required: [
+    "status",
+    "summary",
+    "validation_notes",
+    "handoff_notes",
+    "risks",
+  ],
   properties: {
     status: {
       type: "string",

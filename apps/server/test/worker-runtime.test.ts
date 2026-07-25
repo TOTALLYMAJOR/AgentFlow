@@ -205,6 +205,12 @@ async function delay(milliseconds: number): Promise<void> {
 }
 
 describe("worker prompt and command contract", () => {
+  it("requires every declared property in the strict Codex output schema", () => {
+    expect([...WORKER_RESULT_JSON_SCHEMA.required].sort()).toEqual(
+      Object.keys(WORKER_RESULT_JSON_SCHEMA.properties).sort(),
+    );
+  });
+
   it("includes scoped context and every prohibited authority boundary", () => {
     const prompt = buildWorkerPrompt(promptContext());
     expect(prompt).toContain("ID: BL-101");
