@@ -16,6 +16,15 @@ export type WorkerStatus =
   | "stopping"
   | "stopped"
   | "failed";
+export type RunnerStatus = "online" | "offline" | "draining" | "disabled";
+export type RunnerTransport = "local" | "remote";
+export type RemoteJobStatus =
+  | "queued"
+  | "leased"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "expired";
 export type ArtifactStatus =
   | "produced"
   | "validated"
@@ -260,6 +269,8 @@ export interface WorkerEntity {
   id: string;
   buildId: string;
   taskId: string | null;
+  providerId: string;
+  runnerId: string | null;
   processId: number | null;
   status: WorkerStatus;
   startedAt: string | null;
@@ -268,10 +279,121 @@ export interface WorkerEntity {
   createdAt: string;
 }
 
+export interface RunnerEntity {
+  id: string;
+  name: string;
+  providerId: string;
+  transport: RunnerTransport;
+  status: RunnerStatus;
+  capacity: number;
+  busySlots: number;
+  capabilities: Record<string, string | number | boolean>;
+  lastHeartbeatAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateRunnerInput {
+  id: string;
+  name: string;
+  providerId: string;
+  transport: RunnerTransport;
+  status?: RunnerStatus;
+  capacity: number;
+  busySlots?: number;
+  capabilities?: Record<string, string | number | boolean>;
+  tokenSha256?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface RemoteJobEntity {
+  id: string;
+  buildId: string;
+  taskId: string;
+  attempt: number;
+  providerId: string;
+  runnerId: string | null;
+  status: RemoteJobStatus;
+  payload: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  leaseExpiresAt: string | null;
+  queuedAt: string;
+  leasedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+}
+
+export interface QueueRemoteJobInput {
+  id: string;
+  buildId: string;
+  taskId: string;
+  attempt: number;
+  providerId: string;
+  payload: Record<string, unknown>;
+  queuedAt?: string;
+}
+
+export interface RetryScheduleEntity {
+  taskId: string;
+  buildId: string;
+  failedAttempt: number;
+  nextAttempt: number;
+  failureCode: string;
+  dueAt: string;
+  createdAt: string;
+}
+
+export type VisualComparisonStatus =
+  | "passed"
+  | "failed"
+  | "dimension_mismatch";
+
+export interface VisualComparisonEntity {
+  id: string;
+  repositoryId: string;
+  buildId: string | null;
+  taskId: string | null;
+  routeUrl: string;
+  baselinePath: string;
+  actualPath: string;
+  diffPath: string | null;
+  width: number;
+  height: number;
+  differentPixels: number;
+  differenceRatio: number;
+  maximumDifferenceRatio: number;
+  status: VisualComparisonStatus;
+  createdAt: string;
+}
+
+export interface KnowledgeNodeEntity {
+  path: string;
+  kind: "source" | "test" | "config" | "document";
+  sha256: string;
+}
+
+export interface KnowledgeEdgeEntity {
+  sourcePath: string;
+  targetPath: string;
+  edgeType: "imports";
+}
+
+export interface KnowledgeSnapshotEntity {
+  id: string;
+  repositoryId: string;
+  baseCommit: string;
+  nodeCount: number;
+  edgeCount: number;
+  createdAt: string;
+}
+
 export interface CreateWorkerInput {
   id: string;
   buildId: string;
   taskId?: string | null;
+  providerId?: string;
+  runnerId?: string | null;
   processId?: number | null;
   status?: WorkerStatus;
   startedAt?: string | null;

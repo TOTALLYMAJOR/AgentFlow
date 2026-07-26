@@ -8,6 +8,11 @@ import { TaskManifestRepository } from "./manifest-repository.js";
 import { PlanRepository } from "./plan-repository.js";
 import { RepositoryRepository } from "./repository-repository.js";
 import { SchedulerStateRepository } from "./scheduler-repository.js";
+import { RunnerRepository } from "./runner-repository.js";
+import { RemoteJobRepository } from "./remote-job-repository.js";
+import { RetryScheduleRepository } from "./retry-schedule-repository.js";
+import { VisualComparisonRepository } from "./visual-comparison-repository.js";
+import { KnowledgeRepository } from "./knowledge-repository.js";
 import {
   ApprovalRepository,
   ArtifactRepository,
@@ -49,6 +54,11 @@ export class DatabaseRepositories {
   readonly events: BuildEventRepository;
   readonly manifests: TaskManifestRepository;
   readonly scheduler: SchedulerStateRepository;
+  readonly runners: RunnerRepository;
+  readonly remoteJobs: RemoteJobRepository;
+  readonly retrySchedules: RetryScheduleRepository;
+  readonly visualComparisons: VisualComparisonRepository;
+  readonly knowledge: KnowledgeRepository;
 
   constructor(
     readonly database: Database.Database,
@@ -65,6 +75,11 @@ export class DatabaseRepositories {
     this.events = new BuildEventRepository(database, clock);
     this.manifests = new TaskManifestRepository(database, clock);
     this.scheduler = new SchedulerStateRepository(database, clock);
+    this.runners = new RunnerRepository(database, clock);
+    this.remoteJobs = new RemoteJobRepository(database, clock);
+    this.retrySchedules = new RetryScheduleRepository(database, clock);
+    this.visualComparisons = new VisualComparisonRepository(database, clock);
+    this.knowledge = new KnowledgeRepository(database, clock);
   }
 
   transaction<T>(operation: (repositories: DatabaseRepositories) => T): T {

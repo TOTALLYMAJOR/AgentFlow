@@ -59,6 +59,11 @@ export {
   SchedulerStateRepository,
   type SchedulerCycle,
 } from "./scheduler-repository.js";
+export { RunnerRepository } from "./runner-repository.js";
+export { RemoteJobRepository } from "./remote-job-repository.js";
+export { RetryScheduleRepository } from "./retry-schedule-repository.js";
+export { VisualComparisonRepository } from "./visual-comparison-repository.js";
+export { KnowledgeRepository } from "./knowledge-repository.js";
 export {
   AgentFlowStore,
   DatabaseRepositories,

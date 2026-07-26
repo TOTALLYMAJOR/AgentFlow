@@ -489,6 +489,160 @@ CREATE INDEX task_manifests_by_build
 ON task_manifests (build_id, task_id, status, attempt DESC);
 `;
 
+const REPOSITORY_SCOPED_ACTIVE_BUILDS = `
+DROP INDEX IF EXISTS one_active_build;
+
+CREATE UNIQUE INDEX one_active_build_per_repository
+ON builds (repository_id)
+WHERE status IN ('planning','ready','running','paused','interrupted');
+`;
+
+const REMOTE_RUNNER_SCHEMA = `
+CREATE TABLE runners (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  provider_id TEXT NOT NULL,
+  transport TEXT NOT NULL CHECK (transport IN ('local','remote')),
+  status TEXT NOT NULL CHECK (
+    status IN ('online','offline','draining','disabled')
+  ),
+  capacity INTEGER NOT NULL CHECK (capacity BETWEEN 1 AND 64),
+  busy_slots INTEGER NOT NULL DEFAULT 0
+    CHECK (busy_slots >= 0 AND busy_slots <= capacity),
+  capabilities_json TEXT NOT NULL DEFAULT '{}'
+    CHECK (json_valid(capabilities_json)),
+  token_sha256 TEXT UNIQUE,
+  last_heartbeat_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX runners_by_provider_status
+ON runners (provider_id, status);
+
+ALTER TABLE workers ADD COLUMN provider_id TEXT NOT NULL DEFAULT 'codex';
+ALTER TABLE workers ADD COLUMN runner_id TEXT REFERENCES runners(id);
+`;
+
+const REMOTE_JOB_SCHEMA = `
+CREATE TABLE remote_jobs (
+  id TEXT PRIMARY KEY,
+  build_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK (attempt >= 1),
+  provider_id TEXT NOT NULL,
+  runner_id TEXT REFERENCES runners(id),
+  status TEXT NOT NULL CHECK (
+    status IN ('queued','leased','completed','failed','cancelled','expired')
+  ),
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
+  lease_token_sha256 TEXT UNIQUE,
+  lease_expires_at TEXT,
+  result_idempotency_key TEXT,
+  result_sha256 TEXT,
+  queued_at TEXT NOT NULL,
+  leased_at TEXT,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL,
+  UNIQUE (task_id, attempt),
+  FOREIGN KEY (build_id) REFERENCES builds(id),
+  FOREIGN KEY (task_id, build_id) REFERENCES tasks(id, build_id)
+);
+
+CREATE INDEX remote_jobs_claim_queue
+ON remote_jobs (provider_id, status, queued_at, id);
+
+CREATE INDEX remote_jobs_by_runner
+ON remote_jobs (runner_id, status, lease_expires_at);
+`;
+
+const RETRY_SCHEDULE_SCHEMA = `
+CREATE TABLE retry_schedules (
+  task_id TEXT PRIMARY KEY,
+  build_id TEXT NOT NULL,
+  failed_attempt INTEGER NOT NULL CHECK (failed_attempt >= 1),
+  next_attempt INTEGER NOT NULL CHECK (next_attempt >= 2),
+  failure_code TEXT NOT NULL,
+  due_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (task_id, build_id) REFERENCES tasks(id, build_id)
+);
+
+CREATE INDEX retry_schedules_by_due
+ON retry_schedules (due_at, build_id);
+`;
+
+const VISUAL_COMPARISON_SCHEMA = `
+CREATE TABLE visual_comparisons (
+  id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL,
+  build_id TEXT REFERENCES builds(id),
+  task_id TEXT,
+  route_url TEXT NOT NULL,
+  baseline_path TEXT NOT NULL,
+  actual_path TEXT NOT NULL,
+  diff_path TEXT,
+  width INTEGER NOT NULL CHECK (width > 0),
+  height INTEGER NOT NULL CHECK (height > 0),
+  different_pixels INTEGER NOT NULL CHECK (different_pixels >= 0),
+  difference_ratio REAL NOT NULL CHECK (
+    difference_ratio >= 0 AND difference_ratio <= 1
+  ),
+  maximum_difference_ratio REAL NOT NULL CHECK (
+    maximum_difference_ratio >= 0 AND maximum_difference_ratio <= 1
+  ),
+  status TEXT NOT NULL CHECK (
+    status IN ('passed','failed','dimension_mismatch')
+  ),
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (repository_id) REFERENCES repositories(id),
+  FOREIGN KEY (task_id, build_id) REFERENCES tasks(id, build_id)
+);
+
+CREATE INDEX visual_comparisons_by_repository
+ON visual_comparisons (repository_id, created_at DESC);
+`;
+
+const KNOWLEDGE_GRAPH_SCHEMA = `
+CREATE TABLE knowledge_snapshots (
+  id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL,
+  base_commit TEXT NOT NULL,
+  node_count INTEGER NOT NULL CHECK (node_count >= 0),
+  edge_count INTEGER NOT NULL CHECK (edge_count >= 0),
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (repository_id) REFERENCES repositories(id)
+);
+
+CREATE INDEX knowledge_snapshots_by_repository
+ON knowledge_snapshots (repository_id, created_at DESC);
+
+CREATE TABLE knowledge_nodes (
+  snapshot_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('source','test','config','document')),
+  sha256 TEXT NOT NULL,
+  PRIMARY KEY (snapshot_id, path),
+  FOREIGN KEY (snapshot_id) REFERENCES knowledge_snapshots(id)
+);
+
+CREATE TABLE knowledge_edges (
+  snapshot_id TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  target_path TEXT NOT NULL,
+  edge_type TEXT NOT NULL CHECK (edge_type IN ('imports')),
+  PRIMARY KEY (snapshot_id, source_path, target_path, edge_type),
+  FOREIGN KEY (snapshot_id, source_path)
+    REFERENCES knowledge_nodes(snapshot_id, path),
+  FOREIGN KEY (snapshot_id, target_path)
+    REFERENCES knowledge_nodes(snapshot_id, path)
+);
+
+CREATE INDEX knowledge_edges_by_target
+ON knowledge_edges (snapshot_id, target_path, source_path);
+`;
+
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   {
     version: 1,
@@ -524,6 +678,36 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
     version: 7,
     name: "attempt_scoped_validated_manifests",
     sql: ATTEMPT_MANIFEST_SCHEMA,
+  },
+  {
+    version: 8,
+    name: "repository_scoped_active_builds",
+    sql: REPOSITORY_SCOPED_ACTIVE_BUILDS,
+  },
+  {
+    version: 9,
+    name: "remote_runner_registry",
+    sql: REMOTE_RUNNER_SCHEMA,
+  },
+  {
+    version: 10,
+    name: "lease_fenced_remote_jobs",
+    sql: REMOTE_JOB_SCHEMA,
+  },
+  {
+    version: 11,
+    name: "durable_retry_schedules",
+    sql: RETRY_SCHEDULE_SCHEMA,
+  },
+  {
+    version: 12,
+    name: "durable_visual_comparisons",
+    sql: VISUAL_COMPARISON_SCHEMA,
+  },
+  {
+    version: 13,
+    name: "codebase_knowledge_graph",
+    sql: KNOWLEDGE_GRAPH_SCHEMA,
   },
 ]);
 

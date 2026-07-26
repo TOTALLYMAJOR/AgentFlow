@@ -4,6 +4,11 @@ import { uniquePlanningErrors } from "./errors.js";
 import { calculatePlanEstimates, resolvePlanningOptions } from "./estimates.js";
 import { buildExecutionWaves } from "./graph.js";
 import { findOwnershipConflicts } from "./ownership.js";
+import {
+  deriveEpics,
+  generateAdrDrafts,
+  validateEpicDecomposition,
+} from "./epics.js";
 import { parseBacklogMarkdown } from "./parser.js";
 import {
   BacklogPlanningError,
@@ -25,6 +30,7 @@ export function planBacklogMarkdown(
     ...resolved.errors,
     ...parsed.errors,
     ...validatePlannedTasks(parsed.tasks),
+    ...validateEpicDecomposition(parsed.tasks),
   ]);
 
   if (errors.length > 0) {
@@ -41,6 +47,8 @@ export function planBacklogMarkdown(
     waves,
     ownershipConflicts: findOwnershipConflicts(parsed.tasks),
     estimates: calculatePlanEstimates(parsed.tasks, waves, resolved.options),
+    epics: deriveEpics(parsed.tasks),
+    adrDrafts: generateAdrDrafts(parsed.tasks),
   };
   return {
     valid: true,

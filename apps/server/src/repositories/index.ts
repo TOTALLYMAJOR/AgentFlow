@@ -2,6 +2,7 @@ export {
   AgentFlowRepositoryConfigSchema,
   REPOSITORY_CONFIG_FILENAME,
   createRepositoryConfigFile,
+  replaceRepositoryConfigFile,
   loadRepositoryConfig,
   repositoryConfigPath,
   type AgentFlowRepositoryConfig,

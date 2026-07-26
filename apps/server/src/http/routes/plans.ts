@@ -13,7 +13,15 @@ import {
   loadRepositoryConfig,
 } from "../../repositories/index.js";
 import { planBacklogMarkdown } from "../../planning/index.js";
+import {
+  applyEstimateCalibration,
+  calculateEstimateCalibration,
+} from "../../planning/calibration.js";
 import { createId, nowIso } from "../../util/ids.js";
+import {
+  validateRepositoryAgainstPolicy,
+  validateTaskOwnershipAgainstPolicy,
+} from "../../governance/organization-policy.js";
 
 const CreatePlanBody = z.object({
   repositoryId: z.string().min(1),
@@ -54,6 +62,18 @@ export function registerPlanRoutes(
     const input = GenerateBacklogBody.parse(request.body);
     const repository = await context.repositoryService.get(id);
     const config = await loadRepositoryConfig(repository.localPath);
+    const policyErrors = validateRepositoryAgainstPolicy(
+      config,
+      context.organizationPolicy,
+    );
+    if (policyErrors.length > 0) {
+      throw new AgentFlowError(
+        "ORGANIZATION_POLICY_VIOLATION",
+        "Repository configuration does not satisfy organization policy",
+        422,
+        policyErrors,
+      );
+    }
     const relativeBacklogPath = input.backlogPath ?? config.backlog.path;
     const backlogPath = resolveRepositoryPath(
       repository.localPath,
@@ -132,6 +152,11 @@ export function registerPlanRoutes(
         { backlogPath: relativeBacklogPath, unexpectedPaths },
       );
     }
+    const generatedMarkdown = await readFile(backlogPath, "utf8");
+    const generatedPlan = planBacklogMarkdown(generatedMarkdown, {
+      defaultValidation: config.validation.task_default,
+      workerMaximum: config.workers.maximum,
+    });
 
     return {
       repositoryId: repository.id,
@@ -140,6 +165,12 @@ export function registerPlanRoutes(
       changed: changedPaths.includes(relativeBacklogPath),
       summary: output.stdout.trim(),
       warnings: output.stderr.trim(),
+      decomposition: {
+        valid: generatedPlan.valid,
+        epics: generatedPlan.plan?.epics ?? [],
+        adrDrafts: generatedPlan.plan?.adrDrafts ?? [],
+        errors: generatedPlan.errors,
+      },
       nextAction:
         "Review and commit the backlog, then validate it to create an immutable plan.",
     };
@@ -149,6 +180,18 @@ export function registerPlanRoutes(
     const input = CreatePlanBody.parse(request.body);
     const repository = await context.repositoryService.get(input.repositoryId);
     const config = await loadRepositoryConfig(repository.localPath);
+    const policyErrors = validateRepositoryAgainstPolicy(
+      config,
+      context.organizationPolicy,
+    );
+    if (policyErrors.length > 0) {
+      throw new AgentFlowError(
+        "ORGANIZATION_POLICY_VIOLATION",
+        "Repository configuration does not satisfy organization policy",
+        422,
+        policyErrors,
+      );
+    }
     const relativeBacklogPath = input.backlogPath ?? config.backlog.path;
     const backlogPath = await resolveRepositoryFile(
       repository.localPath,
@@ -174,16 +217,42 @@ export function registerPlanRoutes(
         planning.errors,
       );
     }
+    const ownershipPolicyErrors = validateTaskOwnershipAgainstPolicy(
+      planning.plan.tasks,
+      context.organizationPolicy,
+    );
+    if (ownershipPolicyErrors.length > 0) {
+      throw new AgentFlowError(
+        "ORGANIZATION_POLICY_VIOLATION",
+        "Backlog ownership does not satisfy organization policy",
+        422,
+        ownershipPolicyErrors,
+      );
+    }
 
     const id = createId("plan");
     const createdAt = nowIso();
     const backlogSha256 = createHash("sha256").update(markdown).digest("hex");
+    const calibration = calculateEstimateCalibration(
+      context.database,
+      repository.id,
+    );
     const normalizedPlan: PlanResult = {
       id,
       repositoryId: repository.id,
       backlogPath: relativeBacklogPath,
       backlogSha256,
       ...planning.plan,
+      estimates: applyEstimateCalibration(
+        planning.plan.estimates,
+        calibration,
+      ),
+      calibration: {
+        taskSampleCount: calibration.taskSampleCount,
+        buildSampleCount: calibration.buildSampleCount,
+        appliedMultiplier: calibration.appliedMultiplier,
+        confidence: calibration.confidence,
+      },
       createdAt,
     };
     const stored = context.store.plans.create({
@@ -286,6 +355,9 @@ function backlogGenerationPrompt(
     "Do not implement tasks, change source code, commit, push, or start AgentFlow.",
     "Every task heading must be exactly: ## TASK-ID - Imperative task title",
     "Immediately after each heading, add a yaml fence with estimate_hours, depends_on, owns, and validate.",
+    "Decompose broad work into 2-6 outcome-oriented epics. Every task must repeat epic_id, epic_title, and epic_outcome in its YAML metadata; keep those values identical within an epic.",
+    "Dependencies may cross epics, but the derived epic dependency graph must remain acyclic.",
+    "When implementation requires a genuine architecture choice, add architecture_decisions entries with title, context, decision, and a non-empty consequences list. Do not create ADRs for routine implementation choices.",
     "Use produces and consumes when tasks exchange versioned artifacts.",
     "After the fence, write a concrete description and a ### Acceptance Criteria section with measurable bullets.",
     "All dependencies must exist in this backlog and the graph must be acyclic.",

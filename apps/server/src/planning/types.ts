@@ -1,6 +1,7 @@
 import type {
   OwnershipConflict,
   PlanEstimates,
+  PlannedEpic,
   PlannedTask,
 } from "../domain/types.js";
 
@@ -33,6 +34,8 @@ export const PLANNING_ERROR_CODES = [
   "INVALID_WORKER_MAXIMUM",
   "INVALID_WORKER_EFFICIENCY",
   "INVALID_OVERHEAD_PERCENT",
+  "EPIC_METADATA_CONFLICT",
+  "EPIC_DEPENDENCY_CYCLE",
 ] as const;
 
 export type PlanningErrorCode = (typeof PLANNING_ERROR_CODES)[number];
@@ -67,6 +70,8 @@ export interface BacklogPlan {
   waves: string[][];
   ownershipConflicts: OwnershipConflict[];
   estimates: PlanEstimates;
+  epics: PlannedEpic[];
+  adrDrafts: import("../domain/types.js").AdrDraft[];
 }
 
 export interface BacklogPlanResult extends ParsedBacklog {

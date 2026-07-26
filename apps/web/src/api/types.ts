@@ -14,6 +14,37 @@ export interface HealthResponse {
     journalMode: string;
   };
   activeBuildId: string | null;
+  activeBuildIds: string[];
+  resources: {
+    workerCapacity: number;
+    busyWorkers: number;
+    availableWorkers: number;
+  };
+  agentProviders: {
+    default: string;
+    configured: Array<{
+      id: string;
+      execution: "local";
+    }>;
+  };
+  runners: {
+    total: number;
+    online: number;
+    availableSlots: number;
+  };
+  remoteJobs: {
+    queued: number;
+    leased: number;
+    completed: number;
+    failed: number;
+    expired: number;
+  };
+  retries: {
+    pending: number;
+    maximumAttempts: number;
+    baseDelayMs: number;
+    maximumDelayMs: number;
+  };
   uptimeSeconds: number;
 }
 
@@ -141,6 +172,27 @@ export interface PlanSummary {
     maximumTheoreticalConcurrency: number;
     criticalPathTaskIds: string[];
   };
+  calibration?: {
+    taskSampleCount: number;
+    buildSampleCount: number;
+    appliedMultiplier: number;
+    confidence: "insufficient" | "low" | "medium" | "high";
+  };
+  epics: Array<{
+    id: string;
+    title: string;
+    outcome: string;
+    taskIds: string[];
+    dependsOnEpicIds: string[];
+    estimateHours: number;
+  }>;
+  adrDrafts: Array<{
+    id: string;
+    title: string;
+    status: "proposed";
+    sourceTaskIds: string[];
+    markdown: string;
+  }>;
 }
 
 export interface BacklogGenerationResult {
@@ -151,6 +203,61 @@ export interface BacklogGenerationResult {
   summary: string;
   warnings: string;
   nextAction: string;
+  decomposition: {
+    valid: boolean;
+    epics: PlanSummary["epics"];
+    adrDrafts: PlanSummary["adrDrafts"];
+    errors: unknown[];
+  };
+}
+
+export interface VisualComparison {
+  id: string;
+  repositoryId: string;
+  routeUrl: string;
+  baselinePath: string;
+  actualPath: string;
+  diffPath: string | null;
+  width: number;
+  height: number;
+  differentPixels: number;
+  differenceRatio: number;
+  maximumDifferenceRatio: number;
+  status: "passed" | "failed" | "dimension_mismatch";
+  createdAt: string;
+}
+
+export interface KnowledgeSnapshot {
+  id: string;
+  repositoryId: string;
+  baseCommit: string;
+  nodeCount: number;
+  edgeCount: number;
+  createdAt: string;
+}
+
+export interface ImpactAnalysis {
+  snapshot: KnowledgeSnapshot;
+  changedPaths: string[];
+  impactedFiles: Array<{
+    path: string;
+    distance: number;
+    importedChangedPaths: string[];
+  }>;
+  impactedTasks: Array<{
+    buildId: string;
+    taskId: string;
+    backlogTaskId: string;
+    state: string;
+    ownedPaths: string[];
+    matchedFiles: string[];
+  }>;
+  summary: {
+    directFiles: number;
+    transitiveFiles: number;
+    activeTasks: number;
+    maximumDistance: number;
+  };
 }
 
 export interface TaskDependency {
@@ -324,4 +431,24 @@ export interface ApiErrorPayload {
     message: string;
     details?: unknown;
   };
+}
+
+export interface GovernanceTemplate {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface GovernanceOverview {
+  policyPath: string;
+  policy: {
+    version: 1;
+    workers: { maximum_per_repository: number };
+    retries: { maximum_attempts: number };
+    validation: { required_commands: string[] };
+    ownership: { forbidden_prefixes: string[] };
+    providers: { allowed: string[] };
+    visual: { maximum_difference_ratio: number };
+  };
+  templates: GovernanceTemplate[];
 }

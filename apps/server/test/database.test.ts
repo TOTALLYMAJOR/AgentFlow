@@ -49,6 +49,37 @@ describe("SQLite database foundation", () => {
     expect(listAppliedMigrations(fixture.database)).toEqual(before);
   });
 
+  it("persists remote runner capability and heartbeat state", () => {
+    fixture = createDatabaseFixture();
+    const store = createDatabaseRepositories(fixture.database, () =>
+      "2026-07-26T12:00:00.000Z"
+    );
+    const runner = store.runners.create({
+      id: "runner_1",
+      name: "build-host-1",
+      providerId: "codex",
+      transport: "remote",
+      capacity: 4,
+      capabilities: { os: "linux", browser: true },
+      tokenSha256: "token-digest",
+    });
+    expect(runner).toMatchObject({
+      status: "online",
+      capacity: 4,
+      busySlots: 0,
+      capabilities: { os: "linux", browser: true },
+    });
+    expect(store.runners.findByTokenSha256("token-digest")?.id).toBe(
+      "runner_1",
+    );
+    expect(
+      store.runners.heartbeat("runner_1", {
+        busySlots: 2,
+        status: "draining",
+      }),
+    ).toMatchObject({ status: "draining", busySlots: 2 });
+  });
+
   it("enforces foreign keys", () => {
     fixture = createDatabaseFixture();
 
@@ -72,7 +103,7 @@ describe("SQLite database foundation", () => {
     ).toThrow(/FOREIGN KEY constraint failed/i);
   });
 
-  it("enforces one active or interrupted build globally", () => {
+  it("enforces one active or interrupted build per repository", () => {
     fixture = createDatabaseFixture();
     const store = createDatabaseRepositories(fixture.database);
     store.repositories.create({
@@ -80,6 +111,13 @@ describe("SQLite database foundation", () => {
       name: "A",
       localPath: "/tmp/repository-a",
       configPath: "/tmp/repository-a/.agentflow.yaml",
+      baseBranch: "main",
+    });
+    store.repositories.create({
+      id: "repository_b",
+      name: "B",
+      localPath: "/tmp/repository-b",
+      configPath: "/tmp/repository-b/.agentflow.yaml",
       baseBranch: "main",
     });
 
@@ -101,6 +139,25 @@ describe("SQLite database foundation", () => {
         status: "ready",
       }),
     ).toThrow(/UNIQUE constraint failed/i);
+
+    expect(() =>
+      store.builds.create({
+        id: "build_other_repository",
+        repositoryId: "repository_b",
+        backlogPath: "BACKLOG.md",
+        baseCommit: "def456",
+        integrationBranch: "agentflow/build-other-repository",
+        status: "running",
+      }),
+    ).not.toThrow();
+    expect(store.builds.listActive().map((build) => build.id)).toEqual([
+      "build_other_repository",
+      "build_1",
+    ]);
+    expect(store.builds.findActive("repository_a")?.id).toBe("build_1");
+    expect(store.builds.findActive("repository_b")?.id).toBe(
+      "build_other_repository",
+    );
 
     store.builds.transition("build_1", "cancelled");
     store.builds.create({

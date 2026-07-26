@@ -61,14 +61,15 @@ export function registerBuildRoutes(
 ): void {
   app.post("/api/builds", async (request, reply) => {
     const { planId } = CreateBuildBody.parse(request.body);
-    if (context.store.builds.findActive() !== undefined) {
+    const plan = context.store.plans.getById(planId);
+    const activeBuild = context.store.builds.findActive(plan.repositoryId);
+    if (activeBuild !== undefined) {
       throw new AgentFlowError(
         "ACTIVE_BUILD_EXISTS",
-        "Only one build may be active across this AgentFlow installation",
+        `Repository ${plan.repositoryId} already has active build ${activeBuild.id}`,
         409,
       );
     }
-    const plan = context.store.plans.getById(planId);
     const repositoryConfig = AgentFlowRepositoryConfigSchema.parse(
       plan.repositoryConfig,
     );
@@ -104,6 +105,7 @@ export function registerBuildRoutes(
       context.store.workers.create({
         id: `${buildId}:worker:${slot}`,
         buildId,
+        providerId: context.environment.defaultAgentProvider,
         status: "idle",
       });
     }

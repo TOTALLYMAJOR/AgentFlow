@@ -5,6 +5,9 @@ import {
   open,
   readFile,
   realpath,
+  rename,
+  unlink,
+  writeFile,
 } from "node:fs/promises";
 import path from "node:path";
 
@@ -249,6 +252,27 @@ export async function createRepositoryConfigFile(
     await handle.close();
   }
   return "created";
+}
+
+export async function replaceRepositoryConfigFile(
+  repositoryRoot: string,
+  config: AgentFlowRepositoryConfig,
+): Promise<void> {
+  const validated = AgentFlowRepositoryConfigSchema.parse(config);
+  const configPath = repositoryConfigPath(repositoryRoot);
+  await assertPathInsideRepository(repositoryRoot, configPath);
+  const temporaryPath = `${configPath}.agentflow-tmp`;
+  await writeFile(
+    temporaryPath,
+    stringify(validated, { indent: 2, lineWidth: 0 }),
+    { encoding: "utf8", mode: 0o600, flag: "wx" },
+  );
+  try {
+    await rename(temporaryPath, configPath);
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function assertPathInsideRepository(

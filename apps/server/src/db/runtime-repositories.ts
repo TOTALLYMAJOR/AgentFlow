@@ -30,6 +30,8 @@ interface WorkerRow {
   id: string;
   build_id: string;
   task_id: string | null;
+  provider_id: string;
+  runner_id: string | null;
   process_id: number | null;
   status: WorkerStatus;
   started_at: string | null;
@@ -86,6 +88,8 @@ function mapWorker(row: WorkerRow): WorkerEntity {
     id: row.id,
     buildId: row.build_id,
     taskId: row.task_id,
+    providerId: row.provider_id,
+    runnerId: row.runner_id,
     processId: row.process_id,
     status: row.status,
     startedAt: row.started_at,
@@ -149,8 +153,8 @@ function mapApproval(row: ApprovalRow): ApprovalEntity {
 
 const WORKER_SELECT = `
   SELECT
-    id, build_id, task_id, process_id, status, started_at, heartbeat_at,
-    stopped_at, created_at
+    id, build_id, task_id, provider_id, runner_id, process_id, status,
+    started_at, heartbeat_at, stopped_at, created_at
   FROM workers
 `;
 
@@ -203,6 +207,8 @@ export class WorkerRepository {
           buildId: string;
           taskId: string | null;
           processId: number | null;
+          providerId: string;
+          runnerId: string | null;
           status: WorkerStatus;
           startedAt: string | null;
           heartbeatAt: string | null;
@@ -210,10 +216,10 @@ export class WorkerRepository {
           createdAt: string;
         }>(
           `INSERT INTO workers (
-             id, build_id, task_id, process_id, status, started_at,
+             id, build_id, task_id, provider_id, runner_id, process_id, status, started_at,
              heartbeat_at, stopped_at, created_at
            ) VALUES (
-             @id, @buildId, @taskId, @processId, @status, @startedAt,
+             @id, @buildId, @taskId, @providerId, @runnerId, @processId, @status, @startedAt,
              @heartbeatAt, @stoppedAt, @createdAt
            )`,
         )
@@ -221,6 +227,8 @@ export class WorkerRepository {
           id: input.id,
           buildId: input.buildId,
           taskId: input.taskId ?? null,
+          providerId: input.providerId ?? "codex",
+          runnerId: input.runnerId ?? null,
           processId: input.processId ?? null,
           status: input.status ?? "idle",
           startedAt: input.startedAt ?? null,
@@ -234,7 +242,12 @@ export class WorkerRepository {
           buildId: input.buildId,
           taskId: input.taskId ?? null,
           type: "worker.created",
-          payload: { workerId: input.id, status: input.status ?? "idle" },
+          payload: {
+            workerId: input.id,
+            status: input.status ?? "idle",
+            providerId: input.providerId ?? "codex",
+            runnerId: input.runnerId ?? null,
+          },
           occurredAt: createdAt,
         },
         this.clock,
@@ -259,6 +272,18 @@ export class WorkerRepository {
       )
       .all(buildId)
       .map(mapWorker);
+  }
+
+  countBusy(): number {
+    const row = this.database
+      .prepare<[], { count: number }>(
+        `SELECT COUNT(*) AS count
+         FROM workers
+         WHERE status IN ('starting','running','stopping')
+           AND task_id IS NOT NULL`,
+      )
+      .get();
+    return row?.count ?? 0;
   }
 
   assign(input: AssignWorkerInput): WorkerEntity {

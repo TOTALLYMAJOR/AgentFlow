@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, Flash } from "@primer/react";
 import {
   ArrowClockwiseIcon,
@@ -46,16 +46,30 @@ export function OverviewScreen({
   const builds = useSWR<BuildSummary[]>("/api/builds", apiFetch, {
     refreshInterval: 2_000,
   });
-  const activeBuild =
-    builds.data?.find((build) =>
+  const activeBuilds =
+    builds.data?.filter((build) =>
       ["planning", "ready", "running", "paused", "interrupted"].includes(
         build.status,
       ),
-    ) ?? null;
+    ) ?? [];
+  const [selectedBuildId, setSelectedBuildId] = useState<string | null>(null);
+  const activeBuild =
+    activeBuilds.find((build) => build.id === selectedBuildId) ??
+    activeBuilds[0] ??
+    null;
   const stream = useBuildEvents(activeBuild?.id ?? null);
   const [controlPending, setControlPending] = useState(false);
   const [controlError, setControlError] = useState<string | null>(null);
   const buildControl = getBuildControl(activeBuild?.status ?? null);
+
+  useEffect(() => {
+    if (
+      activeBuilds.length > 0 &&
+      !activeBuilds.some((build) => build.id === selectedBuildId)
+    ) {
+      setSelectedBuildId(activeBuilds[0]?.id ?? null);
+    }
+  }, [activeBuilds, selectedBuildId]);
 
   async function controlBuild(action: OverviewBuildAction): Promise<void> {
     if (activeBuild === null) {
@@ -132,23 +146,64 @@ export function OverviewScreen({
           detail="registered locally"
         />
         <Metric
-          label="Active build"
+          label="Active builds"
           value={
-            builds.data === undefined ? "checking" : (activeBuild?.status ?? "none")
+            builds.data === undefined ? "checking" : String(activeBuilds.length)
           }
-          detail={activeBuild?.integrationBranch ?? "one build maximum"}
+          detail={
+            activeBuilds.length === 0
+              ? "none"
+              : `${activeBuilds.filter((build) => build.status === "running").length} running`
+          }
         />
         <Metric
-          label="Event stream"
+          label="Worker budget"
           value={
-            builds.data === undefined
+            health.data === undefined
               ? "checking"
-              : stream.connected
-                ? "live"
-                : "idle"
+              : `${health.data.resources.busyWorkers}/${health.data.resources.workerCapacity}`
           }
-          detail={`${stream.events.length} recent events`}
+          detail={
+            health.data === undefined
+              ? "installation capacity"
+              : `${health.data.resources.availableWorkers} available · ${stream.connected ? "events live" : "events idle"}`
+          }
         />
+      </section>
+
+      <section className="runner-summary" aria-labelledby="runner-summary-title">
+        <div>
+          <span id="runner-summary-title">Execution fabric</span>
+          <strong>
+            {health.data?.agentProviders.default ?? "checking provider"}
+          </strong>
+        </div>
+        <dl>
+          <div>
+            <dt>Remote machines</dt>
+            <dd>
+              {health.data === undefined
+                ? "checking"
+                : `${health.data.runners.online}/${health.data.runners.total} online`}
+            </dd>
+          </div>
+          <div>
+            <dt>Remote capacity</dt>
+            <dd>
+              {health.data === undefined
+                ? "checking"
+                : `${health.data.runners.availableSlots} slots available`}
+            </dd>
+          </div>
+          <div>
+            <dt>Remote queue</dt>
+            <dd>
+              {health.data === undefined
+                ? "checking"
+                : `${health.data.remoteJobs.queued} queued · ${health.data.remoteJobs.leased} leased · ${health.data.retries.pending} retrying`}
+            </dd>
+          </div>
+        </dl>
       </section>
 
       {builds.isLoading || health.isLoading || repositories.isLoading ? (
@@ -161,29 +216,63 @@ export function OverviewScreen({
           onAction={onNavigateRepositories}
         />
       ) : (
-        <section className="build-board" aria-labelledby="active-build-title">
-          <header className="section-heading">
+        <>
+          <section
+            className="active-build-rail"
+            aria-labelledby="active-build-rail-title"
+          >
+            <header>
+              <h2 id="active-build-rail-title">Repository builds</h2>
+              <span>{activeBuilds.length} active</span>
+            </header>
             <div>
-              <h2 id="active-build-title">{activeBuild.repositoryName}</h2>
-              <span className="mono">{activeBuild.integrationBranch}</span>
+              {activeBuilds.map((build) => (
+                <button
+                  type="button"
+                  className={
+                    build.id === activeBuild.id
+                      ? "active-build-choice is-selected"
+                      : "active-build-choice"
+                  }
+                  aria-pressed={build.id === activeBuild.id}
+                  key={build.id}
+                  onClick={() => {
+                    setSelectedBuildId(build.id);
+                  }}
+                >
+                  <span>
+                    <strong>{build.repositoryName ?? build.repositoryId}</strong>
+                    <code>{build.integrationBranch}</code>
+                  </span>
+                  <StatusBadge status={build.status} />
+                </button>
+              ))}
             </div>
-            <StatusBadge status={activeBuild.status} />
-          </header>
-          <div className="worker-grid">
-            {Array.from({ length: activeBuild.workerLimit }, (_, index) => {
-              const worker = activeBuild.workers?.find(
-                (candidate) => candidate.slot === index + 1,
-              );
-              return (
-                <article className="worker-slot" key={index}>
-                  <span>Worker {index + 1}</span>
-                  <strong>{worker?.taskId ?? "Available"}</strong>
-                  <StatusBadge status={worker?.status ?? "idle"} />
-                </article>
-              );
-            })}
-          </div>
-        </section>
+          </section>
+          <section className="build-board" aria-labelledby="active-build-title">
+            <header className="section-heading">
+              <div>
+                <h2 id="active-build-title">{activeBuild.repositoryName}</h2>
+                <span className="mono">{activeBuild.integrationBranch}</span>
+              </div>
+              <StatusBadge status={activeBuild.status} />
+            </header>
+            <div className="worker-grid">
+              {Array.from({ length: activeBuild.workerLimit }, (_, index) => {
+                const worker = activeBuild.workers?.find(
+                  (candidate) => candidate.slot === index + 1,
+                );
+                return (
+                  <article className="worker-slot" key={index}>
+                    <span>Worker {index + 1}</span>
+                    <strong>{worker?.taskId ?? "Available"}</strong>
+                    <StatusBadge status={worker?.status ?? "idle"} />
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        </>
       )}
     </>
   );

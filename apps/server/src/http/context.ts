@@ -4,6 +4,8 @@ import type { AgentFlowDatabase, DatabaseRepositories } from "../db/index.js";
 import type { RecoveryService } from "../recovery/index.js";
 import type { RepositoryService } from "../repositories/index.js";
 import type { BuildCoordinator } from "../orchestration/coordinator.js";
+import type { CodingAgentProviderRegistry } from "../workers/index.js";
+import type { OrganizationPolicy } from "../governance/organization-policy.js";
 
 export interface AgentFlowContext {
   environment: AgentFlowEnvironment;
@@ -13,4 +15,6 @@ export interface AgentFlowContext {
   handoffService: HandoffManifestService;
   recoveryService: RecoveryService;
   coordinator: BuildCoordinator;
+  agentProviders: CodingAgentProviderRegistry;
+  organizationPolicy: OrganizationPolicy;
 }

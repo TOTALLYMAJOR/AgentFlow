@@ -454,6 +454,18 @@ export function PlannerScreen({
                 <pre>{generation.summary}</pre>
               </details>
             )}
+            <div className="decomposition-summary">
+              <span>
+                <strong>{generation.decomposition.epics.length}</strong> epics
+              </span>
+              <span>
+                <strong>{generation.decomposition.adrDrafts.length}</strong> ADR
+                drafts
+              </span>
+              <StatusBadge
+                status={generation.decomposition.valid ? "valid" : "review"}
+              />
+            </div>
             <div className="commit-instructions">
               <span>Review and commit from the registered checkout:</span>
               <code>
@@ -520,7 +532,12 @@ export function PlannerScreen({
             <Metric
               label="Expected"
               value={`${plan.estimates.expectedElapsedHours.toFixed(1)}h`}
-              detail={`${plan.estimates.expectedSavingsPercent.toFixed(1)}% savings`}
+              detail={
+                plan.calibration === undefined ||
+                plan.calibration.confidence === "insufficient"
+                  ? `${plan.estimates.expectedSavingsPercent.toFixed(1)}% savings · no history yet`
+                  : `${plan.calibration.appliedMultiplier.toFixed(2)}× historical · ${plan.calibration.taskSampleCount} tasks`
+              }
             />
             <Metric
               label="Concurrency"
@@ -528,6 +545,45 @@ export function PlannerScreen({
               detail="theoretical maximum"
             />
           </div>
+
+          <section className="epic-decomposition" aria-labelledby="epic-plan-title">
+            <header className="subsection-heading">
+              <div>
+                <h3 id="epic-plan-title">Epic decomposition</h3>
+                <span>
+                  Outcome groups derived from the authoritative dependency graph
+                </span>
+              </div>
+            </header>
+            <div className="epic-grid">
+              {plan.epics.map((epic) => (
+                <article key={epic.id}>
+                  <span className="mono">{epic.id}</span>
+                  <strong>{epic.title}</strong>
+                  <p>{epic.outcome}</p>
+                  <small>
+                    {epic.taskIds.length} tasks · {epic.estimateHours.toFixed(1)}h
+                    {epic.dependsOnEpicIds.length === 0
+                      ? " · foundation"
+                      : ` · after ${epic.dependsOnEpicIds.join(", ")}`}
+                  </small>
+                </article>
+              ))}
+            </div>
+            {plan.adrDrafts.length === 0 ? null : (
+              <details className="adr-drafts">
+                <summary>{plan.adrDrafts.length} proposed ADR drafts</summary>
+                {plan.adrDrafts.map((draft) => (
+                  <article key={draft.id}>
+                    <strong>
+                      {draft.id} · {draft.title}
+                    </strong>
+                    <pre>{draft.markdown}</pre>
+                  </article>
+                ))}
+              </details>
+            )}
+          </section>
 
           <div className="plan-sections">
             <section aria-labelledby="validation-result-title">

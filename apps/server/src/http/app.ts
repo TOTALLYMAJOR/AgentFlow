@@ -24,12 +24,22 @@ import {
 } from "../repositories/index.js";
 import { RecoveryService } from "../recovery/index.js";
 import { BuildCoordinator } from "../orchestration/coordinator.js";
+import {
+  CodexCodingAgentProvider,
+  CodingAgentProviderRegistry,
+} from "../workers/index.js";
 import { registerErrorHandling } from "./errors.js";
 import type { AgentFlowContext } from "./context.js";
 import { registerBuildRoutes } from "./routes/builds.js";
 import { registerPlanRoutes } from "./routes/plans.js";
 import { registerRepositoryRoutes } from "./routes/repositories.js";
 import { registerSystemRoutes } from "./routes/system.js";
+import { registerRunnerRoutes } from "./routes/runners.js";
+import { registerRemoteJobRoutes } from "./routes/remote-jobs.js";
+import { registerVisualComparisonRoutes } from "./routes/visual-comparisons.js";
+import { registerKnowledgeRoutes } from "./routes/knowledge.js";
+import { ensureOrganizationPolicy } from "../governance/organization-policy.js";
+import { registerGovernanceRoutes } from "./routes/governance.js";
 
 export interface BuildAppOptions {
   environment?: AgentFlowEnvironment;
@@ -48,6 +58,9 @@ export async function buildApp(
 ): Promise<AgentFlowApp> {
   const environment = options.environment ?? resolveEnvironment();
   await ensureRuntimeLayout(environment);
+  const organizationPolicy = await ensureOrganizationPolicy(
+    environment.organizationPolicyPath,
+  );
   const database = openDatabase(options.databasePath ?? environment.databasePath);
   const store = createDatabaseRepositories(database);
   const repositoryService = new RepositoryService(
@@ -57,11 +70,22 @@ export async function buildApp(
     store,
     environment.artifactsPath,
   );
+  const agentProviders = new CodingAgentProviderRegistry([
+    new CodexCodingAgentProvider(environment.codexBinary),
+  ]);
+  agentProviders.get(environment.defaultAgentProvider);
+  if (!organizationPolicy.providers.allowed.includes(environment.defaultAgentProvider)) {
+    throw new Error(
+      `Default provider ${environment.defaultAgentProvider} is not allowed by organization policy`,
+    );
+  }
   const coordinator = new BuildCoordinator({
     environment,
     store,
     repositoryService,
     handoffService,
+    agentProviders,
+    organizationPolicy,
   });
   const recoveryService = new RecoveryService({
     store,
@@ -84,11 +108,15 @@ export async function buildApp(
     handoffService,
     recoveryService,
     coordinator,
+    agentProviders,
+    organizationPolicy,
   };
   await recoveryService.reconcileActiveBuilds();
-  const recoveredBuild = store.builds.findActive();
-  if (recoveredBuild?.status === "running") {
-    coordinator.requestTick(recoveredBuild.id);
+  coordinator.recoverScheduledRetries();
+  for (const recoveredBuild of store.builds.listActive()) {
+    if (recoveredBuild.status === "running") {
+      coordinator.requestTick(recoveredBuild.id);
+    }
   }
   const app = Fastify({
     logger:
@@ -125,6 +153,11 @@ export async function buildApp(
   });
 
   registerSystemRoutes(app, context);
+  registerRunnerRoutes(app, context);
+  registerRemoteJobRoutes(app, context);
+  registerVisualComparisonRoutes(app, context);
+  registerKnowledgeRoutes(app, context);
+  registerGovernanceRoutes(app, context);
   registerRepositoryRoutes(app, context);
   registerPlanRoutes(app, context);
   registerBuildRoutes(app, context);

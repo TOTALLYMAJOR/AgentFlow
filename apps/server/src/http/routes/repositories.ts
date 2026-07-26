@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import type { AgentFlowContext } from "../context.js";
+import { calculateEstimateCalibration } from "../../planning/calibration.js";
 
 const RepositoryIdParameters = z.object({
   id: z.string().min(1),
@@ -38,6 +39,12 @@ export function registerRepositoryRoutes(
   app.get("/api/repositories/:id", async (request) => {
     const { id } = RepositoryIdParameters.parse(request.params);
     return context.repositoryService.get(id);
+  });
+
+  app.get("/api/repositories/:id/estimate-calibration", async (request) => {
+    const { id } = RepositoryIdParameters.parse(request.params);
+    await context.repositoryService.get(id);
+    return calculateEstimateCalibration(context.database, id);
   });
 
   app.post("/api/repositories/:id/inspect", async (request) => {

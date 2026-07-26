@@ -9,6 +9,7 @@ import type {
   ValidationStatus,
   ValidationType,
   WorkerEntity,
+  RemoteJobEntity,
 } from "../db/index.js";
 import type {
   PlanResult,
@@ -37,16 +38,26 @@ import {
   type ValidationCommandOutcome,
 } from "../validation/index.js";
 import {
-  startCodexWorker,
+  type CodingAgentProviderRegistry,
   type CodexWorkerHandle,
   type WorkerContextDocument,
+  type WorkerPromptContext,
   type WorkerOutcome,
   type WorkerRuntimeEvent,
 } from "../workers/index.js";
 import { createId } from "../util/ids.js";
 import { AgentFlowError } from "../http/errors.js";
 import { scheduleTasks, type SchedulingTask } from "./scheduler.js";
+import {
+  selectBuildDispatchTurns,
+  workerResourceSnapshot,
+} from "./resources.js";
 import { TaskCommitService } from "./task-commit.js";
+import {
+  decideRetry,
+  DEFAULT_RETRYABLE_FAILURE_CODES,
+} from "./retry-policy.js";
+import type { OrganizationPolicy } from "../governance/organization-policy.js";
 
 interface ActiveWorker {
   buildId: string;
@@ -60,6 +71,8 @@ export interface BuildCoordinatorOptions {
   store: DatabaseRepositories;
   repositoryService: RepositoryService;
   handoffService: HandoffManifestService;
+  agentProviders: CodingAgentProviderRegistry;
+  organizationPolicy: OrganizationPolicy;
 }
 
 export class BuildCoordinator {
@@ -67,11 +80,14 @@ export class BuildCoordinator {
   private readonly store: DatabaseRepositories;
   private readonly repositoryService: RepositoryService;
   private readonly handoffService: HandoffManifestService;
+  private readonly agentProviders: CodingAgentProviderRegistry;
+  private readonly organizationPolicy: OrganizationPolicy;
   private readonly commitService = new TaskCommitService();
   private readonly worktrees = new Map<string, GitWorktreeManager>();
   private readonly integrations = new Map<string, IntegrationManager>();
   private readonly activeWorkers = new Map<string, ActiveWorker>();
   private readonly dispatching = new Set<string>();
+  private readonly reservedWorkerIds = new Set<string>();
   private readonly tickRunning = new Set<string>();
   private readonly tickRequested = new Set<string>();
   private readonly tickOperations = new Map<string, Promise<void>>();
@@ -79,6 +95,12 @@ export class BuildCoordinator {
   private readonly taskAbortControllers = new Map<string, AbortController>();
   private readonly shuttingDownTasks = new Set<string>();
   private readonly monitorTimers = new Map<string, NodeJS.Timeout>();
+  private readonly retryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly remoteJobWaiters = new Map<
+    string,
+    (job: RemoteJobEntity) => void
+  >();
+  private lastCapacityBuildId: string | null = null;
   private closed = false;
 
   constructor(options: BuildCoordinatorOptions) {
@@ -86,6 +108,8 @@ export class BuildCoordinator {
     this.store = options.store;
     this.repositoryService = options.repositoryService;
     this.handoffService = options.handoffService;
+    this.agentProviders = options.agentProviders;
+    this.organizationPolicy = options.organizationPolicy;
   }
 
   async start(buildId: string): Promise<BuildEntity> {
@@ -138,6 +162,7 @@ export class BuildCoordinator {
     });
     for (const task of this.store.tasks.listForBuild(buildId)) {
       this.taskAbortControllers.get(task.id)?.abort();
+      this.store.remoteJobs.cancelForTask(task.id);
     }
     for (const active of this.activeWorkers.values()) {
       if (active.buildId === buildId) {
@@ -160,6 +185,10 @@ export class BuildCoordinator {
       });
     }
     return build;
+  }
+
+  completeRemoteJob(job: RemoteJobEntity): void {
+    this.remoteJobWaiters.get(job.id)?.(job);
   }
 
   async retry(buildId: string, taskId: string): Promise<TaskEntity> {
@@ -200,11 +229,11 @@ export class BuildCoordinator {
     }
     let reactivated = false;
     if (build.status === "failed") {
-      const activeBuild = this.store.builds.findActive();
+      const activeBuild = this.store.builds.findActive(build.repositoryId);
       if (activeBuild !== undefined && activeBuild.id !== buildId) {
         throw new AgentFlowError(
           "ACTIVE_BUILD_EXISTS",
-          `Build ${buildId} cannot be retried while ${activeBuild.id} is active`,
+          `Build ${buildId} cannot be retried while ${activeBuild.id} is active for repository ${build.repositoryId}`,
           409,
         );
       }
@@ -250,8 +279,20 @@ export class BuildCoordinator {
       }
       throw error;
     }
+    this.store.retrySchedules.delete(taskId);
+    const retryTimer = this.retryTimers.get(taskId);
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer);
+      this.retryTimers.delete(taskId);
+    }
     this.requestTick(buildId);
     return retried;
+  }
+
+  recoverScheduledRetries(): void {
+    for (const schedule of this.store.retrySchedules.list()) {
+      this.armRetrySchedule(schedule.taskId, schedule.dueAt);
+    }
   }
 
   async resumeValidation(build: BuildEntity, task: TaskEntity): Promise<void> {
@@ -426,6 +467,114 @@ export class BuildCoordinator {
     void operation;
   }
 
+  private scheduleAutomaticRetry(
+    buildId: string,
+    taskId: string,
+    failureCode: string,
+  ): void {
+    const task = this.store.tasks.getById(taskId);
+    const decision = decideRetry(task.attempt, failureCode, {
+      maximumAttempts: Math.min(
+        this.environment.retryMaximumAttempts,
+        this.organizationPolicy.retries.maximum_attempts,
+      ),
+      baseDelayMs: this.environment.retryBaseDelayMs,
+      maximumDelayMs: this.environment.retryMaximumDelayMs,
+      retryableFailureCodes: DEFAULT_RETRYABLE_FAILURE_CODES,
+    });
+    if (!decision.retry || decision.nextAttempt === null) {
+      this.store.events.append({
+        buildId,
+        taskId,
+        type: "task.retry_not_scheduled",
+        payload: {
+          failureCode,
+          failedAttempt: task.attempt,
+          reason: decision.reason,
+        },
+      });
+      return;
+    }
+    const dueAt = new Date(Date.now() + decision.delayMs).toISOString();
+    this.store.retrySchedules.upsert({
+      taskId,
+      buildId,
+      failedAttempt: task.attempt,
+      nextAttempt: decision.nextAttempt,
+      failureCode,
+      dueAt,
+    });
+    this.store.events.append({
+      buildId,
+      taskId,
+      type: "task.retry_scheduled",
+      payload: {
+        failureCode,
+        failedAttempt: task.attempt,
+        nextAttempt: decision.nextAttempt,
+        delayMs: decision.delayMs,
+        dueAt,
+      },
+    });
+    this.armRetrySchedule(taskId, dueAt);
+  }
+
+  private armRetrySchedule(taskId: string, dueAt: string): void {
+    const existing = this.retryTimers.get(taskId);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
+    const delayMs = Math.max(0, Date.parse(dueAt) - Date.now());
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(taskId);
+      void this.executeScheduledRetry(taskId);
+    }, delayMs);
+    timer.unref();
+    this.retryTimers.set(taskId, timer);
+  }
+
+  private async executeScheduledRetry(taskId: string): Promise<void> {
+    const schedule = this.store.retrySchedules.get(taskId);
+    if (schedule === undefined || this.closed) {
+      return;
+    }
+    const task = this.store.tasks.getById(taskId);
+    if (!["failed", "blocked_failed", "interrupted"].includes(task.state)) {
+      this.store.retrySchedules.delete(taskId);
+      return;
+    }
+    try {
+      await this.retry(schedule.buildId, taskId);
+      const build = this.store.builds.getById(schedule.buildId);
+      if (build.status === "paused" || build.status === "interrupted") {
+        await this.resume(schedule.buildId);
+      }
+      this.store.events.append({
+        buildId: schedule.buildId,
+        taskId,
+        type: "task.automatic_retry_started",
+        payload: {
+          failedAttempt: schedule.failedAttempt,
+          nextAttempt: schedule.nextAttempt,
+          failureCode: schedule.failureCode,
+        },
+      });
+    } catch (error) {
+      const retryAt = new Date(Date.now() + 30_000).toISOString();
+      this.store.retrySchedules.upsert({
+        ...schedule,
+        dueAt: retryAt,
+      });
+      this.store.events.append({
+        buildId: schedule.buildId,
+        taskId,
+        type: "task.automatic_retry_deferred",
+        payload: { message: errorMessage(error), retryAt },
+      });
+      this.armRetrySchedule(taskId, retryAt);
+    }
+  }
+
   async shutdown(): Promise<void> {
     this.closed = true;
     this.tickRequested.clear();
@@ -433,6 +582,10 @@ export class BuildCoordinator {
       clearInterval(timer);
     }
     this.monitorTimers.clear();
+    for (const timer of this.retryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.retryTimers.clear();
     await Promise.allSettled(this.tickOperations.values());
     const completions: Promise<WorkerOutcome>[] = [];
     for (const taskId of this.taskOperations.keys()) {
@@ -548,17 +701,33 @@ export class BuildCoordinator {
           taskStateIsActive(task.state) || this.dispatching.has(task.id),
       )
       .map((task) => task.id);
+    const buildDispatchingCount = tasks.filter((task) =>
+      this.dispatching.has(task.id),
+    ).length;
     const assignedWorkerCount =
       this.store.workers
         .listForBuild(buildId)
         .filter((worker) =>
           ["starting", "running", "stopping"].includes(worker.status),
-        ).length + this.dispatching.size;
+        ).length + buildDispatchingCount;
+    const resources = workerResourceSnapshot(
+      this.environment.maxConcurrentWorkers,
+      this.store.workers.countBusy(),
+      this.dispatching.size,
+    );
+    const hasDispatchTurn = this.hasGlobalDispatchTurn(
+      buildId,
+      resources.available,
+    );
+    const effectiveWorkerLimit = Math.min(
+      build.workerLimit,
+      assignedWorkerCount + (hasDispatchTurn ? 1 : 0),
+    );
     const decision = scheduleTasks(
       build.status,
       schedulingTasks,
       activeTaskIds,
-      build.workerLimit,
+      effectiveWorkerLimit,
       assignedWorkerCount,
     );
     for (const ranking of decision.rankings) {
@@ -592,8 +761,14 @@ export class BuildCoordinator {
     }
     const idleWorkers = this.store.workers
       .listForBuild(buildId)
-      .filter((worker) => worker.status === "idle" && worker.taskId === null)
+      .filter(
+        (worker) =>
+          worker.status === "idle" &&
+          worker.taskId === null &&
+          !this.reservedWorkerIds.has(worker.id),
+      )
       .sort((first, second) => first.id.localeCompare(second.id));
+    let dispatched = false;
     for (const [index, taskId] of decision.selectedTaskIds.entries()) {
       if (this.closed) {
         break;
@@ -603,6 +778,9 @@ export class BuildCoordinator {
         break;
       }
       this.dispatching.add(taskId);
+      this.reservedWorkerIds.add(worker.id);
+      this.lastCapacityBuildId = buildId;
+      dispatched = true;
       const controller = new AbortController();
       this.taskAbortControllers.set(taskId, controller);
       const operation = this.executeTask(
@@ -624,12 +802,13 @@ export class BuildCoordinator {
         .finally(() => {
           if (this.taskOperations.get(taskId) === operation) {
             this.dispatching.delete(taskId);
+            this.reservedWorkerIds.delete(worker.id);
             this.taskOperations.delete(taskId);
             if (this.taskAbortControllers.get(taskId) === controller) {
               this.taskAbortControllers.delete(taskId);
             }
           }
-          this.requestTick(buildId);
+          this.requestTicksForRunningBuilds();
         });
       this.taskOperations.set(taskId, operation);
       void operation;
@@ -641,8 +820,49 @@ export class BuildCoordinator {
         cycle: cycle.cycle,
         selectedTaskIds: decision.selectedTaskIds,
         activeTaskIds,
+        resources: {
+          installationCapacity: this.environment.maxConcurrentWorkers,
+          globallyReservedWorkers: resources.reserved,
+          globallyAvailableWorkers: resources.available,
+          effectiveWorkerLimit,
+          hasDispatchTurn,
+        },
       },
     });
+    if (dispatched) {
+      this.requestTicksForRunningBuilds();
+    }
+  }
+
+  private hasGlobalDispatchTurn(
+    buildId: string,
+    availableWorkers: number,
+  ): boolean {
+    if (availableWorkers <= 0) {
+      return false;
+    }
+    const runningBuildIds = this.store.builds
+      .listActive()
+      .filter((build) => build.status === "running")
+      .map((build) => build.id)
+      .sort();
+    if (runningBuildIds.length === 0) {
+      return false;
+    }
+    const eligible = selectBuildDispatchTurns(
+      runningBuildIds,
+      this.lastCapacityBuildId,
+      availableWorkers,
+    );
+    return eligible.includes(buildId);
+  }
+
+  private requestTicksForRunningBuilds(): void {
+    for (const build of this.store.builds.listActive()) {
+      if (build.status === "running") {
+        this.requestTick(build.id);
+      }
+    }
   }
 
   private async executeTask(
@@ -725,8 +945,44 @@ export class BuildCoordinator {
         this.stopAndRecycleWorker(workerId, false);
         return;
       }
-      const handle = await startCodexWorker({
-        executable: this.environment.codexBinary,
+      const provider = this.agentProviders.get(
+        this.environment.defaultAgentProvider,
+      );
+      const remoteRunnerAvailable = this.store.runners.list().some(
+        (runner) =>
+          runner.transport === "remote" &&
+          runner.status === "online" &&
+          runner.providerId === provider.id &&
+          runner.busySlots < runner.capacity,
+      );
+      if (remoteRunnerAvailable) {
+        const remoteOutcome = await this.executeRemoteTask({
+          build,
+          task: runningTask,
+          plannedTask,
+          worktreePath: worktree.path,
+          baseCommit: worktree.baseCommit,
+          attemptDirectory,
+          prompt: promptContext,
+          providerId: provider.id,
+          signal,
+        });
+        this.persistWorkerOutcome(runningTask, remoteOutcome);
+        this.stopAndRecycleWorker(workerId, remoteOutcome.success);
+        if (!remoteOutcome.success) {
+          const failureCode = remoteOutcome.failureCode ?? "REMOTE_WORKER_FAILED";
+          this.store.tasks.transition(taskId, "failed", {
+            eventType: "task.remote_worker_failed",
+            errorCode: failureCode,
+            errorMessage: remoteOutcome.failureMessage ?? "Remote worker failed",
+          });
+          this.scheduleAutomaticRetry(buildId, taskId, failureCode);
+          return;
+        }
+        await this.validateCommitAndIntegrate(buildId, taskId, true, signal);
+        return;
+      }
+      const handle = await provider.start({
         worktreePath: worktree.path,
         attemptDirectory,
         prompt: promptContext,
@@ -781,13 +1037,15 @@ export class BuildCoordinator {
         return;
       }
       if (!outcome.success) {
+        const failureCode = outcome.failureCode ?? "WORKER_FAILED";
         if (current.state === "running") {
           this.store.tasks.transition(taskId, "failed", {
             eventType: "task.worker_failed",
-            errorCode: outcome.failureCode ?? "WORKER_FAILED",
+            errorCode: failureCode,
             errorMessage: outcome.failureMessage ?? "Worker execution failed",
           });
         }
+        this.scheduleAutomaticRetry(buildId, taskId, failureCode);
         return;
       }
       await this.validateCommitAndIntegrate(
@@ -851,6 +1109,131 @@ export class BuildCoordinator {
         }
       }
     }
+  }
+
+  private async executeRemoteTask(input: {
+    build: BuildEntity;
+    task: TaskEntity;
+    plannedTask: PlannedTask;
+    worktreePath: string;
+    baseCommit: string;
+    attemptDirectory: string;
+    prompt: WorkerPromptContext;
+    providerId: string;
+    signal: AbortSignal;
+  }): Promise<WorkerOutcome> {
+    const startedAt = new Date().toISOString();
+    const remoteUrl = (
+      await new GitCommandRunner().run(input.worktreePath, [
+        "remote", "get-url", "origin",
+      ])
+    ).stdout.trim();
+    const job = this.store.remoteJobs.queue({
+      id: createId("remote_job"),
+      buildId: input.build.id,
+      taskId: input.task.id,
+      attempt: input.task.attempt,
+      providerId: input.providerId,
+      payload: {
+        protocolVersion: 1,
+        repository: { remoteUrl, baseCommit: input.baseCommit },
+        task: input.plannedTask,
+        prompt: input.prompt,
+        resultContract: {
+          patchBase64: "Base64 encoded unified Git patch against baseCommit",
+          patchSha256: "Lowercase SHA-256 of decoded patch bytes",
+          summary: "Short execution summary",
+        },
+      },
+    });
+    this.store.events.append({
+      buildId: input.build.id,
+      taskId: input.task.id,
+      type: "remote_job.queued",
+      payload: { remoteJobId: job.id, providerId: input.providerId },
+    });
+    const completed = await new Promise<RemoteJobEntity>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.remoteJobWaiters.delete(job.id);
+        reject(new Error(`Remote job ${job.id} timed out`));
+      }, this.environment.workerTimeoutMs);
+      const abort = () => {
+        clearTimeout(timeout);
+        this.remoteJobWaiters.delete(job.id);
+        reject(new Error(`Remote job ${job.id} was cancelled`));
+      };
+      input.signal.addEventListener("abort", abort, { once: true });
+      this.remoteJobWaiters.set(job.id, (result) => {
+        clearTimeout(timeout);
+        input.signal.removeEventListener("abort", abort);
+        this.remoteJobWaiters.delete(job.id);
+        resolve(result);
+      });
+    });
+    const completedAt = new Date().toISOString();
+    const paths = {
+      attemptDirectory: input.attemptDirectory,
+      prompt: path.join(input.attemptDirectory, "prompt.md"),
+      jsonl: path.join(input.attemptDirectory, "remote-events.jsonl"),
+      stderr: path.join(input.attemptDirectory, "remote-stderr.log"),
+      resultSchema: path.join(input.attemptDirectory, "result-schema.json"),
+      result: path.join(input.attemptDirectory, "remote-result.json"),
+      outcome: path.join(input.attemptDirectory, "remote-outcome.json"),
+    };
+    if (completed.status !== "completed" || completed.result === null) {
+      return {
+        success: false, status: "failed", startedAt, completedAt,
+        heartbeatAt: completedAt,
+        durationMs: new Date(completedAt).getTime() - new Date(startedAt).getTime(),
+        failureCode: "worker_reported_failed",
+        failureMessage:
+          typeof completed.result?.message === "string"
+            ? completed.result.message
+            : "Remote runner reported failure",
+        pid: null, exitCode: null, signal: null, finalResult: null,
+        eventCount: 0, malformedEventCount: 0,
+        logsTruncated: { jsonl: false, stderr: false }, paths,
+      };
+    }
+    const patchBase64 = completed.result.patchBase64;
+    const patchSha256 = completed.result.patchSha256;
+    if (typeof patchBase64 !== "string" || typeof patchSha256 !== "string") {
+      throw new Error("Remote result is missing patchBase64 or patchSha256");
+    }
+    const patch = Buffer.from(patchBase64, "base64");
+    if (patch.length > 16 * 1024 * 1024) {
+      throw new Error("Remote result patch exceeds 16 MiB");
+    }
+    if (createHash("sha256").update(patch).digest("hex") !== patchSha256) {
+      throw new Error("Remote result patch digest does not match");
+    }
+    const patchPath = path.join(
+      this.environment.artifactsPath,
+      "remote-results",
+      `${safeSegment(job.id)}.patch`,
+    );
+    await mkdir(path.dirname(patchPath), { recursive: true, mode: 0o700 });
+    await writeFile(patchPath, patch, { mode: 0o600 });
+    await new GitCommandRunner().run(input.worktreePath, [
+      "apply", "--whitespace=nowarn", patchPath,
+    ]);
+    return {
+      success: true, status: "succeeded", startedAt, completedAt,
+      heartbeatAt: completedAt,
+      durationMs: new Date(completedAt).getTime() - new Date(startedAt).getTime(),
+      failureCode: null, failureMessage: null, pid: null, exitCode: 0,
+      signal: null, eventCount: 0, malformedEventCount: 0,
+      logsTruncated: { jsonl: false, stderr: false }, paths,
+      finalResult: {
+        status: "completed",
+        summary:
+          typeof completed.result.summary === "string"
+            ? completed.result.summary
+            : "Remote patch received and verified",
+        validation_notes: [],
+        handoff_notes: ["Patch digest verified by the control plane."],
+      },
+    };
   }
 
   private async validateCommitAndIntegrate(

@@ -41,7 +41,10 @@ require("node:fs").writeFileSync(
   repository + "/BACKLOG.md",
   "# Generated backlog\\n\\n## AUTO-001 - Deliver selected program\\n\\n\\\`\\\`\\\`yaml\\nestimate_hours: 2\\ndepends_on: []\\nowns:\\n  - src/\\nvalidate:\\n  - npm run typecheck\\n\\\`\\\`\\\`\\n\\nImplement the selected program.\\n\\n### Acceptance Criteria\\n\\n- Focused validation passes.\\n",
 );
-process.stdout.write("Selected the repository-grounded program.");
+require("node:fs").writeSync(
+  1,
+  "Selected the repository-grounded program.",
+);
 `,
     );
     await chmod(fakeCodexPath, 0o755);
@@ -97,7 +100,7 @@ process.stdout.write("Selected the repository-grounded program.");
       AGENTFLOW_LOG_LEVEL: "silent",
       AGENTFLOW_CODEX_BIN: "/definitely/missing/agentflow-test-codex",
     });
-    const { app } = await buildApp({
+    const { app, context } = await buildApp({
       environment,
       staticRoot: false,
       logger: false,
@@ -110,6 +113,54 @@ process.stdout.write("Selected the repository-grounded program.");
         status: "ok",
         host: "127.0.0.1:4782",
         database: { status: "ok", journalMode: "wal" },
+        resources: {
+          workerCapacity: 4,
+          busyWorkers: 0,
+          availableWorkers: 4,
+        },
+        agentProviders: {
+          default: "codex",
+          configured: [{ id: "codex", execution: "local" }],
+        },
+        runners: { total: 0, online: 0, availableSlots: 0 },
+      });
+
+      const runnerRegistration = await app.inject({
+        method: "POST",
+        url: "/api/runners/register",
+        payload: {
+          name: "remote-linux-1",
+          providerId: "codex",
+          capacity: 3,
+          capabilities: { os: "linux", browser: true },
+        },
+      });
+      expect(runnerRegistration.statusCode).toBe(201);
+      const registeredRunner = runnerRegistration.json<{
+        runner: { id: string; status: string };
+        token: string;
+      }>();
+      expect(registeredRunner.runner.status).toBe("online");
+      expect(registeredRunner.token.length).toBeGreaterThan(32);
+
+      const unauthorizedHeartbeat = await app.inject({
+        method: "POST",
+        url: "/api/runners/heartbeat",
+        payload: { busySlots: 1 },
+      });
+      expect(unauthorizedHeartbeat.statusCode).toBe(401);
+
+      const heartbeat = await app.inject({
+        method: "POST",
+        url: "/api/runners/heartbeat",
+        headers: { authorization: `Bearer ${registeredRunner.token}` },
+        payload: { busySlots: 1 },
+      });
+      expect(heartbeat.statusCode).toBe(200);
+      expect(heartbeat.json()).toMatchObject({
+        id: registeredRunner.runner.id,
+        busySlots: 1,
+        capacity: 3,
       });
 
       const registered = await app.inject({
@@ -126,6 +177,41 @@ process.stdout.write("Selected the repository-grounded program.");
       expect(repository).toMatchObject({
         localPath: repositoryPath,
         status: "ready",
+      });
+
+      const knowledgeScan = await app.inject({
+        method: "POST",
+        url: `/api/repositories/${repository.id}/knowledge/scan`,
+      });
+      expect(knowledgeScan.statusCode).toBe(201);
+      const knowledgePayload = knowledgeScan.json<{
+        snapshot: {
+          repositoryId: string;
+          nodeCount: number;
+          edgeCount: number;
+        };
+      }>();
+      expect(knowledgePayload).toMatchObject({
+        snapshot: {
+          repositoryId: repository.id,
+        },
+      });
+      expect(knowledgePayload.snapshot.nodeCount).toBeGreaterThan(0);
+      expect(knowledgePayload.snapshot.edgeCount).toBeGreaterThanOrEqual(0);
+      const impact = await app.inject({
+        method: "POST",
+        url: `/api/repositories/${repository.id}/knowledge/impact`,
+        payload: { changedPaths: ["src/index.js"] },
+      });
+      expect(impact.statusCode).toBe(200);
+      expect(impact.json()).toMatchObject({
+        summary: {
+          directFiles: 1,
+          transitiveFiles: 0,
+          activeTasks: 0,
+          maximumDistance: 0,
+        },
+        impactedFiles: [{ path: "src/index.js", distance: 0 }],
       });
 
       const planned = await app.inject({
@@ -151,13 +237,73 @@ process.stdout.write("Selected the repository-grounded program.");
       const build = buildResponse.json<{
         id: string;
         status: string;
-        tasks: Array<{ state: string }>;
+        tasks: Array<{ id: string; state: string }>;
       }>();
       expect(build.status).toBe("ready");
       expect(build.tasks.map((task) => task.state)).toEqual([
         "ready",
         "blocked",
       ]);
+      const remoteTask = build.tasks[0];
+      expect(remoteTask).toBeDefined();
+      context.store.remoteJobs.queue({
+        id: "remote_job_api_1",
+        buildId: build.id,
+        taskId: remoteTask?.id ?? "",
+        attempt: 1,
+        providerId: "codex",
+        payload: { prompt: "Fixture remote task" },
+      });
+      const claim = await app.inject({
+        method: "POST",
+        url: "/api/remote-jobs/claim",
+        headers: { authorization: `Bearer ${registeredRunner.token}` },
+      });
+      expect(claim.statusCode).toBe(200);
+      const claimed = claim.json<{
+        job: { id: string; status: string };
+        leaseToken: string;
+      }>();
+      expect(claimed.job).toMatchObject({
+        id: "remote_job_api_1",
+        status: "leased",
+      });
+      const jobHeartbeat = await app.inject({
+        method: "POST",
+        url: "/api/remote-jobs/remote_job_api_1/heartbeat",
+        headers: {
+          authorization: `Bearer ${registeredRunner.token}`,
+          "x-agentflow-lease-token": claimed.leaseToken,
+        },
+      });
+      expect(jobHeartbeat.statusCode).toBe(200);
+      const remoteCompletion = vi.spyOn(
+        context.coordinator,
+        "completeRemoteJob",
+      );
+      const completedRemoteJob = await app.inject({
+        method: "POST",
+        url: "/api/remote-jobs/remote_job_api_1/complete",
+        headers: {
+          authorization: `Bearer ${registeredRunner.token}`,
+          "x-agentflow-lease-token": claimed.leaseToken,
+          "idempotency-key": "fixture-result-1",
+        },
+        payload: {
+          status: "completed",
+          result: { outcome: "completed", patchSha256: "fixture-patch" },
+        },
+      });
+      expect(completedRemoteJob.statusCode).toBe(200);
+      expect(completedRemoteJob.json()).toMatchObject({
+        status: "completed",
+        result: { patchSha256: "fixture-patch" },
+      });
+      expect(remoteCompletion).toHaveBeenCalledOnce();
+      expect(remoteCompletion.mock.calls[0]?.[0]).toMatchObject({
+        id: "remote_job_api_1",
+        status: "completed",
+      });
 
       const secondBuild = await app.inject({
         method: "POST",
@@ -165,6 +311,30 @@ process.stdout.write("Selected the repository-grounded program.");
         payload: { planId: plan.id },
       });
       expect(secondBuild.statusCode).toBe(409);
+
+      const secondRepositoryPath = await createFixtureRepository();
+      const secondRegistration = await app.inject({
+        method: "POST",
+        url: "/api/repositories",
+        payload: { path: secondRepositoryPath },
+      });
+      const secondRepository = secondRegistration.json<{ id: string }>();
+      const secondPlanResponse = await app.inject({
+        method: "POST",
+        url: "/api/plans",
+        payload: { repositoryId: secondRepository.id },
+      });
+      const secondPlan = secondPlanResponse.json<{ id: string }>();
+      const parallelBuild = await app.inject({
+        method: "POST",
+        url: "/api/builds",
+        payload: { planId: secondPlan.id },
+      });
+      expect(parallelBuild.statusCode).toBe(201);
+      expect(parallelBuild.json()).toMatchObject({
+        repositoryId: secondRepository.id,
+        status: "ready",
+      });
 
       const started = await app.inject({
         method: "POST",
@@ -258,6 +428,43 @@ process.stdout.write("Selected the repository-grounded program.");
           status: "queued",
         }),
       ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("automatically retries transient worker failures up to policy limit", async () => {
+    const { app, context, build } = await createReadyBuildApplication(
+      "automatic-retry",
+      {
+        AGENTFLOW_RETRY_MAX_ATTEMPTS: "2",
+        AGENTFLOW_RETRY_BASE_DELAY_MS: "100",
+        AGENTFLOW_RETRY_MAX_DELAY_MS: "100",
+      },
+    );
+    const task = build.tasks[0];
+    expect(task).toBeDefined();
+
+    try {
+      const started = await app.inject({
+        method: "POST",
+        url: `/api/builds/${build.id}/start`,
+      });
+      expect(started.statusCode).toBe(200);
+      await waitUntil(
+        () => {
+          const current = context.store.tasks.getById(task?.id ?? "");
+          return current.attempt === 2 && current.state === "failed";
+        },
+        5_000,
+      );
+      expect(context.store.retrySchedules.get(task?.id ?? "")).toBeUndefined();
+      const eventTypes = context.store.events
+        .listForBuild(build.id)
+        .map((event) => event.type);
+      expect(eventTypes).toContain("task.retry_scheduled");
+      expect(eventTypes).toContain("task.automatic_retry_started");
+      expect(eventTypes).toContain("task.retry_not_scheduled");
     } finally {
       await app.close();
     }
@@ -438,13 +645,17 @@ process.stdout.write("Selected the repository-grounded program.");
   });
 });
 
-async function createReadyBuildApplication(label: string) {
+async function createReadyBuildApplication(
+  label: string,
+  environmentOverrides: NodeJS.ProcessEnv = {},
+) {
   const runtimeHome = await temporaryRoot(`runtime-${label}`);
   const repositoryPath = await createFixtureRepository();
   const environment = resolveEnvironment({
     AGENTFLOW_HOME: runtimeHome,
     AGENTFLOW_LOG_LEVEL: "silent",
     AGENTFLOW_CODEX_BIN: "/definitely/missing/agentflow-test-codex",
+    ...environmentOverrides,
   });
   const application = await buildApp({
     environment,
@@ -495,6 +706,20 @@ async function createReadyBuildApplication(label: string) {
     await application.app.close();
     throw error;
   }
+}
+
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Condition was not met within ${timeoutMs}ms`);
 }
 
 async function createFixtureRepository(): Promise<string> {

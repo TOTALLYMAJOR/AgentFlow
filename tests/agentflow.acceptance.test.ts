@@ -870,17 +870,17 @@ describe("AgentFlow end-to-end acceptance", () => {
             )
             .map((task) => task.id),
         );
-        expect(
-          events.some((event) => {
-            if (event.type !== "scheduler.cycle") {
-              return false;
-            }
+        const schedulerSelections = new Set(
+          events.flatMap((event) => {
+            if (event.type !== "scheduler.cycle") return [];
             const selected = event.payload["selectedTaskIds"];
-            return (
-              Array.isArray(selected) &&
-              [...implementationTaskIds].every((id) => selected.includes(id))
-            );
+            return Array.isArray(selected)
+              ? selected.filter((value): value is string => typeof value === "string")
+              : [];
           }),
+        );
+        expect(
+          [...implementationTaskIds].every((id) => schedulerSelections.has(id)),
         ).toBe(true);
         assertSerializedIntegrations(events);
         expect(events.some((event) => event.type === "build.completed")).toBe(

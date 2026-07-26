@@ -54,7 +54,7 @@ export function scheduleTasks(
   requestedWorkerLimit: number,
   assignedWorkerCount = activeTaskIds.length,
 ): DispatchDecision {
-  const workerLimit = Math.min(4, Math.max(1, requestedWorkerLimit));
+  const workerLimit = Math.min(64, Math.max(0, requestedWorkerLimit));
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const active = activeTaskIds
     .map((id) => byId.get(id))

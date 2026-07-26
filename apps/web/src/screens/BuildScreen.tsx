@@ -42,8 +42,13 @@ export function BuildScreen(): React.JSX.Element {
   const builds = useSWR<BuildSummary[]>("/api/builds", apiFetch, {
     refreshInterval: 2_000,
   });
+  const activeBuilds =
+    builds.data?.filter((build) => activeStatuses.has(build.status)) ?? [];
+  const [selectedBuildId, setSelectedBuildId] = useState<string | null>(null);
   const active =
-    builds.data?.find((build) => activeStatuses.has(build.status)) ?? null;
+    activeBuilds.find((build) => build.id === selectedBuildId) ??
+    activeBuilds[0] ??
+    null;
   const approvals = useSWR<ApprovalSummary[]>(
     active === null ? null : `/api/builds/${active.id}/approvals`,
     apiFetch,
@@ -69,6 +74,16 @@ export function BuildScreen(): React.JSX.Element {
   );
   const [actionError, setActionError] = useState<string | null>(null);
   const [approvalError, setApprovalError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (
+      activeBuilds.length > 0 &&
+      !activeBuilds.some((build) => build.id === selectedBuildId)
+    ) {
+      setSelectedBuildId(activeBuilds[0]?.id ?? null);
+      setSelectedTaskId(null);
+    }
+  }, [activeBuilds, selectedBuildId]);
 
   const tasks = active?.tasks ?? [];
   const effectiveSelectedTaskId =
@@ -253,6 +268,42 @@ export function BuildScreen(): React.JSX.Element {
           </>
         }
       />
+
+      {activeBuilds.length <= 1 ? null : (
+        <section
+          className="active-build-rail active-build-rail--compact"
+          aria-labelledby="build-supervision-title"
+        >
+          <header>
+            <h2 id="build-supervision-title">Builds under supervision</h2>
+            <span>{activeBuilds.length} repositories</span>
+          </header>
+          <div>
+            {activeBuilds.map((build) => (
+              <button
+                type="button"
+                className={
+                  build.id === active.id
+                    ? "active-build-choice is-selected"
+                    : "active-build-choice"
+                }
+                aria-pressed={build.id === active.id}
+                key={build.id}
+                onClick={() => {
+                  setSelectedBuildId(build.id);
+                  setSelectedTaskId(null);
+                }}
+              >
+                <span>
+                  <strong>{build.repositoryName ?? build.repositoryId}</strong>
+                  <code>{build.id}</code>
+                </span>
+                <StatusBadge status={build.status} />
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       {actionError === null ? null : (
         <Flash variant="danger" className="spaced-flash" role="alert">

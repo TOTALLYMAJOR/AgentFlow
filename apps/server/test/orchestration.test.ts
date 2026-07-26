@@ -13,6 +13,10 @@ import {
   scheduleTasks,
   type SchedulingTask,
 } from "../src/orchestration/scheduler.js";
+import {
+  selectBuildDispatchTurns,
+  workerResourceSnapshot,
+} from "../src/orchestration/resources.js";
 
 function task(
   id: string,
@@ -153,5 +157,38 @@ describe("scheduler", () => {
     const result = scheduleTasks("running", tasks, [], 1);
     expect(result.rankings[0]?.explanation.summary).toContain("critical 1");
     expect(result.selectedTaskIds).toEqual(["BL-100"]);
+  });
+
+  it("accepts a zero-capacity dispatch cycle", () => {
+    expect(
+      scheduleTasks("running", [task("BL-100")], [], 0).selectedTaskIds,
+    ).toEqual([]);
+  });
+});
+
+describe("installation worker resources", () => {
+  it("never reports capacity beyond the configured worker budget", () => {
+    expect(workerResourceSnapshot(4, 2, 1)).toEqual({
+      capacity: 4,
+      busy: 2,
+      reserved: 3,
+      available: 1,
+    });
+    expect(workerResourceSnapshot(4, 4, 2).available).toBe(0);
+  });
+
+  it("rotates dispatch turns across repositories without starvation", () => {
+    const builds = ["build_c", "build_a", "build_b"];
+    expect(selectBuildDispatchTurns(builds, null, 1)).toEqual(["build_a"]);
+    expect(selectBuildDispatchTurns(builds, "build_a", 1)).toEqual([
+      "build_b",
+    ]);
+    expect(selectBuildDispatchTurns(builds, "build_b", 1)).toEqual([
+      "build_c",
+    ]);
+    expect(selectBuildDispatchTurns(builds, "build_c", 2)).toEqual([
+      "build_a",
+      "build_b",
+    ]);
   });
 });

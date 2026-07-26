@@ -292,15 +292,38 @@ export class BuildRepository {
       .map(mapBuild);
   }
 
-  findActive(): BuildEntity | undefined {
-    const row = this.database
+  findActive(repositoryId?: string): BuildEntity | undefined {
+    const row =
+      repositoryId === undefined
+        ? this.database
+            .prepare<[], BuildRow>(
+              `${BUILD_SELECT}
+               WHERE status IN ('planning','ready','running','paused','interrupted')
+               ORDER BY created_at DESC, id DESC
+               LIMIT 1`,
+            )
+            .get()
+        : this.database
+            .prepare<[string], BuildRow>(
+              `${BUILD_SELECT}
+               WHERE repository_id = ?
+                 AND status IN ('planning','ready','running','paused','interrupted')
+               ORDER BY created_at DESC, id DESC
+               LIMIT 1`,
+            )
+            .get(repositoryId);
+    return row === undefined ? undefined : mapBuild(row);
+  }
+
+  listActive(): BuildEntity[] {
+    return this.database
       .prepare<[], BuildRow>(
         `${BUILD_SELECT}
          WHERE status IN ('planning','ready','running','paused','interrupted')
-         LIMIT 1`,
+         ORDER BY created_at DESC, id DESC`,
       )
-      .get();
-    return row === undefined ? undefined : mapBuild(row);
+      .all()
+      .map(mapBuild);
   }
 
   transition(

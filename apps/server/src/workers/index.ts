@@ -11,4 +11,12 @@ export {
   runCodexWorker,
   startCodexWorker,
 } from "./runtime.js";
+export {
+  CodexCodingAgentProvider,
+  CodingAgentProviderRegistry,
+} from "./providers.js";
+export type {
+  CodingAgentProvider,
+  CodingAgentStartOptions,
+} from "./providers.js";
 export type * from "./types.js";

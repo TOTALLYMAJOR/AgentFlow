@@ -409,8 +409,28 @@ async function installUserService(): Promise<{
       environmentFileAssignment("AGENTFLOW_LOG_LEVEL", environment.logLevel),
       environmentFileAssignment("AGENTFLOW_CODEX_BIN", environment.codexBinary),
       environmentFileAssignment(
+        "AGENTFLOW_DEFAULT_AGENT_PROVIDER",
+        environment.defaultAgentProvider,
+      ),
+      environmentFileAssignment(
         "AGENTFLOW_WORKER_TIMEOUT_MS",
         String(environment.workerTimeoutMs),
+      ),
+      environmentFileAssignment(
+        "AGENTFLOW_MAX_CONCURRENT_WORKERS",
+        String(environment.maxConcurrentWorkers),
+      ),
+      environmentFileAssignment(
+        "AGENTFLOW_RETRY_MAX_ATTEMPTS",
+        String(environment.retryMaximumAttempts),
+      ),
+      environmentFileAssignment(
+        "AGENTFLOW_RETRY_BASE_DELAY_MS",
+        String(environment.retryBaseDelayMs),
+      ),
+      environmentFileAssignment(
+        "AGENTFLOW_RETRY_MAX_DELAY_MS",
+        String(environment.retryMaximumDelayMs),
       ),
       "",
     ].join("\n"),

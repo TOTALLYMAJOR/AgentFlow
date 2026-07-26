@@ -55,6 +55,34 @@ export interface PlannedTask {
   allowNoChanges: boolean;
   riskScore: number;
   requiresApproval: boolean;
+  epicId: string;
+  epicTitle: string;
+  epicOutcome: string;
+  architectureDecisions: ArchitectureDecisionProposal[];
+}
+
+export interface ArchitectureDecisionProposal {
+  title: string;
+  context: string;
+  decision: string;
+  consequences: string[];
+}
+
+export interface PlannedEpic {
+  id: string;
+  title: string;
+  outcome: string;
+  taskIds: string[];
+  dependsOnEpicIds: string[];
+  estimateHours: number;
+}
+
+export interface AdrDraft {
+  id: string;
+  title: string;
+  status: "proposed";
+  sourceTaskIds: string[];
+  markdown: string;
 }
 
 export interface OwnershipConflict {
@@ -82,8 +110,16 @@ export interface PlanResult {
   backlogSha256: string;
   tasks: PlannedTask[];
   waves: string[][];
+  epics: PlannedEpic[];
+  adrDrafts: AdrDraft[];
   ownershipConflicts: OwnershipConflict[];
   estimates: PlanEstimates;
+  calibration?: {
+    taskSampleCount: number;
+    buildSampleCount: number;
+    appliedMultiplier: number;
+    confidence: "insufficient" | "low" | "medium" | "high";
+  };
   createdAt: string;
 }
 

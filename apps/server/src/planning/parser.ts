@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { parseDocument } from "yaml";
 
 import type {
+  ArchitectureDecisionProposal,
   ConsumedArtifact,
   PlannedTask,
   ProducedArtifact,
@@ -444,6 +445,113 @@ function readBoolean(
   return value;
 }
 
+function readOptionalString(
+  metadata: Record<string, unknown>,
+  field: string,
+  defaultValue: string,
+  taskId: string,
+  line: number,
+  errors: PlanningValidationError[],
+): string {
+  const value = metadata[field];
+  if (value === undefined || value === null) {
+    return defaultValue;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    metadataError(
+      errors,
+      taskId,
+      field,
+      `${taskId}.${field} must be a non-empty string`,
+      line,
+    );
+    return defaultValue;
+  }
+  return value.trim();
+}
+
+function readArchitectureDecisions(
+  metadata: Record<string, unknown>,
+  taskId: string,
+  line: number,
+  errors: PlanningValidationError[],
+): ArchitectureDecisionProposal[] {
+  const raw = metadata.architecture_decisions;
+  if (raw === undefined || raw === null) {
+    return [];
+  }
+  if (!Array.isArray(raw)) {
+    metadataError(
+      errors,
+      taskId,
+      "architecture_decisions",
+      `${taskId}.architecture_decisions must be an array`,
+      line,
+    );
+    return [];
+  }
+  return raw.flatMap((entry, index) => {
+    if (!isRecord(entry)) {
+      metadataError(
+        errors,
+        taskId,
+        `architecture_decisions[${index}]`,
+        `${taskId}.architecture_decisions[${index}] must be an object`,
+        line,
+      );
+      return [];
+    }
+    const prefix = `architecture_decisions[${index}]`;
+    const title = readOptionalString(
+      entry,
+      "title",
+      "",
+      taskId,
+      line,
+      errors,
+    );
+    const context = readOptionalString(
+      entry,
+      "context",
+      "",
+      taskId,
+      line,
+      errors,
+    );
+    const decision = readOptionalString(
+      entry,
+      "decision",
+      "",
+      taskId,
+      line,
+      errors,
+    );
+    const consequences = readStringArray(
+      entry,
+      "consequences",
+      taskId,
+      line,
+      errors,
+    );
+    if (
+      title.length === 0 ||
+      context.length === 0 ||
+      decision.length === 0 ||
+      consequences.values.length === 0
+    ) {
+      metadataError(
+        errors,
+        taskId,
+        prefix,
+        `${taskId}.${prefix} requires title, context, decision, and consequences`,
+        line,
+      );
+      return [];
+    }
+    return [{ title, context, decision, consequences: consequences.values }];
+  });
+}
+
 function readRiskScore(
   metadata: Record<string, unknown>,
   taskId: string,
@@ -823,6 +931,36 @@ function taskFromSection(
       metadata,
       "requires_approval",
       false,
+      section.id,
+      section.line,
+      errors,
+    ),
+    epicId: readOptionalString(
+      metadata,
+      "epic_id",
+      "EPIC-001",
+      section.id,
+      section.line,
+      errors,
+    ),
+    epicTitle: readOptionalString(
+      metadata,
+      "epic_title",
+      "Backlog delivery",
+      section.id,
+      section.line,
+      errors,
+    ),
+    epicOutcome: readOptionalString(
+      metadata,
+      "epic_outcome",
+      "Deliver the reviewed backlog outcome.",
+      section.id,
+      section.line,
+      errors,
+    ),
+    architectureDecisions: readArchitectureDecisions(
+      metadata,
       section.id,
       section.line,
       errors,

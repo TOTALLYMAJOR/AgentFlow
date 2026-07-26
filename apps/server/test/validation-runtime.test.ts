@@ -121,8 +121,8 @@ describe("spawn-based validation process", () => {
     const streamed: string[] = [];
     const secret = "credential-123";
     const code = [
-      `process.stdout.write(${JSON.stringify(secret.slice(0, 6))});`,
-      `setTimeout(() => { process.stdout.write(${JSON.stringify(
+      `require("node:fs").writeSync(1, ${JSON.stringify(secret.slice(0, 6))});`,
+      `setTimeout(() => { require("node:fs").writeSync(1, ${JSON.stringify(
         `${secret.slice(6)}:${"x".repeat(80)}`,
       )}); }, 5);`,
     ].join("");
@@ -342,7 +342,7 @@ describe("task validation summary", () => {
           argv: [
             process.execPath,
             "-e",
-            "process.stdout.write(process.env.TASK_SECRET ?? 'missing')",
+            "require('node:fs').writeSync(1, process.env.TASK_SECRET ?? 'missing')",
           ],
           required: true,
         },

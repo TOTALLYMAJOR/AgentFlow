@@ -14,13 +14,12 @@ import {
 
 const FAKE_CODEX_SOURCE = `#!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { readFileSync, writeSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const scenario = process.env.FAKE_CODEX_SCENARIO ?? "success";
-const chunks = [];
-for await (const chunk of process.stdin) chunks.push(chunk);
-const prompt = Buffer.concat(chunks).toString("utf8");
+const prompt = readFileSync(0, "utf8");
 await writeFile(".fake-args.json", JSON.stringify(process.argv.slice(2)), "utf8");
 await writeFile(".fake-prompt.md", prompt, "utf8");
 
@@ -32,7 +31,7 @@ const completed = {
   risks: []
 };
 const emitResult = (result = completed) => {
-  process.stdout.write(JSON.stringify({
+  writeSync(1, JSON.stringify({
     type: "item.completed",
     item: { type: "agent_message", text: JSON.stringify(result) }
   }) + "\\n");
@@ -41,7 +40,7 @@ const emitResult = (result = completed) => {
 if (scenario === "success") {
   await mkdir("src", { recursive: true });
   await writeFile("src/owned.txt", "done\\n", "utf8");
-  process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "fake" }) + "\\n");
+  writeSync(1, JSON.stringify({ type: "thread.started", thread_id: "fake" }) + "\\n");
   emitResult();
 } else if (scenario === "no_changes") {
   emitResult();
@@ -50,11 +49,11 @@ if (scenario === "success") {
   await writeFile("docs/outside.txt", "outside ownership\\n", "utf8");
   emitResult();
 } else if (scenario === "malformed") {
-  process.stdout.write("{ definitely-not-json\\n");
+  writeSync(1, "{ definitely-not-json\\n");
   emitResult();
 } else if (scenario === "nonzero") {
-  process.stderr.write("api_key=" + process.env.FAKE_SECRET + "\\n");
-  process.stderr.write("x".repeat(2048) + "\\n");
+  writeSync(2, "api_key=" + process.env.FAKE_SECRET + "\\n");
+  writeSync(2, "x".repeat(2048) + "\\n");
   process.exitCode = 7;
 } else if (scenario === "blocked") {
   emitResult({
@@ -64,7 +63,7 @@ if (scenario === "success") {
     handoff_notes: []
   });
 } else if (scenario === "zero_without_result") {
-  process.stdout.write(JSON.stringify({ type: "turn.completed" }) + "\\n");
+  writeSync(1, JSON.stringify({ type: "turn.completed" }) + "\\n");
 } else if (scenario === "invalid_result") {
   emitResult({ status: "completed", summary: "" });
 } else if (scenario === "hang") {

@@ -2,6 +2,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { BoundedLog } from "./bounded-log.js";
 import { JsonlStreamParser, type JsonlLine } from "./jsonl.js";
 import { buildWorkerPrompt } from "./prompt.js";
@@ -556,12 +558,6 @@ export async function startCodexWorker(
     options.signal?.addEventListener("abort", abort, { once: true });
   }
 
-  try {
-    child.stdin.end(prompt);
-  } catch {
-    // A child that disappears before reading stdin is classified on close.
-  }
-
   const completion = new Promise<WorkerOutcome>((resolve) => {
     child.once("close", (exitCode, signal) => {
       processClosed = true;
@@ -679,6 +675,10 @@ export async function startCodexWorker(
         resolve(outcome);
       });
     });
+  });
+
+  await pipeline(Readable.from([prompt]), child.stdin).catch(() => {
+    // A child that disappears before reading stdin is classified on close.
   });
 
   return {
