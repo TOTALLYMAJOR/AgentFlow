@@ -1,9 +1,9 @@
 import {
   ActivityIcon,
   ChartLineIcon,
-  GitBranchIcon,
-  GraphIcon,
-  StackIcon,
+  FolderOpenIcon,
+  HouseIcon,
+  PlusCircleIcon,
 } from "@phosphor-icons/react";
 import type { Icon } from "@phosphor-icons/react";
 import type { ScreenId } from "../api/types.js";
@@ -20,11 +20,11 @@ interface NavigationItem {
 }
 
 const navigationItems: NavigationItem[] = [
-  { id: "overview", label: "Overview", icon: ActivityIcon },
-  { id: "repositories", label: "Repositories", icon: GitBranchIcon },
-  { id: "planner", label: "Planner", icon: GraphIcon },
-  { id: "build", label: "Active build", icon: StackIcon },
-  { id: "results", label: "Results", icon: ChartLineIcon },
+  { id: "overview", label: "Home", icon: HouseIcon },
+  { id: "repositories", label: "Projects", icon: FolderOpenIcon },
+  { id: "planner", label: "New task", icon: PlusCircleIcon },
+  { id: "build", label: "Activity", icon: ActivityIcon },
+  { id: "results", label: "Completed", icon: ChartLineIcon },
 ];
 
 export function AppNavigation({
@@ -39,7 +39,7 @@ export function AppNavigation({
         </span>
         <div>
           <strong>AgentFlow</strong>
-          <span>Local control plane</span>
+          <span>Guided project work</span>
         </div>
       </div>
       <ul>

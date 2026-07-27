@@ -32,29 +32,37 @@ import { StatusBadge } from "../components/StatusBadge.js";
 interface PlannerScreenProps {
   onNavigateRepositories: () => void;
   onBuildStarted: () => void;
+  initialDraft: {
+    repositoryId: string;
+    objective: string;
+  } | null;
 }
 
 export function PlannerScreen({
   onNavigateRepositories,
   onBuildStarted,
+  initialDraft,
 }: PlannerScreenProps): React.JSX.Element {
   const repositories = useSWR<RepositorySummary[]>(
     "/api/repositories",
     apiFetch,
   );
-  const [repositoryId, setRepositoryId] = useState("");
+  const [repositoryId, setRepositoryId] = useState(
+    initialDraft?.repositoryId ?? "",
+  );
   const [backlogPath, setBacklogPath] = useState("");
   const [plan, setPlan] = useState<PlanSummary | null>(null);
   const [generationMode, setGenerationMode] = useState<"objective" | "auto">(
-    "auto",
+    initialDraft === null ? "auto" : "objective",
   );
-  const [objective, setObjective] = useState("");
+  const [objective, setObjective] = useState(initialDraft?.objective ?? "");
   const [generating, setGenerating] = useState(false);
   const [generation, setGeneration] =
     useState<BacklogGenerationResult | null>(null);
   const [reviewConfirmed, setReviewConfirmed] = useState(false);
   const [planning, setPlanning] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [planApproved, setPlanApproved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorDetails, setErrorDetails] = useState<unknown>(null);
   const selectedRepository = useMemo(
@@ -117,6 +125,7 @@ export function PlannerScreen({
         ...(backlogPath.length === 0 ? {} : { backlogPath }),
       });
       setPlan(result);
+      setPlanApproved(false);
     } catch (cause) {
       setPlan(null);
       setError(cause instanceof Error ? cause.message : "Planning failed");
@@ -131,7 +140,7 @@ export function PlannerScreen({
   }
 
   async function startBuild(): Promise<void> {
-    if (plan === null) {
+    if (plan === null || !planApproved) {
       return;
     }
     setStarting(true);
@@ -160,8 +169,8 @@ export function PlannerScreen({
     return (
       <>
         <PageTitle
-          title="Backlog planner"
-          description="Validate dependencies, ownership, artifacts, and expected elapsed time before any worker is dispatched."
+          title="Review the work plan"
+          description="AgentFlow explains the outcome, boundaries, and quality checks before any work begins."
         />
         <Flash variant="danger">
           Repository state could not be loaded, so planning is unavailable.
@@ -174,8 +183,8 @@ export function PlannerScreen({
     return (
       <>
         <PageTitle
-          title="Backlog planner"
-          description="Validate dependencies, ownership, artifacts, and expected elapsed time before any worker is dispatched."
+          title="Review the work plan"
+          description="AgentFlow explains the outcome, boundaries, and quality checks before any work begins."
         />
         <LoadingState label="Loading planner repositories" />
       </>
@@ -186,13 +195,13 @@ export function PlannerScreen({
     return (
       <>
         <PageTitle
-          title="Backlog planner"
-          description="Validate dependencies, ownership, artifacts, and expected elapsed time before any worker is dispatched."
+          title="Review the work plan"
+          description="AgentFlow explains the outcome, boundaries, and quality checks before any work begins."
         />
         <EmptyState
-          title="Register a repository first"
-          description="Planning reads the immutable backlog and AgentFlow configuration from a registered local Git repository."
-          actionLabel="Open repositories"
+          title="Connect a project first"
+          description="AgentFlow needs a connected Git project before it can prepare a reviewed work plan."
+          actionLabel="Open projects"
           onAction={onNavigateRepositories}
         />
       </>
@@ -202,19 +211,19 @@ export function PlannerScreen({
   return (
     <>
       <PageTitle
-        title="Backlog planner"
-        description="Validate dependencies, ownership, artifacts, and expected elapsed time before any worker is dispatched."
+        title="Review the work plan"
+        description="AgentFlow explains the outcome, boundaries, and quality checks before any work begins."
         actions={
           plan === null ? null : (
             <Button
               variant="primary"
               leadingVisual={PlayIcon}
-              disabled={starting}
+              disabled={starting || !planApproved}
               onClick={() => {
                 void startBuild();
               }}
             >
-              {starting ? "Starting build…" : "Start build"}
+              {starting ? "Starting work..." : "Approve and start"}
             </Button>
           )
         }
@@ -228,6 +237,7 @@ export function PlannerScreen({
             onChange={(event) => {
               setRepositoryId(event.target.value);
               setPlan(null);
+              setPlanApproved(false);
               setGeneration(null);
               setReviewConfirmed(false);
             }}
@@ -249,6 +259,7 @@ export function PlannerScreen({
             onChange={(event) => {
               setBacklogPath(event.target.value);
               setPlan(null);
+              setPlanApproved(false);
             }}
           />
           <FormControl.Caption>
@@ -264,7 +275,7 @@ export function PlannerScreen({
             (generation !== null && !reviewConfirmed)
           }
         >
-          {planning ? "Validating…" : "Validate plan"}
+          {planning ? "Checking plan..." : "Check this plan"}
         </Button>
       </form>
       <section
@@ -513,11 +524,60 @@ export function PlannerScreen({
         <section className="plan-result" aria-labelledby="plan-result-title">
           <header className="section-heading">
             <div>
-              <h2 id="plan-result-title">Validated plan</h2>
+              <h2 id="plan-result-title">Your proposed plan</h2>
               <span className="mono">{plan.id}</span>
             </div>
             <StatusBadge status="validated" />
           </header>
+          <section
+            className="plain-plan-approval"
+            aria-labelledby="plain-plan-approval-title"
+          >
+            <div className="plain-plan-approval__summary">
+              <span className="plain-plan-approval__icon">
+                <CheckCircleIcon size={28} aria-hidden="true" />
+              </span>
+              <div>
+                <h3 id="plain-plan-approval-title">
+                  {objective.trim().length > 0
+                    ? objective.trim()
+                    : `Complete ${plan.tasks.length} reviewed improvements`}
+                </h3>
+                <p>
+                  AgentFlow will complete {plan.tasks.length} planned steps in{" "}
+                  {plan.waves.length} stages. The expected duration is{" "}
+                  {formatPlanTime(plan.estimates.expectedElapsedHours)}.
+                </p>
+              </div>
+            </div>
+            <dl className="plain-plan-facts">
+              <div>
+                <dt>What may change</dt>
+                <dd>{summarizeOwnedPaths(plan)}</dd>
+              </div>
+              <div>
+                <dt>How it will be checked</dt>
+                <dd>{summarizeChecks(plan)}</dd>
+              </div>
+              <div>
+                <dt>Safety level</dt>
+                <dd>{summarizeRisk(plan)}</dd>
+              </div>
+            </dl>
+            <label className="plan-approval-confirmation">
+              <Checkbox
+                checked={planApproved}
+                onChange={(event) => {
+                  setPlanApproved(event.target.checked);
+                }}
+              />
+              <span>
+                <strong>I approve this plan.</strong>
+                AgentFlow may start the listed work. Publishing and external
+                changes still require their own confirmed evidence.
+              </span>
+            </label>
+          </section>
           <div className="metrics-grid metrics-grid--compact">
             <Metric
               label="Tasks"
@@ -686,4 +746,54 @@ export function PlannerScreen({
       )}
     </>
   );
+}
+
+function formatPlanTime(hours: number): string {
+  if (hours < 1) {
+    return `${Math.max(1, Math.round(hours * 60))} minutes`;
+  }
+  return `${hours.toFixed(1)} hours`;
+}
+
+function summarizeOwnedPaths(plan: PlanSummary): string {
+  const roots = Array.from(
+    new Set(
+      plan.tasks.flatMap((task) =>
+        task.owns.map((path) => path.split("/").slice(0, 2).join("/")),
+      ),
+    ),
+  );
+  if (roots.length === 0) {
+    return "No project paths are reserved yet.";
+  }
+  const visible = roots.slice(0, 3).join(", ");
+  return roots.length > 3
+    ? `${visible}, and ${roots.length - 3} more reviewed areas`
+    : visible;
+}
+
+function summarizeChecks(plan: PlanSummary): string {
+  const commands = plan.tasks.reduce(
+    (total, task) => total + (task.validate?.length ?? 0),
+    0,
+  );
+  return commands === 0
+    ? "Plan structure, dependencies, and file ownership"
+    : `${commands} declared quality checks plus ownership validation`;
+}
+
+function summarizeRisk(plan: PlanSummary): string {
+  const approvalCount = plan.tasks.filter(
+    (task) => task.requiresApproval === true,
+  ).length;
+  const highestRisk = Math.max(
+    0,
+    ...plan.tasks.map((task) => task.riskScore ?? 0),
+  );
+  if (approvalCount > 0) {
+    return `${approvalCount} step${approvalCount === 1 ? "" : "s"} will pause for approval`;
+  }
+  return highestRisk >= 7
+    ? "Higher-risk changes are isolated and validated"
+    : "Standard guarded work with validation before integration";
 }

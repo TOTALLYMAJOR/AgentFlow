@@ -27,20 +27,20 @@ export function ResultsScreen(): React.JSX.Element {
   return (
     <>
       <PageTitle
-        title="Build results"
-        description="Review integration outcomes, estimates, utilization, validation failures, artifacts, and publication state."
+        title="Completed work"
+        description="Review what changed, how it was checked, and what still needs attention."
       />
       {builds.error !== undefined ? (
         <Flash variant="danger">
-          Build results could not be loaded. No historical outcome has been
+          Completed work could not be loaded. No historical outcome has been
           inferred.
         </Flash>
       ) : builds.isLoading ? (
-        <LoadingState label="Loading build results" height="360px" />
+        <LoadingState label="Loading completed work" height="360px" />
       ) : completed?.length === 0 ? (
         <EmptyState
-          title="No completed builds"
-          description="Results appear only after a build reaches an explicit terminal state."
+          title="No completed work yet"
+          description="Finished and stopped work will appear here with its confirmed evidence."
         />
       ) : (
         <div className="result-list">

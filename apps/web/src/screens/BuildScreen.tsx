@@ -213,12 +213,26 @@ export function BuildScreen(): React.JSX.Element {
   const canStart = active.status === "ready";
   const canPause = active.status === "running";
   const canResume = ["paused", "interrupted"].includes(active.status);
+  const completedTasks = tasks.filter((task) =>
+    ["integrated", "completed"].includes(task.state),
+  );
+  const blockedTasks = tasks.filter((task) =>
+    ["failed", "blocked_failed", "awaiting_approval"].includes(task.state),
+  );
+  const currentTask =
+    tasks.find((task) =>
+      ["running", "validating", "integrating", "assigned"].includes(task.state),
+    ) ?? null;
+  const progressPercent =
+    tasks.length === 0
+      ? 0
+      : Math.round((completedTasks.length / tasks.length) * 100);
 
   return (
     <>
       <PageTitle
-        title={active.repositoryName ?? "Active build"}
-        description={`Integration target: ${active.integrationBranch}`}
+        title={active.repositoryName ?? "Work in progress"}
+        description="See what is happening, whether AgentFlow needs you, and what comes next."
         actions={
           <>
             {canStart ? (
@@ -263,7 +277,7 @@ export function BuildScreen(): React.JSX.Element {
                 void act("cancel");
               }}
             >
-              {pendingAction === "cancel" ? "Cancelling…" : "Cancel"}
+              {pendingAction === "cancel" ? "Stopping..." : "Stop work"}
             </Button>
           </>
         }
@@ -317,6 +331,66 @@ export function BuildScreen(): React.JSX.Element {
         <span>{stream.connected ? "Events live" : "Reconnecting events"}</span>
       </div>
 
+      <section className="consumer-progress" aria-labelledby="progress-title">
+        <div className="consumer-progress__heading">
+          <div>
+            <span>{plainBuildStatus(active.status)}</span>
+            <h2 id="progress-title">
+              {currentTask === null
+                ? nextProgressMessage(active.status, tasks.length)
+                : currentTask.title}
+            </h2>
+            <p>
+              {completedTasks.length} of {tasks.length} planned steps complete
+              {blockedTasks.length === 0
+                ? ". No blockers need your attention."
+                : blockedTasks.length === 1
+                  ? ". 1 item needs attention."
+                  : `. ${blockedTasks.length} items need attention.`}
+            </p>
+          </div>
+          <strong>{progressPercent}%</strong>
+        </div>
+        <progress
+          value={completedTasks.length}
+          max={Math.max(1, tasks.length)}
+          aria-label={`${progressPercent}% complete`}
+        />
+        <div className="consumer-progress__next">
+          <span>
+            <strong>What happens next</strong>
+            {nextActionMessage(active.status, blockedTasks.length)}
+          </span>
+          <span>
+            <strong>Time elapsed</strong>
+            {formatElapsed(active)}
+          </span>
+        </div>
+      </section>
+
+      {approvals.isLoading ||
+      approvals.error !== undefined ||
+      approvalError !== null ||
+      (approvals.data?.length ?? 0) > 0 ? (
+        <ApprovalsPanel
+          approvals={approvals.data ?? []}
+          loading={approvals.isLoading}
+          error={
+            approvalError ??
+            (approvals.error === undefined
+              ? null
+              : "Approval requests could not be loaded.")
+          }
+          pendingApprovalId={pendingApprovalId}
+          onDecide={(approvalId, status) => {
+            void decideApproval(approvalId, status);
+          }}
+        />
+      ) : null}
+
+      <details className="technical-work-details">
+        <summary>View technical activity and evidence</summary>
+        <div className="technical-work-details__content">
       <section className="metrics-grid" aria-label="Active build summary">
         <Metric
           label="Elapsed"
@@ -420,20 +494,6 @@ export function BuildScreen(): React.JSX.Element {
       )}
 
       <div className="build-detail-grid">
-        <ApprovalsPanel
-          approvals={approvals.data ?? []}
-          loading={approvals.isLoading}
-          error={
-            approvalError ??
-            (approvals.error === undefined
-              ? null
-              : "Approval gates could not be loaded.")
-          }
-          pendingApprovalId={pendingApprovalId}
-          onDecide={(approvalId, status) => {
-            void decideApproval(approvalId, status);
-          }}
-        />
         <BuildResources
           artifacts={artifacts.data ?? []}
           manifests={manifests.data ?? []}
@@ -460,8 +520,47 @@ export function BuildScreen(): React.JSX.Element {
           emptyMessage="No recovery actions have been recorded for this build."
         />
       </div>
+        </div>
+      </details>
     </>
   );
+}
+
+function plainBuildStatus(status: string): string {
+  const labels: Record<string, string> = {
+    ready: "Ready for your approval",
+    running: "Work is moving forward",
+    paused: "Work is paused",
+    interrupted: "Work is waiting to resume",
+    recovering: "AgentFlow is recovering safely",
+  };
+  return labels[status] ?? status.replaceAll("_", " ");
+}
+
+function nextProgressMessage(status: string, taskCount: number): string {
+  if (taskCount === 0) {
+    return "Preparing the first steps";
+  }
+  if (status === "paused") {
+    return "Ready when you are";
+  }
+  if (status === "ready") {
+    return "The plan is ready to begin";
+  }
+  return "Checking the remaining work";
+}
+
+function nextActionMessage(status: string, blockedCount: number): string {
+  if (blockedCount > 0) {
+    return "Review the approval or failed step below.";
+  }
+  if (status === "paused") {
+    return "Resume when you want AgentFlow to continue.";
+  }
+  if (status === "ready") {
+    return "Start the approved work when you are ready.";
+  }
+  return "AgentFlow will continue through the reviewed plan.";
 }
 
 function formatElapsed(build: BuildSummary): string {

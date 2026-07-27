@@ -1,4 +1,9 @@
 import { Flash } from "@primer/react";
+import {
+  CheckCircleIcon,
+  ImageSquareIcon,
+  WarningCircleIcon,
+} from "@phosphor-icons/react";
 import useSWR from "swr";
 import { apiFetch } from "../api/client.js";
 import type {
@@ -51,6 +56,10 @@ export function ResultBuildCard({
       /validation/i.test(event.type) &&
       (/fail/i.test(event.type) || event.payload.status === "failed"),
   );
+  const failedCheckCount = Math.max(
+    failedValidationEvents.length,
+    metrics.data?.failedTasks ?? 0,
+  );
   const utilization =
     metrics.data?.workerUtilizationPercent ?? calculateUtilization(build);
   const pushStatus =
@@ -59,6 +68,15 @@ export function ResultBuildCard({
     inferPushStatus(events.data ?? []);
   const actualElapsedSeconds =
     metrics.data?.actualElapsedSeconds ?? build.actualElapsedSeconds ?? null;
+  const deliveredTasks =
+    build.tasks?.filter((task) =>
+      ["integrated", "completed"].includes(task.state),
+    ) ?? [];
+  const visualEvidence = (artifacts.data ?? []).filter((artifact) =>
+    /image|screenshot|visual|png/i.test(
+      `${artifact.name} ${artifact.artifactType} ${artifact.repositoryPath ?? ""}`,
+    ),
+  );
 
   if (loading) {
     return (
@@ -66,8 +84,11 @@ export function ResultBuildCard({
         <header>
           <div>
             <strong>{build.repositoryName ?? build.repositoryId}</strong>
-            <span className="mono">{build.integrationBranch}</span>
-            <span className="mono">{build.id}</span>
+            <span>
+              {build.completedAt === null
+                ? "Completion time not recorded"
+                : new Date(build.completedAt).toLocaleString()}
+            </span>
           </div>
           <StatusBadge status={build.status} />
         </header>
@@ -83,8 +104,11 @@ export function ResultBuildCard({
       <header>
         <div>
           <strong>{build.repositoryName ?? build.repositoryId}</strong>
-          <span className="mono">{build.integrationBranch}</span>
-          <span className="mono">{build.id}</span>
+          <span>
+            {build.completedAt === null
+              ? "Completion time not recorded"
+              : new Date(build.completedAt).toLocaleString()}
+          </span>
         </div>
         <StatusBadge status={build.status} />
       </header>
@@ -96,6 +120,56 @@ export function ResultBuildCard({
         </Flash>
       ) : null}
 
+      <section className="completed-report-summary">
+        <div className="completed-report-summary__lead">
+          {build.status === "completed" ? (
+            <CheckCircleIcon size={34} aria-hidden="true" />
+          ) : (
+            <WarningCircleIcon size={34} aria-hidden="true" />
+          )}
+          <div>
+            <span>
+              {build.status === "completed"
+                ? "Work completed"
+                : "Work stopped before completion"}
+            </span>
+            <h2>
+              {deliveredTasks.length} of {build.tasks?.length ?? 0} planned
+              changes were delivered
+            </h2>
+            <p>{resultRecommendation(build, failedCheckCount)}</p>
+          </div>
+        </div>
+        <dl>
+          <div>
+            <dt>Quality checks</dt>
+            <dd>
+              {failedCheckCount === 0
+                ? "No failed checks recorded"
+                : `${failedCheckCount} failed check${failedCheckCount === 1 ? "" : "s"}`}
+            </dd>
+          </div>
+          <div>
+            <dt>Publication</dt>
+            <dd>{plainPushStatus(pushStatus)}</dd>
+          </div>
+          <div>
+            <dt>Evidence</dt>
+            <dd>
+              {(artifacts.data?.length ?? 0) + (manifests.data?.length ?? 0)}{" "}
+              confirmed records
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <details className="completed-technical-details">
+        <summary>View task and validation details</summary>
+        <div className="completed-technical-details__content">
+      <div className="result-technical-identity">
+        <code>{build.integrationBranch}</code>
+        <code>{build.id}</code>
+      </div>
       <div className="metrics-grid metrics-grid--compact">
         <Metric
           label="Elapsed"
@@ -136,8 +210,8 @@ export function ResultBuildCard({
         <section aria-labelledby={`outcomes-${build.id}`}>
           <div className="subsection-heading">
             <div>
-              <h3 id={`outcomes-${build.id}`}>Task outcomes</h3>
-              <p>{build.tasks?.length ?? 0} planned tasks</p>
+              <h3 id={`outcomes-${build.id}`}>What changed</h3>
+              <p>{build.tasks?.length ?? 0} reviewed steps</p>
             </div>
           </div>
           {build.tasks?.length === 0 || build.tasks === undefined ? (
@@ -160,7 +234,7 @@ export function ResultBuildCard({
         <section aria-labelledby={`validations-${build.id}`}>
           <div className="subsection-heading">
             <div>
-              <h3 id={`validations-${build.id}`}>Failed validations</h3>
+              <h3 id={`validations-${build.id}`}>Quality checks</h3>
               <p>
                 {metrics.data?.failedTasks ?? 0} failed tasks ·{" "}
                 {metrics.data?.ownershipViolations ?? 0} ownership violations
@@ -173,7 +247,9 @@ export function ResultBuildCard({
             </p>
           ) : failedValidationEvents.length === 0 ? (
             <p className="panel-empty">
-              No failed validation event was recorded.
+              {failedCheckCount === 0
+                ? "No failed validation event was recorded."
+                : "Failed tasks were recorded, but no dedicated validation event was stored."}
             </p>
           ) : (
             <ul className="failure-list">
@@ -190,6 +266,32 @@ export function ResultBuildCard({
           )}
         </section>
       </div>
+        </div>
+      </details>
+
+      {visualEvidence.length === 0 ? null : (
+        <section
+          className="visual-evidence-report"
+          aria-labelledby={`visual-evidence-${build.id}`}
+        >
+          <div>
+            <ImageSquareIcon size={26} aria-hidden="true" />
+            <div>
+              <h3 id={`visual-evidence-${build.id}`}>Visual evidence</h3>
+              <p>Confirmed screenshots and comparison artifacts from this work.</p>
+            </div>
+          </div>
+          <ul>
+            {visualEvidence.slice(0, 4).map((artifact) => (
+              <li key={artifact.id}>
+                <strong>{artifact.name}</strong>
+                <span>{artifact.repositoryPath ?? artifact.artifactType}</span>
+                <StatusBadge status={artifact.status} />
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <footer className="result-footer">
         <span>{artifacts.data?.length ?? 0} artifacts</span>
@@ -203,6 +305,26 @@ export function ResultBuildCard({
       </footer>
     </article>
   );
+}
+
+function resultRecommendation(
+  build: BuildSummary,
+  failedCheckCount: number,
+): string {
+  if (build.status === "completed" && failedCheckCount === 0) {
+    return "The reviewed work finished with no failed validation event. Review the evidence before publishing.";
+  }
+  if (failedCheckCount > 0) {
+    return "Review the failed quality checks before treating this work as ready.";
+  }
+  return "Review the delivered steps and remaining work before deciding what to do next.";
+}
+
+function plainPushStatus(status: string): string {
+  if (status === "not recorded") {
+    return "Not published";
+  }
+  return status.replaceAll("_", " ");
 }
 
 function calculateUtilization(build: BuildSummary): number | null {

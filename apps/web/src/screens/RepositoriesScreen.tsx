@@ -209,8 +209,8 @@ export function RepositoriesScreen(): React.JSX.Element {
     return (
       <>
         <PageTitle
-          title="Repositories"
-          description="Register local Git repositories. Removal changes AgentFlow metadata only and never deletes source."
+          title="Projects"
+          description="Connect local Git projects. Removing a connection never deletes source files."
         />
         <Flash variant="danger">
           The local repository registry could not be loaded.
@@ -223,8 +223,8 @@ export function RepositoriesScreen(): React.JSX.Element {
     return (
       <>
         <PageTitle
-          title="Repositories"
-          description="Register local Git repositories. Removal changes AgentFlow metadata only and never deletes source."
+          title="Projects"
+          description="Connect local Git projects. Removing a connection never deletes source files."
         />
         <LoadingState label="Loading repository registry" />
       </>
@@ -234,8 +234,8 @@ export function RepositoriesScreen(): React.JSX.Element {
   return (
     <>
       <PageTitle
-        title="Repositories"
-        description="Register local Git repositories. Removal changes AgentFlow metadata only and never deletes source."
+        title="Projects"
+        description="Connect local Git projects. Removing a connection never deletes source files."
         actions={
           <Button
             variant="primary"
@@ -245,7 +245,7 @@ export function RepositoriesScreen(): React.JSX.Element {
               setError(null);
             }}
           >
-            {showForm ? "Close form" : "Add repository"}
+            {showForm ? "Close setup" : "Connect project"}
           </Button>
         }
       />
@@ -256,7 +256,7 @@ export function RepositoriesScreen(): React.JSX.Element {
           onSubmit={(event) => void registerRepository(event)}
         >
           <FormControl required>
-            <FormControl.Label>Absolute repository path</FormControl.Label>
+            <FormControl.Label>Project folder</FormControl.Label>
             <TextInput
               block
               value={path}
@@ -275,7 +275,7 @@ export function RepositoriesScreen(): React.JSX.Element {
             type="submit"
             disabled={submitting || path.trim().length === 0}
           >
-            {submitting ? "Inspecting…" : "Register"}
+            {submitting ? "Checking..." : "Check and connect"}
           </Button>
         </form>
       ) : null}
@@ -295,9 +295,9 @@ export function RepositoriesScreen(): React.JSX.Element {
 
       {repositories.data?.length === 0 ? (
         <EmptyState
-          title="No repositories registered"
+          title="No projects connected"
           description="AgentFlow stores only registry metadata and operational state outside the source repository."
-          actionLabel="Add repository"
+          actionLabel="Connect project"
           onAction={() => {
             setShowForm(true);
           }}
@@ -484,7 +484,7 @@ export function RepositoriesScreen(): React.JSX.Element {
                 <option value="">Choose template</option>
                 {governance.data?.templates.map((template) => (
                   <option key={template.id} value={template.id}>
-                    {template.name} — {template.description}
+                    {template.name}: {template.description}
                   </option>
                 ))}
               </select>

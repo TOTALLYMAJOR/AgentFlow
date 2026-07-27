@@ -6,8 +6,8 @@ import { AppNavigation } from "./components/AppNavigation.js";
 const BuildScreen = lazy(async () => ({
   default: (await import("./screens/BuildScreen.js")).BuildScreen,
 }));
-const OverviewScreen = lazy(async () => ({
-  default: (await import("./screens/OverviewScreen.js")).OverviewScreen,
+const StartScreen = lazy(async () => ({
+  default: (await import("./screens/StartScreen.js")).StartScreen,
 }));
 const PlannerScreen = lazy(async () => ({
   default: (await import("./screens/PlannerScreen.js")).PlannerScreen,
@@ -21,6 +21,10 @@ const ResultsScreen = lazy(async () => ({
 
 export function App(): React.JSX.Element {
   const [screen, setScreen] = useState<ScreenId>("overview");
+  const [goalDraft, setGoalDraft] = useState<{
+    repositoryId: string;
+    objective: string;
+  } | null>(null);
 
   return (
     <div className="app-shell">
@@ -28,9 +32,13 @@ export function App(): React.JSX.Element {
       <main id="main-content" className="main-content">
         <Suspense fallback={<SkeletonBox height="320px" width="100%" />}>
           {screen === "overview" ? (
-            <OverviewScreen
-              onNavigateRepositories={() => {
-                setScreen("repositories");
+            <StartScreen
+              onStartGoal={(draft) => {
+                setGoalDraft(draft);
+                setScreen("planner");
+              }}
+              onOpenActivity={() => {
+                setScreen("build");
               }}
             />
           ) : null}
@@ -43,6 +51,7 @@ export function App(): React.JSX.Element {
               onBuildStarted={() => {
                 setScreen("build");
               }}
+              initialDraft={goalDraft}
             />
           ) : null}
           {screen === "build" ? <BuildScreen /> : null}
