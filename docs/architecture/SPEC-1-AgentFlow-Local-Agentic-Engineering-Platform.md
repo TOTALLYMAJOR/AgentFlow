@@ -1,5 +1,13 @@
 # SPEC-1-AgentFlow-Local-Agentic-Engineering-Platform
 
+> **Historical source specification.** This document defines the original MVP
+> baseline and is retained as implementation provenance. Current behavior adds
+> concurrent repositories, remote runners, provider adapters, durable retries,
+> estimate calibration, epic decomposition, visual evidence, knowledge graphs,
+> and organization governance. Where this specification differs, ADR-0001
+> through ADR-0012 and the current [documentation map](../README.md) are
+> authoritative.
+
 ## Background
 
 AgentFlow is a local-first engineering control plane for coordinating multiple AI development workers across registered Git repositories.

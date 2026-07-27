@@ -4,6 +4,9 @@
 
 ```yaml
 estimate_hours: 4
+epic_id: CHECKOUT-CONTRACT
+epic_title: Checkout contract
+epic_outcome: Provider and consumer share one versioned checkout contract.
 depends_on: []
 owns:
   - contracts/features/checkout/
@@ -14,6 +17,13 @@ produces:
     type: openapi
     version: 1.0.0
     path: contracts/features/checkout/openapi.yaml
+architecture_decisions:
+  - title: Contract-first checkout delivery
+    context: Provider and consumer will be developed independently.
+    decision: Integrate one versioned OpenAPI contract before implementation.
+    consequences:
+      - Both implementations consume the exact same artifact version.
+      - Contract changes require a new reviewed version.
 ```
 
 Define the API, schemas, examples, and required UI states.
@@ -27,6 +37,9 @@ Define the API, schemas, examples, and required UI states.
 
 ```yaml
 estimate_hours: 7
+epic_id: CHECKOUT-IMPLEMENTATION
+epic_title: Checkout implementation
+epic_outcome: Provider and consumer interoperate against the integrated contract.
 depends_on:
   - BL-100
 owns:
@@ -53,6 +66,9 @@ Implement the backend against the integrated contract.
 
 ```yaml
 estimate_hours: 6
+epic_id: CHECKOUT-IMPLEMENTATION
+epic_title: Checkout implementation
+epic_outcome: Provider and consumer interoperate against the integrated contract.
 depends_on:
   - BL-100
 owns:
@@ -79,6 +95,9 @@ Implement the frontend against generated contract types and fixtures.
 
 ```yaml
 estimate_hours: 3
+epic_id: CHECKOUT-IMPLEMENTATION
+epic_title: Checkout implementation
+epic_outcome: Provider and consumer interoperate against the integrated contract.
 depends_on:
   - BL-101
   - BL-102

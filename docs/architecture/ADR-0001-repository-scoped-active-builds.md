@@ -49,3 +49,9 @@ selected build in detailed supervision at a time.
 - API tests prove build creation follows the same invariant.
 - Recovery tests must continue to prove build-keyed reconciliation.
 - Dashboard type, build, and browser checks cover multiple-build selection.
+
+## Implementation update
+
+ADR-0002 supplies the installation-wide worker budget. ADR-0003 through
+ADR-0012 supply the provider, remote execution, retry, planning, evidence,
+knowledge, and governance follow-ups identified by this decision.

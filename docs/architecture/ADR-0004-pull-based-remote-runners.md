@@ -31,3 +31,9 @@ private tunnel.
   database in recoverable form.
 - Registration does not yet authorize task-state transitions; lease fencing and
   idempotent result submission are required before remote dispatch is enabled.
+
+## Implementation update
+
+ADR-0005 implements lease fencing and idempotent completion. ADR-0012 connects
+eligible remote jobs to digest-verified patch ingestion and the normal
+ownership, validation, commit, handoff, and integration pipeline.

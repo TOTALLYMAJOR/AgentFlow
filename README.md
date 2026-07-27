@@ -1,28 +1,48 @@
 # AgentFlow
 
-AgentFlow is a local-first engineering control plane for planning and running
-dependency-aware Codex work across registered Git repositories. It keeps
-operational state outside source repositories, binds to loopback, isolates
-tasks in Git worktrees, validates ownership and repository commands, and
-serializes integration into one build branch.
+AgentFlow is a local-first engineering control plane for running reviewed,
+dependency-aware work across multiple Git repositories. It turns a committed
+Markdown backlog into an immutable plan, executes tasks in isolated worktrees,
+validates declared ownership and repository commands, and serializes accepted
+changes into a build integration branch.
 
-The architecture specification and the complete implementation prompt suite
-are installed under `docs/` so the product contract remains available offline.
+The control plane binds to `127.0.0.1`. Operational state, logs, evidence,
+managed worktrees, policies, and the SQLite database live outside registered
+repositories under `$AGENTFLOW_HOME` (default `~/.agentflow`).
+
+## What AgentFlow now supports
+
+- Concurrent active builds across different registered repositories.
+- One active integration lane per repository.
+- An installation-wide worker budget with resource-aware scheduling.
+- A coding-agent provider registry with local Codex execution.
+- Pull-based remote runners with capacity reporting and lease-fenced jobs.
+- Digest-verified remote patches that pass through normal ownership,
+  validation, commit, handoff, and integration gates.
+- Durable automatic retries with bounded exponential backoff.
+- Repository-specific historical estimate calibration.
+- Repository-grounded automatic backlog generation.
+- Epic decomposition, cross-epic dependency validation, and proposed ADR drafts.
+- Browser screenshot comparison against committed PNG baselines.
+- Persisted codebase knowledge graphs and reverse impact analysis.
+- Installation-wide organization policy and explicit repository templates.
+- A dashboard for repositories, planning, builds, runners, evidence, and next
+  actions.
 
 ## Requirements
 
 - Ubuntu-compatible Linux
-- Node.js 22.12 or newer (Node.js 24 LTS is recommended)
+- Node.js 22.12 or newer; Node.js 24 LTS is recommended
 - npm
 - Git
-- Codex CLI for real worker execution
-- Docker Compose only when a repository enables Docker validation
-- systemd user services only when service installation is requested
+- Codex CLI when using the included local `codex` provider
+- Playwright Chromium when capturing browser comparison evidence
+- Docker Compose only for repositories that enable Docker validation
+- systemd user services only when installing the background service
 
-AgentFlow does not require a hosted service or application authentication. It
-must remain bound to `127.0.0.1`.
+## Install
 
-## Install from a release tarball
+From a checksummed release:
 
 ```bash
 sha256sum --check SHA256SUMS
@@ -33,25 +53,100 @@ agentflow serve
 
 Open `http://127.0.0.1:4782`.
 
-Runtime state is written to `$AGENTFLOW_HOME` when it is set. The default is
-`~/.agentflow`.
-
-The package installs the built dashboard, exported SQL migrations, examples,
-the supplied architecture specification, and the complete supplied
-implementation prompt suite. No external download is required to read those
-contracts after installation.
-
-## Develop from source
+From source:
 
 ```bash
 npm install
 npm run dev
 ```
 
-The API listens at `http://127.0.0.1:4782`. Vite listens at
-`http://127.0.0.1:5173` and proxies `/api`.
+For a persistent user service:
 
-Verified quality commands:
+```bash
+agentflow service install
+agentflow service start
+agentflow service status
+```
+
+## Run a repository
+
+Start with a clean, committed Git checkout:
+
+```bash
+agentflow repo init /absolute/path/to/repository
+agentflow repo add /absolute/path/to/repository
+agentflow repo list
+```
+
+Review `.agentflow.yaml`, then create or generate a root `BACKLOG.md`. Generated
+backlogs are intentionally review-only: inspect and commit the file before
+planning.
+
+```bash
+agentflow plan <repository-id>
+agentflow run <plan-id>
+agentflow status
+agentflow inspect <build-id>
+```
+
+The operational sequence is:
+
+```text
+clean checkout
+  -> reviewed .agentflow.yaml
+  -> reviewed and committed BACKLOG.md
+  -> immutable plan
+  -> isolated task execution
+  -> ownership and validation gates
+  -> serialized integration
+  -> evidence and handoff
+```
+
+`repo remove` removes registry metadata only. It never deletes source. Managed
+worktrees can be inspected or explicitly cleaned:
+
+```bash
+agentflow worktrees list <build-id>
+agentflow worktrees clean <build-id>
+```
+
+## Backlog essentials
+
+Each task needs a unique heading, estimate, dependency list, owned paths, useful
+acceptance criteria, and validation commands. Broad programs should also include
+epic metadata:
+
+```yaml
+epic_id: CHECKOUT
+epic_title: Checkout delivery
+epic_outcome: Customers can complete a validated checkout.
+estimate_hours: 4
+depends_on: []
+owns:
+  - contracts/checkout/
+validate:
+  - npm run typecheck
+```
+
+Use `produces` and `consumes` to make cross-task artifacts explicit. Architecture
+choices may include `architecture_decisions`; AgentFlow renders proposed ADRs
+but never silently accepts or writes them into the repository.
+
+## Remote runners
+
+Remote execution is pull-based. A runner registers once, stores the returned
+token as a secret, sends capacity heartbeats, claims a short-lived job, and
+returns a unified patch plus its SHA-256 digest. The control plane verifies the
+patch before applying it to the isolated task worktree.
+
+AgentFlow remains loopback-only. Remote machines must reach it through an
+authenticated private tunnel or equivalent private transport; do not expose the
+API directly to the internet.
+
+See [Installation and operations](docs/INSTALLATION.md#remote-runner-registration)
+for the runner protocol.
+
+## Quality and release
 
 ```bash
 npm run lint
@@ -59,62 +154,37 @@ npm run typecheck
 npm test
 npm run test:integration
 npm run build
-npm start
 ```
 
-Create the deterministic npm tarball, source ZIP, release manifest, and SHA-256
-checksums from a clean Git tree:
+Build reproducible release artifacts from a clean tree:
 
 ```bash
 npm run pack:release
-```
-
-Verify a tarball through a clean isolated npm prefix without changing the
-machine-wide installation:
-
-```bash
 npm run smoke:install -- ./release/agentflow-0.3.0.tgz
 ```
 
-## First repository
+## Documentation
 
-```bash
-agentflow repo init /absolute/path/to/repository
-agentflow repo add /absolute/path/to/repository
-agentflow repo list
-agentflow plan <repository-id>
-agentflow run <plan-id>
-agentflow status
-```
+- [Documentation map](docs/README.md)
+- [Installation and operations](docs/INSTALLATION.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Security model](docs/SECURITY.md)
+- [Implementation assumptions](docs/ASSUMPTIONS.md)
+- [Architecture decisions](docs/architecture/)
+- [Repository examples](examples/README.md)
 
-`repo init` creates `.agentflow.yaml` only when it is missing. `repo remove`
-deletes registry metadata only. AgentFlow never deletes a registered source
-repository.
-
-Managed worktrees can be reconciled or explicitly cleaned without deleting
-their branches:
-
-```bash
-agentflow worktrees list <build-id>
-agentflow worktrees clean <build-id>
-```
-
-Cleaning an active build or a dirty managed worktree requires `--force`.
-
-See:
-
-- `docs/INSTALLATION.md`
-- `docs/TROUBLESHOOTING.md`
-- `docs/SECURITY.md`
-- `docs/architecture/SPEC-1-AgentFlow-Local-Agentic-Engineering-Platform.md`
-- `docs/implementation/AgentFlow-Codex-Implementation-Prompts.md`
-- `examples/.agentflow.yaml`
-- `examples/BACKLOG.md`
+The original MVP specification and implementation prompt suite are retained as
+historical source contracts. ADR-0001 through ADR-0012 and the current
+operational documentation describe the implemented post-MVP behavior.
 
 ## Trust boundary
 
-Repository validation commands are executable code supplied by a registered
-repository. Review `.agentflow.yaml` and `BACKLOG.md` before starting a build.
+Repository validation commands are executable code run as the current Linux
+user. Review `.agentflow.yaml`, `BACKLOG.md`, organization policy, and runner
+configuration before starting work.
+
 Coding workers do not receive authority to commit, push, merge, create
 worktrees, mutate AgentFlow state, or control Docker. AgentFlow performs those
-operations only after the relevant validation gates pass.
+operations only after its independent gates pass. Remote worker output is
+treated as untrusted patch input until digest, path ownership, validation, and
+integration checks succeed.

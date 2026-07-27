@@ -66,7 +66,22 @@ agentflow serve
 ```
 
 Otherwise AgentFlow uses `~/.agentflow`. The directory contains the SQLite
-database, backups, logs, run evidence, artifacts, and Git worktrees.
+database, backups, logs, run evidence, artifacts, Git worktrees, and the
+installation governance policy.
+
+Key environment settings:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AGENTFLOW_HOME` | `~/.agentflow` | Runtime and evidence root |
+| `AGENTFLOW_HOST` | `127.0.0.1` | Loopback bind; other values are rejected |
+| `AGENTFLOW_PORT` | `4782` | API and dashboard port |
+| `AGENTFLOW_DEFAULT_AGENT_PROVIDER` | `codex` | Local provider adapter |
+| `AGENTFLOW_MAX_CONCURRENT_WORKERS` | `4` | Installation worker budget |
+| `AGENTFLOW_WORKER_TIMEOUT_MS` | `1800000` | Per-worker timeout |
+| `AGENTFLOW_RETRY_MAX_ATTEMPTS` | `3` | Environment retry ceiling |
+| `AGENTFLOW_RETRY_BASE_DELAY_MS` | `5000` | Initial retry delay |
+| `AGENTFLOW_RETRY_MAX_DELAY_MS` | `300000` | Maximum retry delay |
 
 Limit coding-worker processes across all concurrently active repositories:
 
@@ -87,6 +102,23 @@ agentflow serve
 
 The current installation includes the local `codex` provider. AgentFlow fails
 startup if the selected provider is not configured.
+
+## First repository workflow
+
+Use a clean, committed checkout:
+
+```bash
+agentflow repo init /absolute/path/to/repository
+agentflow repo add /absolute/path/to/repository
+agentflow repo list
+agentflow plan <repository-id>
+agentflow run <plan-id>
+agentflow inspect <build-id>
+```
+
+`repo init` never overwrites `.agentflow.yaml`. Review and commit both
+`.agentflow.yaml` and `BACKLOG.md` before planning. A plan is immutable; edit the
+backlog and create a new plan when requirements change.
 
 ## Remote runner registration
 
@@ -222,6 +254,18 @@ tolerance. Restart AgentFlow after editing it.
 The Repositories screen lists reusable templates. Applying one requires explicit
 overwrite confirmation, changes only `.agentflow.yaml`, and then instructs the
 operator to review and commit the configuration before planning.
+
+The current built-in templates are:
+
+- `safe-generic` — two workers and `git diff --check`.
+- `node-service` — lint, typecheck, test, and build validation.
+- `node-monorepo` — Node validation with shared contract roots.
+
+Inspect policy and template metadata with:
+
+```bash
+curl http://127.0.0.1:4782/api/governance
+```
 
 ## User service
 
