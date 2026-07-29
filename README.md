@@ -166,6 +166,7 @@ npm run smoke:install -- ./release/agentflow-0.3.0.tgz
 ## Documentation
 
 - [Documentation map](docs/README.md)
+- [Current-state feature matrix](docs/FEATURE_MATRIX.md)
 - [Installation and operations](docs/INSTALLATION.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Security model](docs/SECURITY.md)

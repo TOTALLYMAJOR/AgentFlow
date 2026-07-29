@@ -6,6 +6,7 @@ source documents used to build AgentFlow.
 ## Start here
 
 - [../README.md](../README.md) — product overview and first repository.
+- [FEATURE_MATRIX.md](FEATURE_MATRIX.md) — implemented capabilities at a glance.
 - [INSTALLATION.md](INSTALLATION.md) — install, configure, run, upgrade, and
   remove AgentFlow.
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — failure diagnosis and recovery.
