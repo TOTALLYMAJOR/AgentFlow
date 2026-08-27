@@ -43,7 +43,7 @@ export function OverviewScreen({
     "/api/repositories",
     apiFetch,
   );
-  const builds = useSWR<BuildSummary[]>("/api/builds", apiFetch, {
+  const builds = useSWR<BuildSummary[]>("/api/builds?scope=active", apiFetch, {
     refreshInterval: 2_000,
   });
   const activeBuilds =

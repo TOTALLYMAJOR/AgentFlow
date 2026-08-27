@@ -15,7 +15,10 @@ const terminalStatuses = new Set([
 ]);
 
 export function ResultsScreen(): React.JSX.Element {
-  const builds = useSWR<BuildSummary[]>("/api/builds", apiFetch);
+  const builds = useSWR<BuildSummary[]>(
+    "/api/builds?scope=terminal&limit=50",
+    apiFetch,
+  );
   const completed = builds.data
     ?.filter((build) => terminalStatuses.has(build.status))
     .sort(

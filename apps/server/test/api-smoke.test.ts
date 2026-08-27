@@ -112,6 +112,10 @@ require("node:fs").writeSync(
       expect(health.json()).toMatchObject({
         status: "ok",
         host: "127.0.0.1:4782",
+        runtime: {
+          home: runtimeHome,
+          pid: process.pid,
+        },
         database: { status: "ok", journalMode: "wal" },
         resources: {
           workerCapacity: 4,
@@ -335,6 +339,21 @@ require("node:fs").writeSync(
         repositoryId: secondRepository.id,
         status: "ready",
       });
+      const activeBuilds = await app.inject({
+        method: "GET",
+        url: "/api/builds?scope=active&limit=1",
+      });
+      expect(activeBuilds.statusCode).toBe(200);
+      expect(activeBuilds.json<Array<{ status: string }>>()).toHaveLength(1);
+      expect(activeBuilds.json<Array<{ status: string }>>()[0]?.status).toBe(
+        "ready",
+      );
+      const terminalBuilds = await app.inject({
+        method: "GET",
+        url: "/api/builds?scope=terminal",
+      });
+      expect(terminalBuilds.statusCode).toBe(200);
+      expect(terminalBuilds.json()).toEqual([]);
 
       const started = await app.inject({
         method: "POST",

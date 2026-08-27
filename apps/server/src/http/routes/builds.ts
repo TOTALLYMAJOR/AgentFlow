@@ -5,6 +5,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import type {
   BuildEntity,
+  BuildStatus,
   CreateTaskInput,
   TaskEntity,
 } from "../../db/index.js";
@@ -54,6 +55,24 @@ const AttemptDocumentParameters = z.object({
 const CreateBuildBody = z.object({
   planId: z.string().min(1),
 });
+const BuildListQuery = z.object({
+  repositoryId: z.string().min(1).optional(),
+  scope: z.enum(["active", "terminal", "all"]).default("all"),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+});
+
+const activeBuildStatuses: readonly BuildStatus[] = [
+  "planning",
+  "ready",
+  "running",
+  "paused",
+  "interrupted",
+];
+const terminalBuildStatuses: readonly BuildStatus[] = [
+  "completed",
+  "failed",
+  "cancelled",
+];
 
 export function registerBuildRoutes(
   app: FastifyInstance,
@@ -123,13 +142,26 @@ export function registerBuildRoutes(
     await reply.status(201).send(await serializeBuild(context, build));
   });
 
-  app.get("/api/builds", async () =>
-    Promise.all(
-      context.store.builds.list().map(async (build) =>
-        serializeBuild(context, build),
-      ),
-    ),
-  );
+  app.get("/api/builds", async (request) => {
+    const query = BuildListQuery.parse(request.query);
+    const statuses =
+      query.scope === "active"
+        ? activeBuildStatuses
+        : query.scope === "terminal"
+          ? terminalBuildStatuses
+          : undefined;
+    return Promise.all(
+      context.store.builds
+        .list({
+          limit: query.limit,
+          ...(query.repositoryId === undefined
+            ? {}
+            : { repositoryId: query.repositoryId }),
+          ...(statuses === undefined ? {} : { statuses }),
+        })
+        .map(async (build) => serializeBuild(context, build)),
+    );
+  });
 
   app.get("/api/builds/:id", async (request) => {
     const { id } = BuildIdParameters.parse(request.params);

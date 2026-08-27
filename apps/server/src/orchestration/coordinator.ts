@@ -560,7 +560,12 @@ export class BuildCoordinator {
         },
       });
     } catch (error) {
-      const retryAt = new Date(Date.now() + 30_000).toISOString();
+      const delayMs =
+        error instanceof AgentFlowError &&
+        error.code === "TASK_OPERATION_IN_PROGRESS"
+          ? 1_000
+          : 30_000;
+      const retryAt = new Date(Date.now() + delayMs).toISOString();
       this.store.retrySchedules.upsert({
         ...schedule,
         dueAt: retryAt,
@@ -569,7 +574,7 @@ export class BuildCoordinator {
         buildId: schedule.buildId,
         taskId,
         type: "task.automatic_retry_deferred",
-        payload: { message: errorMessage(error), retryAt },
+        payload: { message: errorMessage(error), retryAt, delayMs },
       });
       this.armRetrySchedule(taskId, retryAt);
     }
@@ -1085,6 +1090,8 @@ export class BuildCoordinator {
         }
         return;
       }
+      const failureCode = classifyExecutionPipelineFailure(error);
+      const failureMessage = errorMessage(error);
       if (
         !["failed", "cancelled", "integrated", "blocked_failed"].includes(
           task.state,
@@ -1092,8 +1099,8 @@ export class BuildCoordinator {
       ) {
         this.store.tasks.transition(taskId, "failed", {
           eventType: "task.execution_pipeline_failed",
-          errorCode: "EXECUTION_PIPELINE_FAILED",
-          errorMessage: errorMessage(error),
+          errorCode: failureCode,
+          errorMessage: failureMessage,
         });
       }
       if (assigned) {
@@ -1102,11 +1109,12 @@ export class BuildCoordinator {
         if (attempt > 0) {
           this.store.tasks.updateAttempt(taskId, attempt, {
             status: "failed",
-            errorCode: "EXECUTION_PIPELINE_FAILED",
-            errorMessage: errorMessage(error),
+            errorCode: failureCode,
+            errorMessage: failureMessage,
             completedAt: new Date().toISOString(),
           });
         }
+        this.scheduleAutomaticRetry(buildId, taskId, failureCode);
       }
     }
   }
@@ -1919,6 +1927,18 @@ export class BuildCoordinator {
         ["failed", "blocked_failed"].includes(task.state),
       )
     ) {
+      const retryableTaskIds = tasks
+        .filter((task) => ["failed", "blocked_failed"].includes(task.state))
+        .map((task) => task.id)
+        .filter((taskId) => this.store.retrySchedules.get(taskId) !== undefined);
+      if (retryableTaskIds.length > 0) {
+        this.store.events.append({
+          buildId: build.id,
+          type: "build.waiting_for_scheduled_retry",
+          payload: { taskIds: retryableTaskIds },
+        });
+        return true;
+      }
       this.store.builds.transition(build.id, "failed", {
         eventType: "build.failed",
         actualElapsedSeconds: elapsedSeconds(build.startedAt),
@@ -1931,6 +1951,17 @@ export class BuildCoordinator {
 
 function parseBuildConfig(build: BuildEntity): AgentFlowRepositoryConfig {
   return AgentFlowRepositoryConfigSchema.parse(build.repositoryConfig);
+}
+
+function classifyExecutionPipelineFailure(error: unknown): string {
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? String((error as { code?: unknown }).code)
+      : null;
+  if (code === "ENOENT" || code === "EACCES" || code === "EPERM") {
+    return "spawn_error";
+  }
+  return "EXECUTION_PIPELINE_FAILED";
 }
 
 function asPlan(value: Record<string, unknown>): PlanResult {

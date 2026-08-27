@@ -109,6 +109,12 @@ export interface BuildTransitionOptions {
   actualElapsedSeconds?: number | null;
 }
 
+export interface BuildListOptions {
+  repositoryId?: string;
+  statuses?: readonly BuildStatus[];
+  limit?: number;
+}
+
 export class BuildRepository {
   constructor(
     private readonly database: Database.Database,
@@ -273,23 +279,43 @@ export class BuildRepository {
     return row === undefined ? undefined : mapBuild(row);
   }
 
-  list(repositoryId?: string): BuildEntity[] {
-    if (repositoryId === undefined) {
-      return this.database
-        .prepare<[], BuildRow>(
-          `${BUILD_SELECT} ORDER BY created_at DESC, id DESC`,
-        )
-        .all()
-        .map(mapBuild);
+  list(options: string | BuildListOptions = {}): BuildEntity[] {
+    const resolved =
+      typeof options === "string" ? { repositoryId: options } : options;
+    const predicates: string[] = [];
+    const values: Array<string | number> = [];
+
+    if (resolved.repositoryId !== undefined) {
+      predicates.push("repository_id = ?");
+      values.push(resolved.repositoryId);
     }
+    if (resolved.statuses !== undefined && resolved.statuses.length > 0) {
+      predicates.push(
+        `status IN (${resolved.statuses.map(() => "?").join(", ")})`,
+      );
+      values.push(...resolved.statuses);
+    }
+
+    const limit =
+      resolved.limit === undefined
+        ? null
+        : Math.min(500, Math.max(1, Math.trunc(resolved.limit)));
+    const query = [
+      BUILD_SELECT,
+      predicates.length === 0 ? "" : `WHERE ${predicates.join(" AND ")}`,
+      "ORDER BY created_at DESC, id DESC",
+      limit === null ? "" : "LIMIT ?",
+    ]
+      .filter((part) => part.length > 0)
+      .join("\n");
+    if (limit !== null) {
+      values.push(limit);
+    }
+
     return this.database
-      .prepare<[string], BuildRow>(
-        `${BUILD_SELECT}
-         WHERE repository_id = ?
-         ORDER BY created_at DESC, id DESC`,
-      )
-      .all(repositoryId)
-      .map(mapBuild);
+      .prepare(query)
+      .all(...values)
+      .map((row) => mapBuild(row as BuildRow));
   }
 
   findActive(repositoryId?: string): BuildEntity | undefined {

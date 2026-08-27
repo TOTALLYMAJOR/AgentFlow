@@ -19,6 +19,11 @@ export function registerSystemRoutes(
       status: diagnostics.ok ? "ok" : "degraded",
       version: process.env.npm_package_version ?? "0.3.0",
       host: `${context.environment.host}:${context.environment.port}`,
+      runtime: {
+        home: context.environment.home,
+        entrypoint: process.argv[1] ?? null,
+        pid: process.pid,
+      },
       database: {
         status: diagnostics.ok ? "ok" : "degraded",
         journalMode: diagnostics.journalMode,

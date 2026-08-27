@@ -39,7 +39,7 @@ const activeStatuses = new Set([
 type BuildAction = "start" | "pause" | "resume" | "cancel";
 
 export function BuildScreen(): React.JSX.Element {
-  const builds = useSWR<BuildSummary[]>("/api/builds", apiFetch, {
+  const builds = useSWR<BuildSummary[]>("/api/builds?scope=active", apiFetch, {
     refreshInterval: 2_000,
   });
   const activeBuilds =

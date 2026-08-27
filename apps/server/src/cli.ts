@@ -183,10 +183,34 @@ program
 
 program
   .command("status")
-  .description("Show current and historical builds")
-  .action(async () => {
-    printJson(await callApi("GET", "/api/builds"));
-  });
+  .description("Show build status; defaults to active work")
+  .option("--all", "include active and historical builds")
+  .option("--terminal", "show completed, failed, and cancelled builds")
+  .option("--repository <id>", "filter by repository id")
+  .option("--limit <count>", "maximum builds to return", "50")
+  .action(
+    async (options: {
+      all?: boolean;
+      terminal?: boolean;
+      repository?: string;
+      limit?: string;
+    }) => {
+      const parameters = new URLSearchParams();
+      parameters.set(
+        "scope",
+        options.all === true
+          ? "all"
+          : options.terminal === true
+            ? "terminal"
+            : "active",
+      );
+      if (options.repository !== undefined) {
+        parameters.set("repositoryId", options.repository);
+      }
+      parameters.set("limit", options.limit ?? "50");
+      printJson(await callApi("GET", `/api/builds?${parameters.toString()}`));
+    },
+  );
 
 program
   .command("inspect")

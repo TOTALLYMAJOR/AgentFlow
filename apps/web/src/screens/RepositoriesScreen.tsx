@@ -27,7 +27,7 @@ export function RepositoriesScreen(): React.JSX.Element {
     "/api/repositories",
     apiFetch,
   );
-  const builds = useSWR<BuildSummary[]>("/api/builds", apiFetch);
+  const builds = useSWR<BuildSummary[]>("/api/builds?limit=200", apiFetch);
   const governance = useSWR<GovernanceOverview>("/api/governance", apiFetch);
   const [path, setPath] = useState("");
   const [showForm, setShowForm] = useState(false);

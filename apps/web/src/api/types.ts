@@ -9,6 +9,11 @@ export interface HealthResponse {
   status: "ok";
   version: string;
   host: string;
+  runtime: {
+    home: string;
+    entrypoint: string | null;
+    pid: number;
+  };
   database: {
     status: "ok" | "degraded";
     journalMode: string;
