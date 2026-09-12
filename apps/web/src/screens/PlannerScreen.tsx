@@ -377,9 +377,9 @@ export function PlannerScreen({
             >
               <MagnifyingGlassIcon size={22} aria-hidden="true" />
               <span>
-                <strong>Discover for me</strong>
+                <strong>Build out the backlog</strong>
                 <small>
-                  Codex selects the highest-value evidence-backed program.
+                  Codex reconciles repository evidence into remaining work.
                 </small>
               </span>
             </button>
@@ -424,9 +424,9 @@ export function PlannerScreen({
             <div className="auto-discovery-note">
               <MagnifyingGlassIcon size={20} aria-hidden="true" />
               <p>
-                Codex will compare documented gaps, queues, tests, TODOs, recent
-                history, user impact, readiness, and dependency-unblocking
-                value before choosing.
+                Codex will reconcile documented outcomes, shipped capabilities,
+                gaps, queues, tests, TODOs, and recent history into a reviewed
+                completion boundary, with exclusions and unknowns kept visible.
               </p>
             </div>
           )}
@@ -445,7 +445,7 @@ export function PlannerScreen({
             {generating
               ? "Codex is inspecting the repository…"
               : generationMode === "auto"
-                ? "Discover and draft backlog"
+                ? "Inspect repo and build backlog"
                 : "Draft backlog"}
           </Button>
         </div>

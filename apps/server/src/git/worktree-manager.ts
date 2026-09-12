@@ -22,6 +22,8 @@ import { parseWorktreePorcelain } from "./worktree-parser.js";
 
 import type {
   BuildWorktreeReconciliation,
+  BuildBranchRetirement,
+  BranchRetirement,
   GitCommandRecord,
   GitCommandRecorder,
   GitWorktreeRecord,
@@ -423,6 +425,28 @@ export class GitWorktreeManager {
     return removals;
   }
 
+  public async retireMergedBranches(
+    taskIds: readonly string[],
+    baseBranch: string,
+  ): Promise<BuildBranchRetirement> {
+    await this.#assertValidBranch(baseBranch);
+    const tasks: BranchRetirement[] = [];
+    for (const taskId of taskIds) {
+      assertSafeIdentifier("task ID", taskId);
+      tasks.push(
+        await this.#retireBranch(this.taskBranch(taskId), this.integrationBranch()),
+      );
+    }
+    return {
+      buildId: this.buildId,
+      tasks,
+      integration: await this.#retireBranch(
+        this.integrationBranch(),
+        baseBranch,
+      ),
+    };
+  }
+
   public async pruneManagedMetadata(
     execute = false,
   ): Promise<PruneInspection> {
@@ -794,6 +818,45 @@ export class GitWorktreeManager {
         removed: true,
         branchPreserved: true,
       };
+    });
+  }
+
+  async #retireBranch(
+    branchName: string,
+    targetBranch: string,
+  ): Promise<BranchRetirement> {
+    return this.#serializeMutation(async () => {
+      await this.#assertValidBranch(branchName);
+      await this.#assertValidBranch(targetBranch);
+      if (!(await this.#branchExists(branchName))) {
+        return { branchName, targetBranch, deleted: false, reason: "missing" };
+      }
+      const checkedOut = (await this.listWorktrees()).some(
+        (record) => record.branchName === branchName,
+      );
+      if (checkedOut) {
+        return {
+          branchName,
+          targetBranch,
+          deleted: false,
+          reason: "still-checked-out",
+        };
+      }
+      if (!(await this.#isAncestor(branchName, targetBranch))) {
+        return {
+          branchName,
+          targetBranch,
+          deleted: false,
+          reason: "not-merged",
+        };
+      }
+      await this.#runner.run(this.repositoryRoot, [
+        "branch",
+        "--delete",
+        "--force",
+        branchName,
+      ]);
+      return { branchName, targetBranch, deleted: true, reason: "deleted" };
     });
   }
 

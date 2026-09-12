@@ -264,9 +264,16 @@ worktrees
     "--force",
     "allow active-build cleanup and removal of dirty managed worktrees",
   )
+  .option(
+    "--delete-merged-branches",
+    "delete local task branches merged into integration and integration branches merged into base",
+  )
   .description("Remove managed worktrees while preserving their branches")
-  .action(async (buildId: string, options: { force?: boolean }) => {
-    const { build, manager } = await managerForBuild(buildId);
+  .action(async (
+    buildId: string,
+    options: { force?: boolean; deleteMergedBranches?: boolean },
+  ) => {
+    const { build, manager, repository } = await managerForBuild(buildId);
     const force = options.force === true;
     if (
       ["planning", "ready", "running", "paused", "interrupted"].includes(
@@ -278,12 +285,20 @@ worktrees
         `Build ${buildId} is ${build.status}; pass --force only after confirming no worker is running`,
       );
     }
+    const removals = await manager.cleanBuildWorktrees(
+      build.tasks.map((task) => task.id),
+      force,
+    );
+    const retirement = options.deleteMergedBranches === true
+      ? await manager.retireMergedBranches(
+          build.tasks.map((task) => task.id),
+          repository.baseBranch,
+        )
+      : null;
     printJson({
       buildId,
-      removals: await manager.cleanBuildWorktrees(
-        build.tasks.map((task) => task.id),
-        force,
-      ),
+      removals,
+      retirement,
     });
   });
 
@@ -647,11 +662,13 @@ interface CliBuild {
 interface CliRepository {
   id: string;
   localPath: string;
+  baseBranch: string;
 }
 
 async function managerForBuild(buildId: string): Promise<{
   build: CliBuild;
   manager: GitWorktreeManager;
+  repository: CliRepository;
 }> {
   const build = await callApi<CliBuild>(
     "GET",
@@ -665,6 +682,7 @@ async function managerForBuild(buildId: string): Promise<{
   await ensureRuntimeLayout(environment);
   return {
     build,
+    repository,
     manager: await GitWorktreeManager.create({
       repositoryRoot: repository.localPath,
       worktreesRoot: environment.worktreesPath,

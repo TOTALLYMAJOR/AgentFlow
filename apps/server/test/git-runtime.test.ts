@@ -210,6 +210,46 @@ describe("GitWorktreeManager", () => {
     expect(await branchExists(fixture.repository, task.branchName)).toBe(true);
   });
 
+  it("retires only branches proven merged into their governed targets", async () => {
+    const fixture = await createFixture("retirement");
+    const manager = await createManager(fixture, "build-retirement");
+    const integration = await manager.createIntegrationWorktree({
+      baseBranch: "main",
+    });
+    const task = await manager.createTaskWorktree({
+      taskId: "BL-301",
+      integrationCommit: integration.headCommit,
+    });
+    await writeFile(path.join(task.path, "delivered.txt"), "delivered\n");
+    await git(task.path, ["add", "delivered.txt"]);
+    await git(task.path, ["commit", "-m", "deliver task"]);
+    await git(integration.path, ["merge", "--no-ff", "--no-edit", task.branchName]);
+    await manager.cleanBuildWorktrees(["BL-301"]);
+
+    const beforeBaseMerge = await manager.retireMergedBranches(["BL-301"], "main");
+    expect(beforeBaseMerge.tasks[0]).toMatchObject({
+      deleted: true,
+      reason: "deleted",
+    });
+    expect(beforeBaseMerge.integration).toMatchObject({
+      deleted: false,
+      reason: "not-merged",
+    });
+
+    await git(fixture.repository, [
+      "merge",
+      "--no-ff",
+      "--no-edit",
+      integration.branchName,
+    ]);
+    const afterBaseMerge = await manager.retireMergedBranches(["BL-301"], "main");
+    expect(afterBaseMerge.integration).toMatchObject({
+      deleted: true,
+      reason: "deleted",
+    });
+    expect(await branchExists(fixture.repository, integration.branchName)).toBe(false);
+  });
+
   it("inspects committed renames plus tracked and untracked changes relative to the task base", async () => {
     const fixture = await createFixture("changes", {
       "owned/old.txt": "old\n",

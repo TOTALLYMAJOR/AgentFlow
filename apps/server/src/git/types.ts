@@ -95,6 +95,19 @@ export interface WorktreeRemoval {
   branchPreserved: true;
 }
 
+export interface BranchRetirement {
+  branchName: string;
+  targetBranch: string;
+  deleted: boolean;
+  reason: "deleted" | "missing" | "still-checked-out" | "not-merged";
+}
+
+export interface BuildBranchRetirement {
+  buildId: string;
+  tasks: BranchRetirement[];
+  integration: BranchRetirement;
+}
+
 export interface PruneInspection {
   candidates: GitWorktreeRecord[];
   output: string;

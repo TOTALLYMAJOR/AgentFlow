@@ -186,7 +186,7 @@ if [[ -n $backlog_objective || $backlog_auto == true ]]; then
   [[ $backlog_path != /* ]] || die "--backlog must be repository-relative"
 
   if [[ $backlog_auto == true ]]; then
-    objective_instructions="Choose the highest-value next program using repository evidence. Inspect product documentation, architecture, existing backlogs and work queues, tests, TODOs, incomplete flows, and recent Git history. Consider at least three candidates internally, then select one based on user impact, explicit repository intent, dependency-unblocking value, implementation readiness, and risk. Do not assume market demand, invent a new product direction, repeat completed work, or prioritize cosmetic cleanup over documented capability gaps. In your final summary, name the selected program, the alternatives considered, and the repository evidence supporting the choice."
+    objective_instructions="Build out the repository's evidence-backed backlog; do not stop after choosing one next program. Inspect product documentation, architecture, existing backlogs and work queues, tests, TODOs, incomplete flows, and recent Git history. Reconcile those sources into the documented product outcome, shipped capabilities, incomplete work, dependencies, and material unknowns. Cover all evidence-supported remaining work needed to reach the repository's documented objective, ordered by user impact, dependency-unblocking value, implementation readiness, and risk. Before the task sections, add a Backlog Coverage section naming the repository evidence used, the completion boundary this backlog covers, explicit exclusions, and unresolved questions for human review. Do not assume market demand, invent a new product direction, repeat completed work, convert unsupported ideas into tasks, or prioritize cosmetic cleanup over documented capability gaps. If the repository does not establish a credible completion boundary, say so in Backlog Coverage and create only the supported discovery or decision tasks needed to resolve it. In your final summary, report the coverage boundary, major workstreams, exclusions, unresolved questions, and supporting repository evidence."
   else
     objective_instructions="Objective: $backlog_objective"
   fi
@@ -239,7 +239,7 @@ if [[ -n $backlog_objective || $backlog_auto == true ]]; then
     "- Return a short summary after writing the file."
 
   if [[ $backlog_auto == true ]]; then
-    info "Asking Codex to discover and backlog the highest-value repository-grounded program"
+    info "Asking Codex to inspect the repository and build out its evidence-backed backlog"
   else
     info "Asking Codex to generate $backlog_path"
   fi

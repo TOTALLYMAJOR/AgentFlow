@@ -341,11 +341,14 @@ function backlogGenerationPrompt(
   const selection =
     mode === "auto"
       ? [
-          "Choose the highest-value next program using repository evidence.",
+          "Build out the repository's evidence-backed backlog; do not stop after choosing one next program.",
           "Inspect product documentation, architecture, existing backlogs and queues, tests, TODOs, incomplete flows, and recent Git history.",
-          "Consider at least three candidates internally, then choose based on user impact, explicit repository intent, dependency-unblocking value, readiness, and risk.",
-          "Do not invent market demand, repeat completed work, or prioritize cosmetic cleanup over documented capability gaps.",
-          "In the final summary, name the selected program, alternatives considered, and evidence supporting the choice.",
+          "Reconcile those sources into the documented product outcome, shipped capabilities, incomplete work, dependencies, and material unknowns.",
+          "Cover all evidence-supported remaining work needed to reach the repository's documented objective, ordered by user impact, dependency-unblocking value, readiness, and risk.",
+          "Before the task sections, add a Backlog Coverage section that names the repository evidence used, the completion boundary this backlog covers, explicit exclusions, and unresolved questions for human review.",
+          "Do not invent market demand or a new product direction, repeat completed work, convert unsupported ideas into tasks, or prioritize cosmetic cleanup over documented capability gaps.",
+          "If the repository does not establish a credible completion boundary, say so in Backlog Coverage and create only the supported discovery or decision tasks needed to resolve it.",
+          "In the final summary, report the coverage boundary, major workstreams, exclusions, unresolved questions, and evidence supporting the backlog.",
         ].join(" ")
       : `Objective: ${objective ?? ""}`;
   return [

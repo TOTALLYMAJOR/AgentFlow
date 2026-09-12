@@ -37,6 +37,13 @@ describe("AgentFlow API smoke", () => {
 const arguments_ = process.argv.slice(2);
 const directoryIndex = arguments_.indexOf("--cd");
 const repository = arguments_[directoryIndex + 1];
+const prompt = arguments_.at(-1);
+if (!prompt.includes("do not stop after choosing one next program") ||
+    !prompt.includes("Backlog Coverage") ||
+    !prompt.includes("explicit exclusions") ||
+    !prompt.includes("unresolved questions")) {
+  throw new Error("auto backlog prompt did not require repository-wide coverage");
+}
 require("node:fs").writeFileSync(
   repository + "/BACKLOG.md",
   "# Generated backlog\\n\\n## AUTO-001 - Deliver selected program\\n\\n\\\`\\\`\\\`yaml\\nestimate_hours: 2\\ndepends_on: []\\nowns:\\n  - src/\\nvalidate:\\n  - npm run typecheck\\n\\\`\\\`\\\`\\n\\nImplement the selected program.\\n\\n### Acceptance Criteria\\n\\n- Focused validation passes.\\n",

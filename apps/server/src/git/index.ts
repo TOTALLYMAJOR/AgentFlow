@@ -20,6 +20,8 @@ export {
 } from "./worktree-manager.js";
 export type {
   BuildWorktreeReconciliation,
+  BuildBranchRetirement,
+  BranchRetirement,
   GitCommandRecord,
   GitCommandRecorder,
   GitWorktreeRecord,
