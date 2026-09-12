@@ -15,6 +15,44 @@ afterEach(async () => {
 });
 
 describe("multi-repository lifecycle acceptance", () => {
+  it("reopens a paused initiative without duplicate builds, then resumes and cancels it", async () => {
+    const runtimeHome = await temporaryRoot("agentflow-restart-runtime");
+    const repositoryPaths = await Promise.all([fixtureRepository("restart-provider"), fixtureRepository("restart-consumer")]);
+    const environment = resolveEnvironment({ AGENTFLOW_HOME: runtimeHome, AGENTFLOW_LOG_LEVEL: "silent" });
+    const first = await buildApp({ environment, staticRoot: false, logger: false });
+    vi.spyOn(first.context.coordinator, "start").mockImplementation(async (buildId) => first.context.store.builds.transition(buildId, "running", { eventType: "acceptance.build_started" }));
+    let initiativeId: string;
+    let buildId: string;
+    try {
+      const members: Array<{ planId: string; baseCommit: string }> = [];
+      for (const repositoryPath of repositoryPaths) {
+        const repository = (await first.app.inject({ method: "POST", url: "/api/repositories", payload: { path: repositoryPath } })).json<{ id: string }>();
+        const plan = (await first.app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId: repository.id } })).json<{ id: string }>();
+        members.push({ planId: plan.id, baseCommit: (await execFileAsync("git", ["-C", repositoryPath, "rev-parse", "HEAD"])).stdout.trim() });
+      }
+      const proposed = await first.app.inject({ method: "POST", url: "/api/initiatives", payload: { title: "Restart recovery", objective: "Preserve exact progress across process restart", members, dependencies: [{ producerPlanId: members[0]?.planId, consumerPlanId: members[1]?.planId, dependencyType: "hard" }] } });
+      initiativeId = proposed.json<{ id: string }>().id;
+      await first.app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/approve` });
+      const running = (await first.app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/start` })).json<{ builds: Array<{ id: string }> }>();
+      buildId = running.builds[0]?.id ?? "";
+      first.context.store.builds.transition(buildId, "paused", { eventType: "acceptance.recovery_paused" });
+      expect((await first.app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/reconcile` })).json()).toMatchObject({ status: "paused" });
+    } finally { await first.app.close(); }
+
+    const second = await buildApp({ environment, staticRoot: false, logger: false });
+    try {
+      const recovered = await second.app.inject({ method: "GET", url: `/api/initiatives/${initiativeId}` });
+      expect(recovered.json()).toMatchObject({ status: "paused", builds: [{ id: buildId }] });
+      vi.spyOn(second.context.coordinator, "resume").mockImplementation(async (id) => second.context.store.builds.transition(id, "running", { eventType: "acceptance.build_resumed" }));
+      const resumed = await second.app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/resume` });
+      expect(resumed.json<{ builds: unknown[] }>().builds).toHaveLength(1);
+      vi.spyOn(second.context.coordinator, "cancel").mockImplementation((id) => second.context.store.builds.transition(id, "cancelled", { eventType: "acceptance.build_cancelled" }));
+      const cancelled = await second.app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/cancel` });
+      expect(cancelled.json()).toMatchObject({ status: "cancelled" });
+      expect(second.context.store.initiatives.get(initiativeId).members.filter((member) => member.buildId !== null)).toHaveLength(1);
+    } finally { await second.app.close(); }
+  });
+
   it("runs three exact repository plans to completion and retires terminal state idempotently", async () => {
     const runtimeHome = await temporaryRoot("agentflow-multi-runtime");
     const repositoryPaths = await Promise.all([fixtureRepository("contracts"), fixtureRepository("service"), fixtureRepository("web")]);
