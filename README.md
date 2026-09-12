@@ -70,45 +70,76 @@ agentflow service status
 
 ## Run a repository
 
-Start with a clean, committed Git checkout:
+Start the persistent control plane in one terminal:
 
 ```bash
-agentflow repo init /absolute/path/to/repository
-agentflow repo add /absolute/path/to/repository
-agentflow repo list
+agentflow serve
 ```
 
-Review `.agentflow.yaml`, then create or generate a root `BACKLOG.md`. Generated
-backlogs are intentionally review-only: inspect and commit the file before
-planning.
+In your repository, use the guided entry path:
 
 ```bash
-agentflow plan <repository-id>
+agentflow setup . --prepare
+```
+
+This inspects the checkout, creates missing `.agentflow.yaml` without overwriting
+existing configuration, validates any backlog, and reports the next action.
+Review and commit the generated configuration. It does not stash, reset, commit,
+or move your source checkout. For a repository without any commit, make an
+initial commit first.
+
+If there is no backlog, describe your outcome:
+
+```bash
+agentflow start . --objective "Implement the documented customer export workflow"
+```
+
+AgentFlow reuses or creates the registration, generates the configured backlog,
+and stops for review. Review its scope, ownership, dependencies, acceptance
+criteria, and validation commands; commit the backlog. You can explicitly use
+`--auto` to let Codex select evidence-backed work instead. Existing backlogs are
+preserved by `start`; invalid backlogs return diagnostics for repair.
+
+Without Codex, `agentflow setup . --worksheet` creates `BACKLOG.draft.md` once.
+Use it to capture intent, then write the configured backlog using the grammar in
+[examples/BACKLOG.md](examples/BACKLOG.md). The worksheet is deliberately not an
+executable plan. Remove it or commit it after review before planning.
+
+```bash
+agentflow start .
 agentflow run <plan-id>
 agentflow status
 agentflow inspect <build-id>
 ```
 
-The operational sequence is:
+`start` checks cleanliness, tracked inputs, the configured local base, and backlog
+validity before creating a plan. It surfaces an existing active build instead of
+creating a competing lane. Repeating it without a build may create another
+immutable plan; it never starts workers automatically.
 
-```text
-clean checkout
-  -> reviewed .agentflow.yaml
-  -> reviewed and committed BACKLOG.md
-  -> immutable plan
-  -> isolated task execution
-  -> ownership and validation gates
-  -> serialized integration
-  -> evidence and handoff
-```
+Operational CLI commands connect to the persistent loopback server and verify
+its `AGENTFLOW_HOME`. Keep `serve` running, or use the installed user service.
+They no longer create temporary coordinators that can recover or interrupt live
+work. `setup` runs locally even when the server is stopped.
 
-`repo remove` removes registry metadata only. It never deletes source. Managed
-worktrees can be inspected or explicitly cleaned:
+Recover existing work using its build ID:
 
 ```bash
-agentflow worktrees list <build-id>
-agentflow worktrees clean <build-id>
+agentflow launch <build-id>          # existing ready build
+agentflow pause <build-id>
+agentflow resume <build-id>          # paused/interrupted build
+agentflow retry <build-id> <task-id>
+agentflow cancel <build-id>
 ```
+
+A failure is not completion. Inspect task evidence before retrying. If a request
+loses its response, run `status` before repeating a mutation; AgentFlow does not
+blindly retry requests that may already have succeeded.
+
+The lower-level `repo init`, `repo add`, `plan`, and `run` commands remain
+available. `repo remove` removes registry metadata only. Managed worktrees can
+be inspected or explicitly cleaned with `agentflow worktrees list <build-id>`
+and `agentflow worktrees clean <build-id>`.
 
 ## Backlog essentials
 
