@@ -24,6 +24,16 @@ export function validateInitiativeGraph(plans: readonly InitiativePlanEvidence[]
   const byPlan = new Map(plans.map((plan) => [plan.planId, plan]));
   if (byPlan.size !== plans.length) errors.push({ code: "DUPLICATE_PLAN", message: "Initiative plan IDs must be unique" });
   if (new Set(plans.map((plan) => plan.repositoryId)).size !== plans.length) errors.push({ code: "DUPLICATE_REPOSITORY", message: "An initiative may bind only one plan per repository" });
+  const artifactRequirements = new Map<string, Set<string>>();
+  for (const edge of dependencies.filter((candidate) => candidate.dependencyType === "artifact" && candidate.artifactName && candidate.artifactVersion)) {
+    const key = `${edge.consumerPlanId}\0${edge.artifactName}\0${edge.artifactVersion}`;
+    const producers = artifactRequirements.get(key) ?? new Set<string>(); producers.add(edge.producerPlanId); artifactRequirements.set(key, producers);
+  }
+  for (const [requirement, producers] of artifactRequirements) {
+    if (producers.size < 2) continue;
+    const [consumer = "", name = "", version = ""] = requirement.split("\0");
+    errors.push({ code: "AMBIGUOUS_ARTIFACT_PRODUCER", message: `${consumer} requires ${name}@${version} from multiple producers: ${[...producers].sort().join(", ")}`, planId: consumer });
+  }
   for (const edge of dependencies) {
     const producer = byPlan.get(edge.producerPlanId);
     const consumer = byPlan.get(edge.consumerPlanId);

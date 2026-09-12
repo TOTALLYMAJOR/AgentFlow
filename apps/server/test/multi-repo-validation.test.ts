@@ -32,4 +32,12 @@ describe("cross-repository initiative validation", () => {
     ]);
     expect(validateInitiativeGraph([plan("zeta", "repo-z"), plan("alpha", "repo-a"), plan("middle", "repo-m")], dependencies)).toMatchObject({ valid: true, waves: [["alpha"], ["middle"], ["zeta"]] });
   });
+
+  it("rejects ambiguous producers for an exact required artifact", () => {
+    const result = validateInitiativeGraph([plan("provider-a", "repo-a", [{ name: "api", version: "1.0.0" }]), plan("provider-b", "repo-b", [{ name: "api", version: "1.0.0" }]), plan("consumer", "repo-c")], [
+      { producerPlanId: "provider-a", consumerPlanId: "consumer", dependencyType: "artifact", artifactName: "api", artifactVersion: "1.0.0" },
+      { producerPlanId: "provider-b", consumerPlanId: "consumer", dependencyType: "artifact", artifactName: "api", artifactVersion: "1.0.0" },
+    ]);
+    expect(result.errors).toEqual(expect.arrayContaining([expect.objectContaining({ code: "AMBIGUOUS_ARTIFACT_PRODUCER" })]));
+  });
 });
