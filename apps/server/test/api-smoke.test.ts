@@ -26,6 +26,34 @@ afterEach(async () => {
 });
 
 describe("AgentFlow API smoke", () => {
+  it("runs three repositories sharing one resource in a deterministic sequence", async () => {
+    const runtimeHome = await temporaryRoot("runtime-initiative-shared-resource");
+    const repositories = await Promise.all([createFixtureRepository(), createFixtureRepository(), createFixtureRepository()]);
+    const { app, context } = await buildApp({ environment: resolveEnvironment({ AGENTFLOW_HOME: runtimeHome, AGENTFLOW_LOG_LEVEL: "silent" }), staticRoot: false, logger: false });
+    vi.spyOn(context.coordinator, "start").mockImplementation(async (buildId) => context.store.builds.transition(buildId, "running", { eventType: "test.build_started" }));
+    try {
+      const members: Array<{ planId: string; baseCommit: string }> = [];
+      for (const repositoryPath of repositories) {
+        const registered = await app.inject({ method: "POST", url: "/api/repositories", payload: { path: repositoryPath } });
+        const planned = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId: registered.json<{ id: string }>().id } });
+        members.push({ planId: planned.json<{ id: string }>().id, baseCommit: (await execFileAsync("git", ["-C", repositoryPath, "rev-parse", "HEAD"])).stdout.trim() });
+      }
+      const orderedPlans = members.map((member) => member.planId).sort();
+      const created = await app.inject({ method: "POST", url: "/api/initiatives", payload: { title: "Shared staging", objective: "Serialize access", members, dependencies: [{ producerPlanId: members[0]?.planId, consumerPlanId: members[1]?.planId, dependencyType: "shared_resource", sharedResource: "staging" }, { producerPlanId: members[0]?.planId, consumerPlanId: members[2]?.planId, dependencyType: "shared_resource", sharedResource: "staging" }] } });
+      const initiativeId = created.json<{ id: string }>().id;
+      await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/approve` });
+      let state = (await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/start` })).json<{ builds: Array<{ id: string; planId: string }> }>();
+      expect(state.builds.map((build) => build.planId)).toEqual([orderedPlans[0]]);
+      for (let index = 1; index < orderedPlans.length; index += 1) {
+        const current = state.builds.find((build) => build.planId === orderedPlans[index - 1]);
+        context.store.builds.transition(current?.id ?? "", "completed", { eventType: "test.build_completed" });
+        state = (await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/reconcile` })).json<typeof state>();
+        expect(state.builds.map((build) => build.planId).sort()).toEqual(orderedPlans.slice(0, index + 1));
+      }
+      expect(state.builds).toHaveLength(3);
+    } finally { await app.close(); }
+  });
+
   it("fails closed for active, forced, and remote Git cleanup requests with durable evidence", async () => {
     const { app, build } = await createReadyBuildApplication("cleanup-policy");
     try {
