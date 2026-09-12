@@ -55,6 +55,15 @@ describe("AgentFlow API smoke", () => {
       state = resumed.json<typeof state>();
       for (let index = 1; index < orderedPlans.length; index += 1) {
         const current = state.builds.find((build) => build.planId === orderedPlans[index - 1]);
+        if (index === 2) {
+          context.store.builds.transition(current?.id ?? "", "failed", { eventType: "test.build_failed" });
+          const partial = await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/reconcile` });
+          expect(partial.json()).toMatchObject({ status: "partial" });
+          context.store.builds.transition(current?.id ?? "", "running", { eventType: "test.build_retry_started" });
+          const retrying = await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/reconcile` });
+          expect(retrying.json()).toMatchObject({ status: "running" });
+          state = retrying.json<typeof state>();
+        }
         context.store.builds.transition(current?.id ?? "", "completed", { eventType: "test.build_completed" });
         state = (await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/reconcile` })).json<typeof state>();
         expect(state.builds.map((build) => build.planId).sort()).toEqual(orderedPlans.slice(0, index + 1));
