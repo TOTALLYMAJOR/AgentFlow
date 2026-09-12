@@ -44,6 +44,14 @@ describe("AgentFlow API smoke", () => {
       await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/approve` });
       let state = (await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/start` })).json<{ builds: Array<{ id: string; planId: string }> }>();
       expect(state.builds.map((build) => build.planId)).toEqual([orderedPlans[0]]);
+      const firstBuild = state.builds[0];
+      context.store.builds.transition(firstBuild?.id ?? "", "paused", { eventType: "test.recovery_paused" });
+      const paused = await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/reconcile` });
+      expect(paused.json()).toMatchObject({ status: "paused", builds: [{ id: firstBuild?.id }] });
+      vi.spyOn(context.coordinator, "resume").mockImplementation(async (buildId) => context.store.builds.transition(buildId, "running", { eventType: "test.build_resumed" }));
+      const resumed = await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/resume` });
+      expect(resumed.json()).toMatchObject({ status: "running", builds: [{ id: firstBuild?.id }] });
+      state = resumed.json<typeof state>();
       for (let index = 1; index < orderedPlans.length; index += 1) {
         const current = state.builds.find((build) => build.planId === orderedPlans[index - 1]);
         context.store.builds.transition(current?.id ?? "", "completed", { eventType: "test.build_completed" });
