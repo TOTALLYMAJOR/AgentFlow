@@ -126,7 +126,7 @@ describe("AgentFlow API smoke", () => {
     } finally { await app.close(); }
   });
 
-  it("creates and approves an immutable multi-repository initiative", async () => {
+  it("rejects post-approval commit drift and creates an immutable superseding replan", async () => {
     const runtimeHome = await temporaryRoot("runtime-initiative");
     const repositories = await Promise.all([createFixtureRepository(), createFixtureRepository()]);
     const { app } = await buildApp({ environment: resolveEnvironment({ AGENTFLOW_HOME: runtimeHome, AGENTFLOW_LOG_LEVEL: "silent" }), staticRoot: false, logger: false });
@@ -152,12 +152,21 @@ describe("AgentFlow API smoke", () => {
       const approvedInitiative = approved.json<{ status: string; digest: string }>();
       expect(approvedInitiative.status).toBe("approved");
       expect(approvedInitiative.digest).toMatch(/^[0-9a-f]{64}$/);
+      await writeFile(path.join(repositories[0], "drift.txt"), "reviewed source changed\n");
+      await execFileAsync("git", ["-C", repositories[0], "add", "drift.txt"]);
+      await execFileAsync("git", ["-C", repositories[0], "commit", "-m", "change after initiative approval"]);
       const started = await app.inject({ method: "POST", url: `/api/initiatives/${initiative.id}/start` });
-      expect(started.statusCode).toBe(200);
-      const running = started.json<{ status: string; builds: Array<{ id: string; status: string }> }>();
-      expect(running.status).toBe("running");
-      expect(running.builds).toHaveLength(1);
-      expect(running.builds[0]?.status).toBe("running");
+      expect(started.statusCode).toBe(409);
+      expect(started.json()).toMatchObject({ error: { code: "INITIATIVE_COMMIT_DRIFT" } });
+      const firstMember = members[0]; const secondMember = members[1];
+      if (firstMember === undefined || secondMember === undefined) throw new Error("Fixture members were not created");
+      const revisedFirstMember = { ...firstMember, baseCommit: (await execFileAsync("git", ["-C", repositories[0], "rev-parse", "HEAD"])).stdout.trim() };
+      members[0] = revisedFirstMember;
+      const replanned = await app.inject({ method: "POST", url: `/api/initiatives/${initiative.id}/replan`, payload: { title: "Contract rollout revised", objective: "Coordinate against the reviewed replacement source", members, dependencies: [{ producerPlanId: revisedFirstMember.planId, consumerPlanId: secondMember.planId, dependencyType: "hard" }] } });
+      expect(replanned.statusCode).toBe(201);
+      expect(replanned.json()).toMatchObject({ status: "proposed", supersedesInitiativeId: initiative.id, digest: null });
+      const original = await app.inject({ method: "GET", url: `/api/initiatives/${initiative.id}` });
+      expect(original.json()).toMatchObject({ status: "approved", digest: approvedInitiative.digest, supersedesInitiativeId: null });
     } finally { await app.close(); }
   });
 
