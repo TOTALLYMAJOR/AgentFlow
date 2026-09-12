@@ -14,6 +14,9 @@ export interface InitiativeSummary {
   digest: string | null;
   members: Array<{ repositoryId: string; planId: string; baseCommit: string; buildId: string | null }>;
   dependencies: Array<{ producerPlanId: string; consumerPlanId: string; dependencyType: string; artifactName?: string; artifactVersion?: string; sharedResource?: string }>;
+  blockers: Array<{ planId: string; code: string; message: string; recovery: string }>;
+  builds: Array<{ id: string; status: string }>;
+  supersedesInitiativeId: string | null;
   updatedAt: string;
 }
 
