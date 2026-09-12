@@ -70,6 +70,21 @@ describe("AgentFlow API smoke", () => {
     } finally { await app.close(); }
   });
 
+  it("cleans a completed build after retention and records idempotent branch decisions", async () => {
+    const { app, context, build } = await createReadyBuildApplication("cleanup-completed");
+    try {
+      context.store.builds.transition(build.id, "running", { eventType: "test.build_started" });
+      context.store.builds.transition(build.id, "completed", { eventType: "test.build_completed" });
+      const first = await app.inject({ method: "POST", url: `/api/builds/${build.id}/cleanup`, payload: { deleteMergedBranches: true, retentionHours: 0 } });
+      expect(first.statusCode).toBe(200);
+      expect(first.json<{ retirement: { tasks: Array<{ reason: string }>; integration: { reason: string } } }>().retirement).toMatchObject({ tasks: [{ reason: "missing" }, { reason: "missing" }], integration: { reason: "missing" } });
+      const second = await app.inject({ method: "POST", url: `/api/builds/${build.id}/cleanup`, payload: { deleteMergedBranches: true, retentionHours: 0 } });
+      expect(second.statusCode).toBe(200);
+      const receipts = second.json<{ receipts: Array<{ action: string }> }>().receipts;
+      expect(receipts.filter((receipt) => receipt.action === "missing").length).toBeGreaterThanOrEqual(6);
+    } finally { await app.close(); }
+  });
+
   it("keeps an artifact consumer blocked until the exact upstream artifact is integrated", async () => {
     const runtimeHome = await temporaryRoot("runtime-initiative-artifact");
     const repositories = await Promise.all([createFixtureRepository(), createFixtureRepository()]);
