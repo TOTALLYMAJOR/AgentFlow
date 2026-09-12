@@ -11,6 +11,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveEnvironment } from "../src/config/environment.js";
+import { GitWorktreeManager } from "../src/git/index.js";
 import { buildApp } from "../src/http/app.js";
 
 const execFileAsync = promisify(execFile);
@@ -90,6 +91,27 @@ describe("AgentFlow API smoke", () => {
       expect(second.statusCode).toBe(200);
       const receipts = second.json<{ receipts: Array<{ action: string }> }>().receipts;
       expect(receipts.filter((receipt) => receipt.action === "missing").length).toBeGreaterThanOrEqual(6);
+    } finally { await app.close(); }
+  });
+
+  it("preserves a dirty terminal worktree and records why cleanup was refused", async () => {
+    const { app, context, build } = await createReadyBuildApplication("cleanup-dirty");
+    try {
+      const persistedBuild = context.store.builds.getById(build.id);
+      const repository = await context.repositoryService.get(persistedBuild.repositoryId);
+      const manager = await GitWorktreeManager.create({ repositoryRoot: repository.localPath, worktreesRoot: context.environment.worktreesPath, repositoryId: repository.id, buildId: build.id });
+      const integration = await manager.createIntegrationWorktree({ baseBranch: repository.baseBranch });
+      const task = context.store.tasks.listForBuild(build.id)[0];
+      const taskWorktree = await manager.createTaskWorktree({ taskId: task?.id ?? "", integrationCommit: integration.headCommit });
+      await writeFile(path.join(taskWorktree.path, "uncommitted.txt"), "must survive cleanup\n");
+      context.store.builds.transition(build.id, "running", { eventType: "test.build_started" });
+      context.store.builds.transition(build.id, "completed", { eventType: "test.build_completed" });
+
+      const cleanup = await app.inject({ method: "POST", url: `/api/builds/${build.id}/cleanup`, payload: { deleteMergedBranches: true, retentionHours: 0 } });
+      expect(cleanup.statusCode).toBe(409);
+      expect(cleanup.json()).toMatchObject({ error: { code: "WORKTREE_CLEANUP_REFUSED" } });
+      const receipts = (await app.inject({ method: "GET", url: `/api/builds/${build.id}/cleanup-receipts` })).json<Array<{ action: string; target: string; reason: string }>>();
+      expect(receipts.some((receipt) => receipt.action === "preserved" && receipt.target === taskWorktree.path && receipt.reason.startsWith("dirty:"))).toBe(true);
     } finally { await app.close(); }
   });
 

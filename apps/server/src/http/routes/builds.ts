@@ -135,7 +135,14 @@ export function registerBuildRoutes(
     }
     const repository = await context.repositoryService.get(build.repositoryId);
     const manager = await GitWorktreeManager.create({ repositoryRoot: repository.localPath, worktreesRoot: context.environment.worktreesPath, repositoryId: repository.id, buildId: id });
-    const taskIds = context.store.tasks.listForBuild(id).map((task) => task.id);
+    const tasks = context.store.tasks.listForBuild(id);
+    const taskIds = tasks.map((task) => task.id);
+    const reconciliation = await manager.reconcileBuild(tasks.map((task) => ({ taskId: task.id, ...(task.baseCommit === null ? {} : { baseCommit: task.baseCommit }) })), build.baseCommit);
+    const unsafeWorktrees = [reconciliation.integration, ...reconciliation.tasks].filter((worktree) => !["missing", "ready"].includes(worktree.state));
+    if (unsafeWorktrees.length > 0) {
+      for (const worktree of unsafeWorktrees) context.store.cleanupReceipts.append({ buildId: id, targetType: "worktree", target: worktree.path, action: "preserved", reason: `${worktree.state}: ${worktree.reason}` });
+      throw new AgentFlowError("WORKTREE_CLEANUP_REFUSED", `Build ${id} has worktrees requiring recovery; source was preserved`, 409, unsafeWorktrees);
+    }
     const removals = await manager.cleanBuildWorktrees(taskIds, false);
     for (const removal of removals) context.store.cleanupReceipts.append({ buildId: id, targetType: "worktree", target: removal.path, action: removal.removed ? "removed" : "missing", reason: removal.removed ? "managed worktree removed" : "managed worktree was already absent" });
     const completedAt = build.completedAt === null ? Number.NaN : Date.parse(build.completedAt);
