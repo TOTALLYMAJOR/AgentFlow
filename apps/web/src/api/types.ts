@@ -20,6 +20,17 @@ export interface InitiativeSummary {
   updatedAt: string;
 }
 
+export interface InitiativeCandidate {
+  repositoryId: string;
+  repositoryName: string;
+  planId: string;
+  baseCommit: string;
+  planSha256: string;
+  createdAt: string;
+  lockedAt: string | null;
+  taskCount: number;
+}
+
 export interface HealthResponse {
   status: "ok";
   version: string;

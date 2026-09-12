@@ -17,6 +17,15 @@ const CreateBody = z.object({
 type CreateInitiativeBody = z.infer<typeof CreateBody>;
 
 export function registerInitiativeRoutes(app: FastifyInstance, context: AgentFlowContext): void {
+  app.get("/api/initiative-candidates", async () => {
+    const git = new GitCommandRunner();
+    const repositories = await context.repositoryService.list();
+    return (await Promise.all(repositories.map(async (repository) => {
+      const baseCommit = (await git.run(repository.localPath, ["rev-parse", `${repository.baseBranch}^{commit}`])).stdout.trim();
+      return context.store.plans.listForRepository(repository.id).map((plan) => ({ repositoryId: repository.id, repositoryName: repository.name, planId: plan.id, baseCommit, planSha256: plan.backlogSha256, createdAt: plan.createdAt, lockedAt: plan.lockedAt, taskCount: plan.normalizedPlan.tasks.length }));
+    }))).flat();
+  });
+
   app.get("/api/initiatives", async () => context.store.initiatives.list().map((initiative) => describeInitiative(context, initiative)));
 
   app.post("/api/initiatives", async (request, reply) => {

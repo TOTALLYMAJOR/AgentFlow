@@ -117,6 +117,10 @@ describe("AgentFlow API smoke", () => {
         const commit = (await execFileAsync("git", ["-C", repositoryPath, "rev-parse", "HEAD"])).stdout.trim();
         members.push({ planId: plan.id, baseCommit: commit });
       }
+      const candidates = await app.inject({ method: "GET", url: "/api/initiative-candidates" });
+      expect(candidates.statusCode).toBe(200);
+      const candidateBindings = candidates.json<Array<{ planId: string; baseCommit: string }>>().map(({ planId, baseCommit }) => ({ planId, baseCommit }));
+      expect(candidateBindings).toEqual(expect.arrayContaining(members));
       const created = await app.inject({ method: "POST", url: "/api/initiatives", payload: { title: "Contract rollout", objective: "Coordinate a provider and consumer release", members, dependencies: [{ producerPlanId: members[0]?.planId, consumerPlanId: members[1]?.planId, dependencyType: "hard" }] } });
       expect(created.statusCode).toBe(201);
       const initiative = created.json<{ id: string; status: string; waves: string[][] }>();
