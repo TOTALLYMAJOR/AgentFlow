@@ -14,32 +14,13 @@ const CreateBody = z.object({
   members: z.array(z.object({ planId: z.string().min(1), baseCommit: z.string().min(7) })).min(2),
   dependencies: z.array(z.object({ producerPlanId: z.string().min(1), consumerPlanId: z.string().min(1), dependencyType: z.enum(["hard", "artifact", "runtime", "shared_resource"]), artifactName: z.string().min(1).optional(), artifactVersion: z.string().min(1).optional(), sharedResource: z.string().min(1).optional() })).default([]),
 });
+type CreateInitiativeBody = z.infer<typeof CreateBody>;
 
 export function registerInitiativeRoutes(app: FastifyInstance, context: AgentFlowContext): void {
   app.get("/api/initiatives", async () => context.store.initiatives.list());
 
   app.post("/api/initiatives", async (request, reply) => {
-    const input = CreateBody.parse(request.body);
-    const dependencies = input.dependencies.map((dependency) => ({
-      producerPlanId: dependency.producerPlanId,
-      consumerPlanId: dependency.consumerPlanId,
-      dependencyType: dependency.dependencyType,
-      ...(dependency.artifactName === undefined ? {} : { artifactName: dependency.artifactName }),
-      ...(dependency.artifactVersion === undefined ? {} : { artifactVersion: dependency.artifactVersion }),
-      ...(dependency.sharedResource === undefined ? {} : { sharedResource: dependency.sharedResource }),
-    }));
-    const git = new GitCommandRunner();
-    const evidence = await Promise.all(input.members.map(async (member) => {
-      const plan = context.store.plans.getById(member.planId);
-      const repository = await context.repositoryService.get(plan.repositoryId);
-      const actualCommit = (await git.run(repository.localPath, ["rev-parse", `${repository.baseBranch}^{commit}`])).stdout.trim();
-      if (actualCommit !== member.baseCommit) throw new AgentFlowError("INITIATIVE_COMMIT_DRIFT", `Repository ${repository.id} no longer matches proposed base commit`, 409, { expected: member.baseCommit, actual: actualCommit });
-      return { repositoryId: repository.id, planId: plan.id, baseCommit: actualCommit, planSha256: plan.backlogSha256, producedArtifacts: plan.normalizedPlan.tasks.flatMap((task) => task.produces.map((artifact) => ({ name: artifact.name, version: artifact.version }))) };
-    }));
-    const validation = validateInitiativeGraph(evidence, dependencies);
-    if (!validation.valid) throw new AgentFlowError("INITIATIVE_INVALID", "The multi-repository initiative did not pass preflight", 422, validation.errors);
-    const initiative = context.store.initiatives.create({ id: createId("initiative"), title: input.title, objective: input.objective, members: evidence, dependencies });
-    await reply.status(201).send({ ...initiative, waves: validation.waves });
+    await reply.status(201).send(await createInitiative(context, CreateBody.parse(request.body)));
   });
 
   app.get("/api/initiatives/:id", async (request) => context.store.initiatives.get(Parameters.parse(request.params).id));
@@ -61,6 +42,51 @@ export function registerInitiativeRoutes(app: FastifyInstance, context: AgentFlo
   });
 
   app.post("/api/initiatives/:id/reconcile", async (request) => reconcileInitiative(context, Parameters.parse(request.params).id));
+
+  app.post("/api/initiatives/:id/pause", async (request) => {
+    const id = Parameters.parse(request.params).id;
+    const initiative = context.store.initiatives.get(id);
+    for (const member of initiative.members) if (member.buildId !== null && context.store.builds.getById(member.buildId).status === "running") context.coordinator.pause(member.buildId);
+    return context.store.initiatives.transition(id, "paused", "initiative.paused");
+  });
+
+  app.post("/api/initiatives/:id/resume", async (request) => {
+    const id = Parameters.parse(request.params).id;
+    const initiative = context.store.initiatives.get(id);
+    for (const member of initiative.members) if (member.buildId !== null && ["paused", "interrupted"].includes(context.store.builds.getById(member.buildId).status)) await context.coordinator.resume(member.buildId);
+    context.store.initiatives.transition(id, "running", "initiative.resumed");
+    return reconcileInitiative(context, id);
+  });
+
+  app.post("/api/initiatives/:id/cancel", async (request) => {
+    const id = Parameters.parse(request.params).id;
+    const initiative = context.store.initiatives.get(id);
+    for (const member of initiative.members) if (member.buildId !== null && !["completed", "failed", "cancelled"].includes(context.store.builds.getById(member.buildId).status)) context.coordinator.cancel(member.buildId);
+    return context.store.initiatives.transition(id, "cancelled", "initiative.cancelled");
+  });
+
+  app.post("/api/initiatives/:id/replan", async (request, reply) => {
+    const previous = context.store.initiatives.get(Parameters.parse(request.params).id);
+    const input = CreateBody.parse(request.body);
+    const created = await createInitiative(context, input, previous.id);
+    await reply.status(201).send(created);
+  });
+}
+
+async function createInitiative(context: AgentFlowContext, input: CreateInitiativeBody, supersedesInitiativeId?: string): Promise<Record<string, unknown>> {
+  const dependencies = input.dependencies.map((dependency) => ({ producerPlanId: dependency.producerPlanId, consumerPlanId: dependency.consumerPlanId, dependencyType: dependency.dependencyType, ...(dependency.artifactName === undefined ? {} : { artifactName: dependency.artifactName }), ...(dependency.artifactVersion === undefined ? {} : { artifactVersion: dependency.artifactVersion }), ...(dependency.sharedResource === undefined ? {} : { sharedResource: dependency.sharedResource }) }));
+  const git = new GitCommandRunner();
+  const evidence = await Promise.all(input.members.map(async (member) => {
+    const plan = context.store.plans.getById(member.planId);
+    const repository = await context.repositoryService.get(plan.repositoryId);
+    const actualCommit = (await git.run(repository.localPath, ["rev-parse", `${repository.baseBranch}^{commit}`])).stdout.trim();
+    if (actualCommit !== member.baseCommit) throw new AgentFlowError("INITIATIVE_COMMIT_DRIFT", `Repository ${repository.id} no longer matches proposed base commit`, 409, { expected: member.baseCommit, actual: actualCommit });
+    return { repositoryId: repository.id, planId: plan.id, baseCommit: actualCommit, planSha256: plan.backlogSha256, producedArtifacts: plan.normalizedPlan.tasks.flatMap((task) => task.produces.map((artifact) => ({ name: artifact.name, version: artifact.version }))) };
+  }));
+  const validation = validateInitiativeGraph(evidence, dependencies);
+  if (!validation.valid) throw new AgentFlowError("INITIATIVE_INVALID", "The multi-repository initiative did not pass preflight", 422, validation.errors);
+  const initiative = context.store.initiatives.create({ id: createId("initiative"), title: input.title, objective: input.objective, members: evidence, dependencies, ...(supersedesInitiativeId === undefined ? {} : { supersedesInitiativeId }) });
+  return { ...initiative, waves: validation.waves };
 }
 
 async function assertMemberCommits(context: AgentFlowContext, members: Array<{ repositoryId: string; baseCommit: string }>): Promise<void> {

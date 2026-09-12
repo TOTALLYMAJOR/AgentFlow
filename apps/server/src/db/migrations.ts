@@ -681,6 +681,10 @@ CREATE TABLE cleanup_receipts (
 );
 CREATE INDEX cleanup_receipts_by_build ON cleanup_receipts(build_id,sequence);
 `;
+const INITIATIVE_REPLAN_SCHEMA = `
+ALTER TABLE initiatives ADD COLUMN supersedes_initiative_id TEXT REFERENCES initiatives(id);
+CREATE INDEX initiatives_by_superseded ON initiatives(supersedes_initiative_id,created_at);
+`;
 
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   {
@@ -751,6 +755,7 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 14, name: "multi_repository_initiative_authority", sql: MULTI_REPOSITORY_INITIATIVE_SCHEMA },
   { version: 15, name: "multi_repository_initiative_runtime", sql: INITIATIVE_RUNTIME_SCHEMA },
   { version: 16, name: "durable_git_cleanup_receipts", sql: CLEANUP_RECEIPT_SCHEMA },
+  { version: 17, name: "immutable_initiative_replanning", sql: INITIATIVE_REPLAN_SCHEMA },
 ]);
 
 interface MigrationRow {
