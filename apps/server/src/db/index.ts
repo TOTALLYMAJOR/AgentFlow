@@ -64,6 +64,7 @@ export { RemoteJobRepository } from "./remote-job-repository.js";
 export { RetryScheduleRepository } from "./retry-schedule-repository.js";
 export { VisualComparisonRepository } from "./visual-comparison-repository.js";
 export { KnowledgeRepository } from "./knowledge-repository.js";
+export { InitiativeRepository, type InitiativeEntity } from "./initiative-repository.js";
 export {
   AgentFlowStore,
   DatabaseRepositories,

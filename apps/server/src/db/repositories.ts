@@ -13,6 +13,7 @@ import { RemoteJobRepository } from "./remote-job-repository.js";
 import { RetryScheduleRepository } from "./retry-schedule-repository.js";
 import { VisualComparisonRepository } from "./visual-comparison-repository.js";
 import { KnowledgeRepository } from "./knowledge-repository.js";
+import { InitiativeRepository } from "./initiative-repository.js";
 import {
   ApprovalRepository,
   ArtifactRepository,
@@ -59,6 +60,7 @@ export class DatabaseRepositories {
   readonly retrySchedules: RetryScheduleRepository;
   readonly visualComparisons: VisualComparisonRepository;
   readonly knowledge: KnowledgeRepository;
+  readonly initiatives: InitiativeRepository;
 
   constructor(
     readonly database: Database.Database,
@@ -80,6 +82,7 @@ export class DatabaseRepositories {
     this.retrySchedules = new RetryScheduleRepository(database, clock);
     this.visualComparisons = new VisualComparisonRepository(database, clock);
     this.knowledge = new KnowledgeRepository(database, clock);
+    this.initiatives = new InitiativeRepository(database, clock);
   }
 
   transaction<T>(operation: (repositories: DatabaseRepositories) => T): T {

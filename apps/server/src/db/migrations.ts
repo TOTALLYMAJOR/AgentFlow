@@ -643,6 +643,17 @@ CREATE INDEX knowledge_edges_by_target
 ON knowledge_edges (snapshot_id, target_path, source_path);
 `;
 
+const MULTI_REPOSITORY_INITIATIVE_SCHEMA = `
+CREATE TABLE initiatives (id TEXT PRIMARY KEY,title TEXT NOT NULL,objective TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('proposed','approved','running','paused','partial','completed','failed','cancelled')),digest TEXT,approved_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE initiative_members (initiative_id TEXT NOT NULL,repository_id TEXT NOT NULL,plan_id TEXT NOT NULL,position INTEGER NOT NULL,base_commit TEXT NOT NULL,plan_sha256 TEXT NOT NULL,PRIMARY KEY(initiative_id,plan_id),UNIQUE(initiative_id,repository_id),FOREIGN KEY(initiative_id) REFERENCES initiatives(id),FOREIGN KEY(repository_id) REFERENCES repositories(id),FOREIGN KEY(plan_id) REFERENCES plans(id));
+CREATE TABLE initiative_dependencies (id INTEGER PRIMARY KEY AUTOINCREMENT,initiative_id TEXT NOT NULL,producer_plan_id TEXT NOT NULL,consumer_plan_id TEXT NOT NULL,dependency_type TEXT NOT NULL CHECK(dependency_type IN ('hard','artifact','runtime','shared_resource')),artifact_name TEXT,artifact_version TEXT,shared_resource TEXT,CHECK(producer_plan_id <> consumer_plan_id),FOREIGN KEY(initiative_id) REFERENCES initiatives(id),FOREIGN KEY(initiative_id,producer_plan_id) REFERENCES initiative_members(initiative_id,plan_id),FOREIGN KEY(initiative_id,consumer_plan_id) REFERENCES initiative_members(initiative_id,plan_id));
+CREATE TABLE initiative_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT,initiative_id TEXT NOT NULL,event_type TEXT NOT NULL,payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),occurred_at TEXT NOT NULL,FOREIGN KEY(initiative_id) REFERENCES initiatives(id));
+CREATE TRIGGER initiative_members_immutable_update BEFORE UPDATE ON initiative_members WHEN (SELECT status FROM initiatives WHERE id=OLD.initiative_id) <> 'proposed' BEGIN SELECT RAISE(ABORT,'approved initiative membership is immutable'); END;
+CREATE TRIGGER initiative_members_immutable_delete BEFORE DELETE ON initiative_members WHEN (SELECT status FROM initiatives WHERE id=OLD.initiative_id) <> 'proposed' BEGIN SELECT RAISE(ABORT,'approved initiative membership is immutable'); END;
+CREATE TRIGGER initiative_dependencies_immutable_update BEFORE UPDATE ON initiative_dependencies WHEN (SELECT status FROM initiatives WHERE id=OLD.initiative_id) <> 'proposed' BEGIN SELECT RAISE(ABORT,'approved initiative dependencies are immutable'); END;
+CREATE TRIGGER initiative_dependencies_immutable_delete BEFORE DELETE ON initiative_dependencies WHEN (SELECT status FROM initiatives WHERE id=OLD.initiative_id) <> 'proposed' BEGIN SELECT RAISE(ABORT,'approved initiative dependencies are immutable'); END;
+`;
+
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   {
     version: 1,
@@ -709,6 +720,7 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
     name: "codebase_knowledge_graph",
     sql: KNOWLEDGE_GRAPH_SCHEMA,
   },
+  { version: 14, name: "multi_repository_initiative_authority", sql: MULTI_REPOSITORY_INITIATIVE_SCHEMA },
 ]);
 
 interface MigrationRow {

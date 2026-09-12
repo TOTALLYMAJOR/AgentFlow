@@ -40,6 +40,7 @@ import { registerVisualComparisonRoutes } from "./routes/visual-comparisons.js";
 import { registerKnowledgeRoutes } from "./routes/knowledge.js";
 import { ensureOrganizationPolicy } from "../governance/organization-policy.js";
 import { registerGovernanceRoutes } from "./routes/governance.js";
+import { registerInitiativeRoutes } from "./routes/initiatives.js";
 
 export interface BuildAppOptions {
   environment?: AgentFlowEnvironment;
@@ -160,6 +161,7 @@ export async function buildApp(
   registerGovernanceRoutes(app, context);
   registerRepositoryRoutes(app, context);
   registerPlanRoutes(app, context);
+  registerInitiativeRoutes(app, context);
   registerBuildRoutes(app, context);
   registerErrorHandling(app);
 

@@ -26,6 +26,31 @@ afterEach(async () => {
 });
 
 describe("AgentFlow API smoke", () => {
+  it("creates and approves an immutable multi-repository initiative", async () => {
+    const runtimeHome = await temporaryRoot("runtime-initiative");
+    const repositories = await Promise.all([createFixtureRepository(), createFixtureRepository()]);
+    const { app } = await buildApp({ environment: resolveEnvironment({ AGENTFLOW_HOME: runtimeHome, AGENTFLOW_LOG_LEVEL: "silent" }), staticRoot: false, logger: false });
+    try {
+      const members: Array<{ planId: string; baseCommit: string }> = [];
+      for (const repositoryPath of repositories) {
+        const registered = await app.inject({ method: "POST", url: "/api/repositories", payload: { path: repositoryPath } });
+        const repository = registered.json<{ id: string }>();
+        const planned = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId: repository.id } });
+        const plan = planned.json<{ id: string }>();
+        const commit = (await execFileAsync("git", ["-C", repositoryPath, "rev-parse", "HEAD"])).stdout.trim();
+        members.push({ planId: plan.id, baseCommit: commit });
+      }
+      const created = await app.inject({ method: "POST", url: "/api/initiatives", payload: { title: "Contract rollout", objective: "Coordinate a provider and consumer release", members, dependencies: [{ producerPlanId: members[0]?.planId, consumerPlanId: members[1]?.planId, dependencyType: "hard" }] } });
+      expect(created.statusCode).toBe(201);
+      const initiative = created.json<{ id: string; status: string; waves: string[][] }>();
+      expect(initiative).toMatchObject({ status: "proposed", waves: [[members[0]?.planId], [members[1]?.planId]] });
+      const approved = await app.inject({ method: "POST", url: `/api/initiatives/${initiative.id}/approve` });
+      const approvedInitiative = approved.json<{ status: string; digest: string }>();
+      expect(approvedInitiative.status).toBe("approved");
+      expect(approvedInitiative.digest).toMatch(/^[0-9a-f]{64}$/);
+    } finally { await app.close(); }
+  });
+
   it("generates a review-only backlog through Codex for a clean repository", async () => {
     const runtimeHome = await temporaryRoot("runtime-backlog");
     const repositoryPath = await createFixtureRepository();
