@@ -26,6 +26,22 @@ afterEach(async () => {
 });
 
 describe("AgentFlow API smoke", () => {
+  it("fails closed for active, forced, and remote Git cleanup requests with durable evidence", async () => {
+    const { app, build } = await createReadyBuildApplication("cleanup-policy");
+    try {
+      const active = await app.inject({ method: "POST", url: `/api/builds/${build.id}/cleanup`, payload: { deleteMergedBranches: true } });
+      expect(active.statusCode).toBe(409);
+      expect(active.json()).toMatchObject({ error: { code: "BUILD_NOT_CLEANUP_ELIGIBLE" } });
+      const receipts = await app.inject({ method: "GET", url: `/api/builds/${build.id}/cleanup-receipts` });
+      expect(receipts.json<Array<{ action: string; reason: string }>>().some((receipt) => receipt.action === "preserved" && receipt.reason.includes("only completed builds"))).toBe(true);
+
+      const forced = await app.inject({ method: "POST", url: `/api/builds/${build.id}/cleanup`, payload: { force: true } });
+      expect(forced.json()).toMatchObject({ error: { code: "DESTRUCTIVE_CLEANUP_DISABLED" } });
+      const remote = await app.inject({ method: "POST", url: `/api/builds/${build.id}/cleanup`, payload: { deleteRemoteBranches: true } });
+      expect(remote.json()).toMatchObject({ error: { code: "REMOTE_BRANCH_DELETION_DISABLED" } });
+    } finally { await app.close(); }
+  });
+
   it("keeps an artifact consumer blocked until the exact upstream artifact is integrated", async () => {
     const runtimeHome = await temporaryRoot("runtime-initiative-artifact");
     const repositories = await Promise.all([createFixtureRepository(), createFixtureRepository()]);

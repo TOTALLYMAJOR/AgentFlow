@@ -55,7 +55,12 @@ const AttemptDocumentParameters = z.object({
 const CreateBuildBody = z.object({
   planId: z.string().min(1),
 });
-const CleanupBuildBody = z.object({ force: z.boolean().default(false), deleteMergedBranches: z.boolean().default(false) });
+const CleanupBuildBody = z.object({
+  force: z.boolean().default(false),
+  deleteMergedBranches: z.boolean().default(false),
+  deleteRemoteBranches: z.boolean().default(false),
+  retentionHours: z.number().min(0).max(24 * 365).default(24),
+});
 const BuildListQuery = z.object({
   repositoryId: z.string().min(1).optional(),
   scope: z.enum(["active", "terminal", "all"]).default("all"),
@@ -122,13 +127,26 @@ export function registerBuildRoutes(
     const { id } = BuildIdParameters.parse(request.params);
     const input = CleanupBuildBody.parse(request.body ?? {});
     const build = context.store.builds.getById(id);
-    if (activeBuildStatuses.includes(build.status) && !input.force) throw new AgentFlowError("ACTIVE_BUILD_CLEANUP_REFUSED", `Build ${id} is ${build.status}; cleanup requires an explicit force decision`, 409);
+    if (input.deleteRemoteBranches) throw new AgentFlowError("REMOTE_BRANCH_DELETION_DISABLED", "Remote branch deletion requires a separately approved publication policy and is disabled", 409);
+    if (input.force) throw new AgentFlowError("DESTRUCTIVE_CLEANUP_DISABLED", "Forced worktree removal can destroy uncommitted source and is disabled", 409);
+    if (build.status !== "completed") {
+      context.store.cleanupReceipts.append({ buildId: id, targetType: "worktree", target: context.environment.worktreesPath, action: "preserved", reason: `build is ${build.status}; only completed builds are cleanup eligible` });
+      throw new AgentFlowError("BUILD_NOT_CLEANUP_ELIGIBLE", `Build ${id} is ${build.status}; failed, cancelled, interrupted, and active work are preserved`, 409);
+    }
     const repository = await context.repositoryService.get(build.repositoryId);
     const manager = await GitWorktreeManager.create({ repositoryRoot: repository.localPath, worktreesRoot: context.environment.worktreesPath, repositoryId: repository.id, buildId: id });
     const taskIds = context.store.tasks.listForBuild(id).map((task) => task.id);
-    const removals = await manager.cleanBuildWorktrees(taskIds, input.force);
+    const removals = await manager.cleanBuildWorktrees(taskIds, false);
     for (const removal of removals) context.store.cleanupReceipts.append({ buildId: id, targetType: "worktree", target: removal.path, action: removal.removed ? "removed" : "missing", reason: removal.removed ? "managed worktree removed" : "managed worktree was already absent" });
-    const retirement = input.deleteMergedBranches ? await manager.retireMergedBranches(taskIds, repository.baseBranch) : null;
+    const completedAt = build.completedAt === null ? Number.NaN : Date.parse(build.completedAt);
+    const retentionElapsed = Number.isFinite(completedAt) && Date.now() >= completedAt + input.retentionHours * 60 * 60 * 1000;
+    let retirement = null;
+    if (input.deleteMergedBranches && retentionElapsed) retirement = await manager.retireMergedBranches(taskIds, repository.baseBranch);
+    else if (input.deleteMergedBranches) {
+      const reason = `retention-window-active:${input.retentionHours}h`;
+      for (const taskId of taskIds) context.store.cleanupReceipts.append({ buildId: id, targetType: "branch", target: manager.taskBranch(taskId), action: "preserved", reason });
+      context.store.cleanupReceipts.append({ buildId: id, targetType: "branch", target: manager.integrationBranch(), action: "preserved", reason });
+    }
     for (const decision of retirement === null ? [] : [...retirement.tasks, retirement.integration]) context.store.cleanupReceipts.append({ buildId: id, targetType: "branch", target: decision.branchName, action: decision.deleted ? "deleted" : decision.reason === "missing" ? "missing" : "preserved", reason: decision.reason });
     return { buildId: id, removals, retirement, receipts: context.store.cleanupReceipts.list(id) };
   });
