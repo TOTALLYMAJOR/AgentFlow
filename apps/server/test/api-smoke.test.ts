@@ -26,6 +26,39 @@ afterEach(async () => {
 });
 
 describe("AgentFlow API smoke", () => {
+  it("keeps an artifact consumer blocked until the exact upstream artifact is integrated", async () => {
+    const runtimeHome = await temporaryRoot("runtime-initiative-artifact");
+    const repositories = await Promise.all([createFixtureRepository(), createFixtureRepository()]);
+    const { app, context } = await buildApp({ environment: resolveEnvironment({ AGENTFLOW_HOME: runtimeHome, AGENTFLOW_LOG_LEVEL: "silent" }), staticRoot: false, logger: false });
+    const start = vi.spyOn(context.coordinator, "start").mockImplementation(async (buildId) => context.store.builds.transition(buildId, "running", { eventType: "test.build_started" }));
+    try {
+      const members: Array<{ planId: string; baseCommit: string }> = [];
+      for (const repositoryPath of repositories) {
+        const registered = await app.inject({ method: "POST", url: "/api/repositories", payload: { path: repositoryPath } });
+        const planned = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId: registered.json<{ id: string }>().id } });
+        members.push({ planId: planned.json<{ id: string }>().id, baseCommit: (await execFileAsync("git", ["-C", repositoryPath, "rev-parse", "HEAD"])).stdout.trim() });
+      }
+      const created = await app.inject({ method: "POST", url: "/api/initiatives", payload: { title: "Artifact rollout", objective: "Do not start the consumer early", members, dependencies: [{ producerPlanId: members[0]?.planId, consumerPlanId: members[1]?.planId, dependencyType: "artifact", artifactName: "example-contract", artifactVersion: "1.0.0" }] } });
+      const initiativeId = created.json<{ id: string }>().id;
+      await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/approve` });
+      const started = await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/start` });
+      const producerBuild = started.json<{ builds: Array<{ id: string }> }>().builds[0];
+      expect(producerBuild).toBeDefined();
+      context.store.builds.transition(producerBuild?.id ?? "", "completed", { eventType: "test.build_completed" });
+
+      const blocked = await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/reconcile` });
+      expect(blocked.json()).toMatchObject({ builds: [{ id: producerBuild?.id }], blockers: [{ planId: members[1]?.planId, code: "ARTIFACT_NOT_INTEGRATED" }] });
+      expect(start).toHaveBeenCalledTimes(1);
+
+      const producerTask = context.store.tasks.listForBuild(producerBuild?.id ?? "")[0];
+      context.store.artifacts.publish({ id: "artifact_integrated_contract", buildId: producerBuild?.id ?? "", producerTaskId: producerTask?.id ?? "", name: "example-contract", artifactType: "json-schema", version: "1.0.0", status: "integrated", integratedAt: "2026-09-12T18:00:00.000Z" });
+      const released = await app.inject({ method: "POST", url: `/api/initiatives/${initiativeId}/reconcile` });
+      expect(released.json<{ builds: unknown[]; blockers: unknown[] }>().builds).toHaveLength(2);
+      expect(released.json<{ builds: unknown[]; blockers: unknown[] }>().blockers).toEqual([]);
+      expect(start).toHaveBeenCalledTimes(2);
+    } finally { await app.close(); }
+  });
+
   it("creates and approves an immutable multi-repository initiative", async () => {
     const runtimeHome = await temporaryRoot("runtime-initiative");
     const repositories = await Promise.all([createFixtureRepository(), createFixtureRepository()]);

@@ -103,14 +103,21 @@ export async function reconcileInitiative(context: AgentFlowContext, id: string)
   if (!["running", "partial"].includes(initiative.status)) throw new AgentFlowError("INITIATIVE_NOT_RUNNING", `Initiative ${id} cannot reconcile from ${initiative.status}`, 409);
   const memberByPlan = new Map(initiative.members.map((member) => [member.planId, member]));
   let startedCount = 0;
+  const blockers: Array<{ planId: string; code: string; message: string; recovery: string }> = [];
   for (const member of initiative.members) {
     if (member.buildId !== null) continue;
     const incoming = initiative.dependencies.filter((edge) => edge.consumerPlanId === member.planId);
-    const ready = incoming.every((edge) => {
+    const memberBlockers = incoming.flatMap((edge) => {
       const producer = memberByPlan.get(edge.producerPlanId);
-      return producer?.buildId !== null && producer?.buildId !== undefined && context.store.builds.getById(producer.buildId).status === "completed";
+      if (producer?.buildId === null || producer?.buildId === undefined) return [{ planId: member.planId, code: "UPSTREAM_NOT_STARTED", message: `Waiting for upstream plan ${edge.producerPlanId} to start`, recovery: "Start or recover the upstream repository build" }];
+      const producerBuild = context.store.builds.getById(producer.buildId);
+      if (producerBuild.status !== "completed") return [{ planId: member.planId, code: "UPSTREAM_NOT_COMPLETED", message: `Waiting for upstream build ${producerBuild.id}; current state is ${producerBuild.status}`, recovery: "Complete or recover the upstream repository build" }];
+      if (edge.dependencyType !== "artifact") return [];
+      const integrated = context.store.artifacts.listForBuild(producerBuild.id).some((artifact) => artifact.name === edge.artifactName && artifact.version === edge.artifactVersion && artifact.status === "integrated");
+      return integrated ? [] : [{ planId: member.planId, code: "ARTIFACT_NOT_INTEGRATED", message: `Required artifact ${edge.artifactName}@${edge.artifactVersion} from ${edge.producerPlanId} is not integrated`, recovery: "Validate and integrate the exact upstream artifact, then reconcile" }];
     });
-    if (!ready) continue;
+    blockers.push(...memberBlockers);
+    if (memberBlockers.length > 0) continue;
     const build = await createBuildForPlan(context, member.planId);
     context.store.initiatives.attachBuild(id, member.planId, build.id);
     await context.coordinator.start(build.id);
@@ -121,5 +128,5 @@ export async function reconcileInitiative(context: AgentFlowContext, id: string)
   const builds = initiative.members.flatMap((member) => member.buildId === null ? [] : [context.store.builds.getById(member.buildId)]);
   if (builds.length === initiative.members.length && builds.every((build) => build.status === "completed") && initiative.status === "running") initiative = context.store.initiatives.transition(id, "completed", "initiative.completed");
   else if (builds.some((build) => ["failed", "cancelled"].includes(build.status)) && initiative.status === "running") initiative = context.store.initiatives.transition(id, builds.some((build) => build.status === "completed") ? "partial" : "failed", "initiative.blocked", { builds: builds.map((build) => ({ id: build.id, status: build.status })) });
-  return { ...initiative, builds };
+  return { ...initiative, builds, blockers };
 }
