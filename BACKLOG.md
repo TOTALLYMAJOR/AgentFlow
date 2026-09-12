@@ -249,3 +249,18 @@ Exercise at least three fixture repositories through success, cross-repository a
 - The full success journey completes from approved initiative through cleanup receipts.
 - Every adverse scenario fails closed without source loss or false completion.
 - Evidence identifies local integration separately from publication and deployment.
+
+## Closeout Evidence
+
+| Item | Status | Authoritative evidence |
+| --- | --- | --- |
+| MRI-001 | Complete | Migrations 14-17, immutable initiative repository, digest and superseding-replan tests |
+| MRI-002 | Complete | Exact artifact validation, ambiguous-producer rejection, cycle checks, deterministic waves |
+| MRI-003 | Complete | Create, inspect, approve, start, pause, resume, cancel, reconcile, and replan APIs with commit-drift refusal |
+| MRI-004 | Complete | Dependency-wave release, integrated-artifact gate, fair global scheduling, and deterministic shared-resource serialization |
+| MRI-005 | Complete | Startup reconciliation, pause propagation, partial-failure retry recovery, immutable replanning, and no-duplicate restart acceptance |
+| MRI-006 | Complete | Completed-only cleanup, default retention window, dirty/unmerged preservation, local merged-branch retirement, remote deletion refusal, and durable receipts |
+| MRI-007 | Complete | Governed initiative creation and supervision workspace with blockers, recovery actions, handoffs, proof boundaries, and cleanup evidence |
+| MRI-008 | Complete | `tests/multi-repo.acceptance.test.ts`, broad unit suite, full integration gate, and production build |
+
+Validated on 2026-09-12: `npm test` (145 tests), `npm run typecheck`, `npm run test:integration` (4 tests across 3 suites), and `npm run build`. Scoped orchestration files pass ESLint. Full-repository lint additionally reaches a pre-existing error in the unrelated untracked `apps/web/test/TaskQueues.test.tsx` workstream.
