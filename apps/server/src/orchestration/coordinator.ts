@@ -102,6 +102,7 @@ export class BuildCoordinator {
   >();
   private lastCapacityBuildId: string | null = null;
   private closed = false;
+  private buildTerminalHandler: ((buildId: string) => Promise<void>) | null = null;
 
   constructor(options: BuildCoordinatorOptions) {
     this.environment = options.environment;
@@ -110,6 +111,17 @@ export class BuildCoordinator {
     this.handoffService = options.handoffService;
     this.agentProviders = options.agentProviders;
     this.organizationPolicy = options.organizationPolicy;
+  }
+
+  setBuildTerminalHandler(handler: (buildId: string) => Promise<void>): void {
+    this.buildTerminalHandler = handler;
+  }
+
+  private notifyBuildTerminal(buildId: string): void {
+    if (this.buildTerminalHandler === null) return;
+    void this.buildTerminalHandler(buildId).catch((error: unknown) => {
+      this.store.events.append({ buildId, type: "initiative.reconcile_failed", payload: { message: error instanceof Error ? error.message : String(error) } });
+    });
   }
 
   async start(buildId: string): Promise<BuildEntity> {
@@ -1912,6 +1924,7 @@ export class BuildCoordinator {
         eventType: "build.completed",
         actualElapsedSeconds: elapsedSeconds(build.startedAt),
       });
+      this.notifyBuildTerminal(build.id);
       return true;
     }
     if (
@@ -1943,6 +1956,7 @@ export class BuildCoordinator {
         eventType: "build.failed",
         actualElapsedSeconds: elapsedSeconds(build.startedAt),
       });
+      this.notifyBuildTerminal(build.id);
       return true;
     }
     return false;

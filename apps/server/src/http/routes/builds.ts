@@ -14,7 +14,7 @@ import {
   AgentFlowRepositoryConfigSchema,
   runGit,
 } from "../../repositories/index.js";
-import { GitCommandRunner, isPathInside } from "../../git/index.js";
+import { GitCommandRunner, GitWorktreeManager, isPathInside } from "../../git/index.js";
 import { createId } from "../../util/ids.js";
 import { AgentFlowError } from "../errors.js";
 import type { AgentFlowContext } from "../context.js";
@@ -55,6 +55,7 @@ const AttemptDocumentParameters = z.object({
 const CreateBuildBody = z.object({
   planId: z.string().min(1),
 });
+const CleanupBuildBody = z.object({ force: z.boolean().default(false), deleteMergedBranches: z.boolean().default(false) });
 const BuildListQuery = z.object({
   repositoryId: z.string().min(1).optional(),
   scope: z.enum(["active", "terminal", "all"]).default("all"),
@@ -80,65 +81,7 @@ export function registerBuildRoutes(
 ): void {
   app.post("/api/builds", async (request, reply) => {
     const { planId } = CreateBuildBody.parse(request.body);
-    const plan = context.store.plans.getById(planId);
-    const activeBuild = context.store.builds.findActive(plan.repositoryId);
-    if (activeBuild !== undefined) {
-      throw new AgentFlowError(
-        "ACTIVE_BUILD_EXISTS",
-        `Repository ${plan.repositoryId} already has active build ${activeBuild.id}`,
-        409,
-      );
-    }
-    const repositoryConfig = AgentFlowRepositoryConfigSchema.parse(
-      plan.repositoryConfig,
-    );
-    const repository = await context.repositoryService.get(plan.repositoryId);
-    const baseCommit = (
-      await runGit(repository.localPath, [
-        "rev-parse",
-        `${repository.baseBranch}^{commit}`,
-      ])
-    ).stdout.trim();
-    const buildId = createId("build");
-    const taskIds = new Map(
-      plan.normalizedPlan.tasks.map((task) => [
-        task.id,
-        createId(`task_${safeId(task.id)}`),
-      ]),
-    );
-    const tasks = plan.normalizedPlan.tasks.map((task) =>
-      createTaskInput(task, taskIds),
-    );
-    const build = context.store.builds.create({
-      id: buildId,
-      repositoryId: repository.id,
-      planId,
-      backlogPath: plan.backlogPath,
-      baseCommit,
-      integrationBranch: `agent-integration/${buildId}`,
-      status: "ready",
-      workerLimit: repositoryConfig.workers.maximum,
-      tasks,
-    });
-    for (let slot = 1; slot <= build.workerLimit; slot += 1) {
-      context.store.workers.create({
-        id: `${buildId}:worker:${slot}`,
-        buildId,
-        providerId: context.environment.defaultAgentProvider,
-        status: "idle",
-      });
-    }
-    for (const task of context.store.tasks.listForBuild(build.id)) {
-      if (task.requiresApproval) {
-        context.store.approvals.create({
-          id: createId("approval"),
-          buildId: build.id,
-          taskId: task.id,
-          approvalType: "manual",
-          reason: `Task ${task.backlogTaskId} requires approval before dispatch`,
-        });
-      }
-    }
+    const build = await createBuildForPlan(context, planId);
     await reply.status(201).send(await serializeBuild(context, build));
   });
 
@@ -167,13 +110,33 @@ export function registerBuildRoutes(
     const { id } = BuildIdParameters.parse(request.params);
     return serializeBuild(context, context.store.builds.getById(id));
   });
-
   app.post("/api/builds/:id/start", async (request) => {
     const { id } = BuildIdParameters.parse(request.params);
     return serializeBuild(
       context,
       await context.coordinator.start(id),
     );
+  });
+
+  app.post("/api/builds/:id/cleanup", async (request) => {
+    const { id } = BuildIdParameters.parse(request.params);
+    const input = CleanupBuildBody.parse(request.body ?? {});
+    const build = context.store.builds.getById(id);
+    if (activeBuildStatuses.includes(build.status) && !input.force) throw new AgentFlowError("ACTIVE_BUILD_CLEANUP_REFUSED", `Build ${id} is ${build.status}; cleanup requires an explicit force decision`, 409);
+    const repository = await context.repositoryService.get(build.repositoryId);
+    const manager = await GitWorktreeManager.create({ repositoryRoot: repository.localPath, worktreesRoot: context.environment.worktreesPath, repositoryId: repository.id, buildId: id });
+    const taskIds = context.store.tasks.listForBuild(id).map((task) => task.id);
+    const removals = await manager.cleanBuildWorktrees(taskIds, input.force);
+    for (const removal of removals) context.store.cleanupReceipts.append({ buildId: id, targetType: "worktree", target: removal.path, action: removal.removed ? "removed" : "missing", reason: removal.removed ? "managed worktree removed" : "managed worktree was already absent" });
+    const retirement = input.deleteMergedBranches ? await manager.retireMergedBranches(taskIds, repository.baseBranch) : null;
+    for (const decision of retirement === null ? [] : [...retirement.tasks, retirement.integration]) context.store.cleanupReceipts.append({ buildId: id, targetType: "branch", target: decision.branchName, action: decision.deleted ? "deleted" : decision.reason === "missing" ? "missing" : "preserved", reason: decision.reason });
+    return { buildId: id, removals, retirement, receipts: context.store.cleanupReceipts.list(id) };
+  });
+
+  app.get("/api/builds/:id/cleanup-receipts", async (request) => {
+    const { id } = BuildIdParameters.parse(request.params);
+    context.store.builds.getById(id);
+    return context.store.cleanupReceipts.list(id);
   });
 
   app.post("/api/builds/:id/pause", async (request) => {
@@ -366,6 +329,26 @@ export function registerBuildRoutes(
     );
     openEventStream(reply, context, id, lastEventId);
   });
+}
+
+export async function createBuildForPlan(
+  context: AgentFlowContext,
+  planId: string,
+): Promise<BuildEntity> {
+  const plan = context.store.plans.getById(planId);
+  const activeBuild = context.store.builds.findActive(plan.repositoryId);
+  if (activeBuild !== undefined) {
+    throw new AgentFlowError("ACTIVE_BUILD_EXISTS", `Repository ${plan.repositoryId} already has active build ${activeBuild.id}`, 409);
+  }
+  const repositoryConfig = AgentFlowRepositoryConfigSchema.parse(plan.repositoryConfig);
+  const repository = await context.repositoryService.get(plan.repositoryId);
+  const baseCommit = (await runGit(repository.localPath, ["rev-parse", `${repository.baseBranch}^{commit}`])).stdout.trim();
+  const buildId = createId("build");
+  const taskIds = new Map(plan.normalizedPlan.tasks.map((task) => [task.id, createId(`task_${safeId(task.id)}`)]));
+  const build = context.store.builds.create({ id: buildId, repositoryId: repository.id, planId, backlogPath: plan.backlogPath, baseCommit, integrationBranch: `agent-integration/${buildId}`, status: "ready", workerLimit: repositoryConfig.workers.maximum, tasks: plan.normalizedPlan.tasks.map((task) => createTaskInput(task, taskIds)) });
+  for (let slot = 1; slot <= build.workerLimit; slot += 1) context.store.workers.create({ id: `${buildId}:worker:${slot}`, buildId, providerId: context.environment.defaultAgentProvider, status: "idle" });
+  for (const task of context.store.tasks.listForBuild(build.id)) if (task.requiresApproval) context.store.approvals.create({ id: createId("approval"), buildId: build.id, taskId: task.id, approvalType: "manual", reason: `Task ${task.backlogTaskId} requires approval before dispatch` });
+  return build;
 }
 
 function createTaskInput(

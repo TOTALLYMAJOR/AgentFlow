@@ -654,6 +654,34 @@ CREATE TRIGGER initiative_dependencies_immutable_update BEFORE UPDATE ON initiat
 CREATE TRIGGER initiative_dependencies_immutable_delete BEFORE DELETE ON initiative_dependencies WHEN (SELECT status FROM initiatives WHERE id=OLD.initiative_id) <> 'proposed' BEGIN SELECT RAISE(ABORT,'approved initiative dependencies are immutable'); END;
 `;
 
+const INITIATIVE_RUNTIME_SCHEMA = `
+CREATE TABLE initiative_builds (
+  initiative_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  build_id TEXT NOT NULL UNIQUE,
+  attached_at TEXT NOT NULL,
+  PRIMARY KEY (initiative_id, plan_id),
+  FOREIGN KEY (initiative_id, plan_id)
+    REFERENCES initiative_members(initiative_id, plan_id),
+  FOREIGN KEY (build_id) REFERENCES builds(id)
+);
+CREATE INDEX initiative_builds_by_initiative
+ON initiative_builds (initiative_id, attached_at, plan_id);
+`;
+const CLEANUP_RECEIPT_SCHEMA = `
+CREATE TABLE cleanup_receipts (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  build_id TEXT NOT NULL,
+  target_type TEXT NOT NULL CHECK(target_type IN ('worktree','branch')),
+  target TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('removed','deleted','preserved','missing')),
+  reason TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(build_id) REFERENCES builds(id)
+);
+CREATE INDEX cleanup_receipts_by_build ON cleanup_receipts(build_id,sequence);
+`;
+
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   {
     version: 1,
@@ -721,6 +749,8 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
     sql: KNOWLEDGE_GRAPH_SCHEMA,
   },
   { version: 14, name: "multi_repository_initiative_authority", sql: MULTI_REPOSITORY_INITIATIVE_SCHEMA },
+  { version: 15, name: "multi_repository_initiative_runtime", sql: INITIATIVE_RUNTIME_SCHEMA },
+  { version: 16, name: "durable_git_cleanup_receipts", sql: CLEANUP_RECEIPT_SCHEMA },
 ]);
 
 interface MigrationRow {

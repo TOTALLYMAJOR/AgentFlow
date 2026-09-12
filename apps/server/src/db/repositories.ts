@@ -14,6 +14,7 @@ import { RetryScheduleRepository } from "./retry-schedule-repository.js";
 import { VisualComparisonRepository } from "./visual-comparison-repository.js";
 import { KnowledgeRepository } from "./knowledge-repository.js";
 import { InitiativeRepository } from "./initiative-repository.js";
+import { CleanupReceiptRepository } from "./cleanup-receipt-repository.js";
 import {
   ApprovalRepository,
   ArtifactRepository,
@@ -61,6 +62,7 @@ export class DatabaseRepositories {
   readonly visualComparisons: VisualComparisonRepository;
   readonly knowledge: KnowledgeRepository;
   readonly initiatives: InitiativeRepository;
+  readonly cleanupReceipts: CleanupReceiptRepository;
 
   constructor(
     readonly database: Database.Database,
@@ -83,6 +85,7 @@ export class DatabaseRepositories {
     this.visualComparisons = new VisualComparisonRepository(database, clock);
     this.knowledge = new KnowledgeRepository(database, clock);
     this.initiatives = new InitiativeRepository(database, clock);
+    this.cleanupReceipts = new CleanupReceiptRepository(database, clock);
   }
 
   transaction<T>(operation: (repositories: DatabaseRepositories) => T): T {

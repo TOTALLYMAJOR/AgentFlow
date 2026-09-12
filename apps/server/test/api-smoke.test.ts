@@ -48,6 +48,12 @@ describe("AgentFlow API smoke", () => {
       const approvedInitiative = approved.json<{ status: string; digest: string }>();
       expect(approvedInitiative.status).toBe("approved");
       expect(approvedInitiative.digest).toMatch(/^[0-9a-f]{64}$/);
+      const started = await app.inject({ method: "POST", url: `/api/initiatives/${initiative.id}/start` });
+      expect(started.statusCode).toBe(200);
+      const running = started.json<{ status: string; builds: Array<{ id: string; status: string }> }>();
+      expect(running.status).toBe("running");
+      expect(running.builds).toHaveLength(1);
+      expect(running.builds[0]?.status).toBe("running");
     } finally { await app.close(); }
   });
 

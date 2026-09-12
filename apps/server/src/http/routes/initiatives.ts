@@ -5,6 +5,7 @@ import { validateInitiativeGraph } from "../../multi-repo/validation.js";
 import { createId } from "../../util/ids.js";
 import { AgentFlowError } from "../errors.js";
 import type { AgentFlowContext } from "../context.js";
+import { createBuildForPlan } from "./builds.js";
 
 const Parameters = z.object({ id: z.string().min(1) });
 const CreateBody = z.object({
@@ -15,6 +16,8 @@ const CreateBody = z.object({
 });
 
 export function registerInitiativeRoutes(app: FastifyInstance, context: AgentFlowContext): void {
+  app.get("/api/initiatives", async () => context.store.initiatives.list());
+
   app.post("/api/initiatives", async (request, reply) => {
     const input = CreateBody.parse(request.body);
     const dependencies = input.dependencies.map((dependency) => ({
@@ -47,4 +50,50 @@ export function registerInitiativeRoutes(app: FastifyInstance, context: AgentFlo
     for (const member of initiative.members) context.store.plans.lock(member.planId);
     return context.store.initiatives.approve(id);
   });
+
+  app.post("/api/initiatives/:id/start", async (request) => {
+    const id = Parameters.parse(request.params).id;
+    const initiative = context.store.initiatives.get(id);
+    if (initiative.status !== "approved") throw new AgentFlowError("INITIATIVE_NOT_APPROVED", `Initiative ${id} cannot start from ${initiative.status}`, 409);
+    await assertMemberCommits(context, initiative.members);
+    context.store.initiatives.transition(id, "running", "initiative.started");
+    return reconcileInitiative(context, id);
+  });
+
+  app.post("/api/initiatives/:id/reconcile", async (request) => reconcileInitiative(context, Parameters.parse(request.params).id));
+}
+
+async function assertMemberCommits(context: AgentFlowContext, members: Array<{ repositoryId: string; baseCommit: string }>): Promise<void> {
+  const git = new GitCommandRunner();
+  for (const member of members) {
+    const repository = await context.repositoryService.get(member.repositoryId);
+    const actual = (await git.run(repository.localPath, ["rev-parse", `${repository.baseBranch}^{commit}`])).stdout.trim();
+    if (actual !== member.baseCommit) throw new AgentFlowError("INITIATIVE_COMMIT_DRIFT", `Repository ${repository.id} changed after initiative review`, 409, { expected: member.baseCommit, actual });
+  }
+}
+
+export async function reconcileInitiative(context: AgentFlowContext, id: string): Promise<Record<string, unknown>> {
+  let initiative = context.store.initiatives.get(id);
+  if (!["running", "partial"].includes(initiative.status)) throw new AgentFlowError("INITIATIVE_NOT_RUNNING", `Initiative ${id} cannot reconcile from ${initiative.status}`, 409);
+  const memberByPlan = new Map(initiative.members.map((member) => [member.planId, member]));
+  let startedCount = 0;
+  for (const member of initiative.members) {
+    if (member.buildId !== null) continue;
+    const incoming = initiative.dependencies.filter((edge) => edge.consumerPlanId === member.planId);
+    const ready = incoming.every((edge) => {
+      const producer = memberByPlan.get(edge.producerPlanId);
+      return producer?.buildId !== null && producer?.buildId !== undefined && context.store.builds.getById(producer.buildId).status === "completed";
+    });
+    if (!ready) continue;
+    const build = await createBuildForPlan(context, member.planId);
+    context.store.initiatives.attachBuild(id, member.planId, build.id);
+    await context.coordinator.start(build.id);
+    startedCount += 1;
+  }
+  initiative = context.store.initiatives.get(id);
+  if (startedCount > 0 && initiative.status === "partial") initiative = context.store.initiatives.transition(id, "running", "initiative.resumed");
+  const builds = initiative.members.flatMap((member) => member.buildId === null ? [] : [context.store.builds.getById(member.buildId)]);
+  if (builds.length === initiative.members.length && builds.every((build) => build.status === "completed") && initiative.status === "running") initiative = context.store.initiatives.transition(id, "completed", "initiative.completed");
+  else if (builds.some((build) => ["failed", "cancelled"].includes(build.status)) && initiative.status === "running") initiative = context.store.initiatives.transition(id, builds.some((build) => build.status === "completed") ? "partial" : "failed", "initiative.blocked", { builds: builds.map((build) => ({ id: build.id, status: build.status })) });
+  return { ...initiative, builds };
 }

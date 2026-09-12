@@ -27,6 +27,8 @@ describe("multi-repository initiative persistence", () => {
     expect(approved.digest).toMatch(/^[0-9a-f]{64}$/);
     expect(() => fixture?.database.prepare(`DELETE FROM initiative_members WHERE initiative_id=? AND plan_id=?`).run(initiative.id, "plan_a")).toThrow(/immutable/i);
     expect(store.initiatives.approve(initiative.id).digest).toBe(approved.digest);
+    const running = store.initiatives.transition(initiative.id, "running", "initiative.started");
+    expect(running.status).toBe("running");
   });
 
   it("rejects duplicate repository membership without partial writes", () => {

@@ -268,38 +268,16 @@ worktrees
     "--delete-merged-branches",
     "delete local task branches merged into integration and integration branches merged into base",
   )
-  .description("Remove managed worktrees while preserving their branches")
+  .description("Remove managed worktrees and record durable branch decisions")
   .action(async (
     buildId: string,
     options: { force?: boolean; deleteMergedBranches?: boolean },
   ) => {
-    const { build, manager, repository } = await managerForBuild(buildId);
     const force = options.force === true;
-    if (
-      ["planning", "ready", "running", "paused", "interrupted"].includes(
-        build.status,
-      ) &&
-      !force
-    ) {
-      throw new Error(
-        `Build ${buildId} is ${build.status}; pass --force only after confirming no worker is running`,
-      );
-    }
-    const removals = await manager.cleanBuildWorktrees(
-      build.tasks.map((task) => task.id),
+    printJson(await callApi("POST", `/api/builds/${encodeURIComponent(buildId)}/cleanup`, {
       force,
-    );
-    const retirement = options.deleteMergedBranches === true
-      ? await manager.retireMergedBranches(
-          build.tasks.map((task) => task.id),
-          repository.baseBranch,
-        )
-      : null;
-    printJson({
-      buildId,
-      removals,
-      retirement,
-    });
+      deleteMergedBranches: options.deleteMergedBranches === true,
+    }));
   });
 
 program

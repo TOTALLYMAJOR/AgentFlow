@@ -40,7 +40,7 @@ import { registerVisualComparisonRoutes } from "./routes/visual-comparisons.js";
 import { registerKnowledgeRoutes } from "./routes/knowledge.js";
 import { ensureOrganizationPolicy } from "../governance/organization-policy.js";
 import { registerGovernanceRoutes } from "./routes/governance.js";
-import { registerInitiativeRoutes } from "./routes/initiatives.js";
+import { reconcileInitiative, registerInitiativeRoutes } from "./routes/initiatives.js";
 
 export interface BuildAppOptions {
   environment?: AgentFlowEnvironment;
@@ -112,7 +112,16 @@ export async function buildApp(
     agentProviders,
     organizationPolicy,
   };
+  coordinator.setBuildTerminalHandler(async (buildId) => {
+    const initiativeId = store.initiatives.findIdByBuild(buildId);
+    if (initiativeId !== undefined) await reconcileInitiative(context, initiativeId);
+  });
   await recoveryService.reconcileActiveBuilds();
+  for (const initiative of store.initiatives.listActive()) {
+    if (["running", "partial"].includes(initiative.status)) {
+      await reconcileInitiative(context, initiative.id);
+    }
+  }
   coordinator.recoverScheduledRetries();
   for (const recoveredBuild of store.builds.listActive()) {
     if (recoveredBuild.status === "running") {

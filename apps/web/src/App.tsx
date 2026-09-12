@@ -18,6 +18,9 @@ const RepositoriesScreen = lazy(async () => ({
 const ResultsScreen = lazy(async () => ({
   default: (await import("./screens/ResultsScreen.js")).ResultsScreen,
 }));
+const InitiativesScreen = lazy(async () => ({
+  default: (await import("./screens/InitiativesScreen.js")).InitiativesScreen,
+}));
 
 export function App(): React.JSX.Element {
   const [screen, setScreen] = useState<ScreenId>("overview");
@@ -43,6 +46,7 @@ export function App(): React.JSX.Element {
             />
           ) : null}
           {screen === "repositories" ? <RepositoriesScreen /> : null}
+          {screen === "initiatives" ? <InitiativesScreen /> : null}
           {screen === "planner" ? (
             <PlannerScreen
               onNavigateRepositories={() => {

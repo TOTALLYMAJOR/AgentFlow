@@ -1,9 +1,21 @@
 export type ScreenId =
   | "overview"
   | "repositories"
+  | "initiatives"
   | "planner"
   | "build"
   | "results";
+
+export interface InitiativeSummary {
+  id: string;
+  title: string;
+  objective: string;
+  status: "proposed" | "approved" | "running" | "paused" | "partial" | "completed" | "failed" | "cancelled";
+  digest: string | null;
+  members: Array<{ repositoryId: string; planId: string; baseCommit: string; buildId: string | null }>;
+  dependencies: Array<{ producerPlanId: string; consumerPlanId: string; dependencyType: string; artifactName?: string; artifactVersion?: string; sharedResource?: string }>;
+  updatedAt: string;
+}
 
 export interface HealthResponse {
   status: "ok";

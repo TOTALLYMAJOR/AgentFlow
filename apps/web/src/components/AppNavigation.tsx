@@ -4,6 +4,7 @@ import {
   FolderOpenIcon,
   HouseIcon,
   PlusCircleIcon,
+  TreeStructureIcon,
 } from "@phosphor-icons/react";
 import type { Icon } from "@phosphor-icons/react";
 import type { ScreenId } from "../api/types.js";
@@ -22,6 +23,7 @@ interface NavigationItem {
 const navigationItems: NavigationItem[] = [
   { id: "overview", label: "Home", icon: HouseIcon },
   { id: "repositories", label: "Projects", icon: FolderOpenIcon },
+  { id: "initiatives", label: "Initiatives", icon: TreeStructureIcon },
   { id: "planner", label: "New task", icon: PlusCircleIcon },
   { id: "build", label: "Activity", icon: ActivityIcon },
   { id: "results", label: "Completed", icon: ChartLineIcon },
