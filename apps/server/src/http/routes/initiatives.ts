@@ -135,7 +135,8 @@ function describeInitiative(context: AgentFlowContext, initiative: ReturnType<Ag
   const memberByPlan = new Map(initiative.members.map((member) => [member.planId, member]));
   const blockers = initiative.members.filter((member) => member.buildId === null).flatMap((member) => blockersForPlan(context, executionDependencies(initiative.dependencies), memberByPlan, member.planId));
   const builds = initiative.members.flatMap((member) => member.buildId === null ? [] : [context.store.builds.getById(member.buildId)]);
-  return { ...initiative, builds, blockers };
+  const cleanup = builds.map((build) => ({ buildId: build.id, status: build.status, completedAt: build.completedAt, eligibleAt: build.completedAt === null ? null : new Date(Date.parse(build.completedAt) + 24 * 60 * 60 * 1000).toISOString(), receipts: context.store.cleanupReceipts.list(build.id) }));
+  return { ...initiative, builds, blockers, cleanup };
 }
 
 function blockersForPlan(context: AgentFlowContext, dependencies: ReturnType<typeof executionDependencies>, memberByPlan: Map<string, ReturnType<AgentFlowContext["store"]["initiatives"]["get"]>["members"][number]>, planId: string): Array<{ planId: string; code: string; message: string; recovery: string }> {

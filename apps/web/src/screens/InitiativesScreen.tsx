@@ -23,6 +23,12 @@ export function InitiativesScreen(): React.JSX.Element {
     catch (error) { setActionError(error instanceof Error ? error.message : "Initiative action failed"); }
     finally { setBusy(null); }
   }
+  async function cleanup(initiativeId: string, buildId: string): Promise<void> {
+    setBusy(`${initiativeId}:cleanup:${buildId}`); setActionError(null);
+    try { await postJson(`/api/builds/${buildId}/cleanup`, { deleteMergedBranches: true }); await initiatives.mutate(); }
+    catch (error) { setActionError(error instanceof Error ? error.message : "Build cleanup failed"); }
+    finally { setBusy(null); }
+  }
   async function create(event: React.SyntheticEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     const selected = (candidates.data ?? []).filter((candidate) => selectedPlans.includes(candidate.planId));
@@ -54,6 +60,7 @@ export function InitiativesScreen(): React.JSX.Element {
           <header><div><h2>{initiative.title}</h2><p>{initiative.objective}</p></div><StatusBadge status={initiative.status} /></header>
           <p><strong>{initiative.members.length}</strong> repositories · <strong>{initiative.dependencies.length}</strong> cross-repository handoffs</p>
           <ul>{initiative.members.map((member) => <li key={member.planId}><code>{member.repositoryId}</code> — {member.buildId === null ? "waiting for an eligible wave" : `build ${member.buildId}`}</li>)}</ul>
+          {initiative.dependencies.length === 0 ? <p>No cross-repository ordering constraints; eligible repositories may run concurrently.</p> : <details><summary>Cross-repository handoffs</summary><ul>{initiative.dependencies.map((dependency) => <li key={`${dependency.producerPlanId}:${dependency.consumerPlanId}:${dependency.dependencyType}`}><code>{dependency.producerPlanId}</code> → <code>{dependency.consumerPlanId}</code> · {dependency.dependencyType}{dependency.artifactName === undefined ? "" : ` · ${dependency.artifactName}@${dependency.artifactVersion ?? "unknown"}`}{dependency.sharedResource === undefined ? "" : ` · shared ${dependency.sharedResource}`}</li>)}</ul></details>}
           {initiative.blockers.length === 0 ? null : <section aria-label="Blocked repositories"><h3>Blocked work</h3><ul>{initiative.blockers.map((blocker) => <li key={`${blocker.planId}:${blocker.code}`}><strong>{blocker.message}</strong><br />Recovery: {blocker.recovery}</li>)}</ul></section>}
           <div aria-label="Initiative controls">
             {initiative.status === "proposed" ? <Button disabled={busy !== null} onClick={() => { void act(initiative.id, "approve"); }}>Approve reviewed initiative</Button> : null}
@@ -63,6 +70,7 @@ export function InitiativesScreen(): React.JSX.Element {
             {initiative.status === "running" || initiative.status === "partial" ? <Button disabled={busy !== null} onClick={() => { void act(initiative.id, "reconcile"); }}>Reconcile now</Button> : null}
             {["proposed", "approved", "running", "paused", "partial"].includes(initiative.status) ? <Button variant="danger" disabled={busy !== null} onClick={() => { void act(initiative.id, "cancel"); }}>Cancel initiative</Button> : null}
           </div>
+          {initiative.cleanup.length === 0 ? null : <details><summary>Terminal Git cleanup</summary>{initiative.cleanup.map((entry) => <section key={entry.buildId}><h3>Build <code>{entry.buildId}</code></h3><p>{entry.status === "completed" ? `Eligible after ${entry.eligibleAt ?? "recorded completion"}` : `Preserved while build is ${entry.status}`}</p>{entry.status === "completed" ? <Button disabled={busy !== null} onClick={() => { void cleanup(initiative.id, entry.buildId); }}>Clean eligible local branches</Button> : null}{entry.receipts.length === 0 ? <p>No cleanup decision recorded.</p> : <ul>{entry.receipts.map((receipt) => <li key={receipt.sequence}>{receipt.action}: <code>{receipt.target}</code> — {receipt.reason}</li>)}</ul>}</section>)}</details>}
           <details><summary>Governed identity</summary><code>{initiative.id}</code><br />Digest: <code>{initiative.digest ?? "not approved"}</code><p>Integrated work is not represented as published, deployed, or externally operational.</p></details>
         </article>)}</div>}
   </>;

@@ -16,6 +16,7 @@ export interface InitiativeSummary {
   dependencies: Array<{ producerPlanId: string; consumerPlanId: string; dependencyType: string; artifactName?: string; artifactVersion?: string; sharedResource?: string }>;
   blockers: Array<{ planId: string; code: string; message: string; recovery: string }>;
   builds: Array<{ id: string; status: string }>;
+  cleanup: Array<{ buildId: string; status: string; completedAt: string | null; eligibleAt: string | null; receipts: Array<{ sequence: number; targetType: "worktree" | "branch"; target: string; action: "removed" | "deleted" | "preserved" | "missing"; reason: string; createdAt: string }> }>;
   supersedesInitiativeId: string | null;
   updatedAt: string;
 }

@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("swr", () => ({ default: (key: string) => ({ data: key === "/api/initiative-candidates" ? [] : [{ id: "initiative_1", title: "Coordinated release", objective: "Ship provider and consumer", status: "partial", digest: "abc123", supersedesInitiativeId: null, updatedAt: "now", dependencies: [{ producerPlanId: "plan_a", consumerPlanId: "plan_b", dependencyType: "artifact", artifactName: "api", artifactVersion: "1.0.0" }], members: [{ repositoryId: "repo_a", planId: "plan_a", baseCommit: "aaa", buildId: "build_a" }, { repositoryId: "repo_b", planId: "plan_b", baseCommit: "bbb", buildId: null }], builds: [{ id: "build_a", status: "completed" }], blockers: [{ planId: "plan_b", code: "ARTIFACT_NOT_INTEGRATED", message: "Required artifact api@1.0.0 is not integrated", recovery: "Integrate the exact upstream artifact" }] }], isLoading: false, error: undefined, mutate: vi.fn() }) }));
+vi.mock("swr", () => ({ default: (key: string) => ({ data: key === "/api/initiative-candidates" ? [] : [{ id: "initiative_1", title: "Coordinated release", objective: "Ship provider and consumer", status: "partial", digest: "abc123", supersedesInitiativeId: null, updatedAt: "now", dependencies: [{ producerPlanId: "plan_a", consumerPlanId: "plan_b", dependencyType: "artifact", artifactName: "api", artifactVersion: "1.0.0" }], members: [{ repositoryId: "repo_a", planId: "plan_a", baseCommit: "aaa", buildId: "build_a" }, { repositoryId: "repo_b", planId: "plan_b", baseCommit: "bbb", buildId: null }], builds: [{ id: "build_a", status: "completed" }], blockers: [{ planId: "plan_b", code: "ARTIFACT_NOT_INTEGRATED", message: "Required artifact api@1.0.0 is not integrated", recovery: "Integrate the exact upstream artifact" }], cleanup: [{ buildId: "build_a", status: "completed", completedAt: "2026-09-12T18:00:00.000Z", eligibleAt: "2026-09-13T18:00:00.000Z", receipts: [{ sequence: 1, targetType: "branch", target: "agent/task", action: "preserved", reason: "retention-window-active:24h", createdAt: "now" }] }] }], isLoading: false, error: undefined, mutate: vi.fn() }) }));
 vi.mock("@primer/react", () => {
   const FormControl = ({ children }: { children: React.ReactNode }) => <div>{children}</div>;
   FormControl.Label = ({ children }: { children: React.ReactNode }) => <label>{children}</label>;
@@ -32,6 +32,9 @@ describe("initiative supervision", () => {
     expect(container.textContent).toContain("Recovery: Integrate the exact upstream artifact");
     expect(container.textContent).toContain("Reconcile now");
     expect(container.textContent).toContain("Cancel initiative");
+    expect(container.textContent).toContain("Cross-repository handoffs");
+    expect(container.textContent).toContain("Terminal Git cleanup");
+    expect(container.textContent).toContain("retention-window-active:24h");
     expect(container.textContent).toContain("Integrated work is not represented as published, deployed, or externally operational.");
   });
 });
