@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { GitCommandRunner } from "../../git/index.js";
-import { validateInitiativeGraph } from "../../multi-repo/validation.js";
+import { executionDependencies, validateInitiativeGraph } from "../../multi-repo/validation.js";
 import { createId } from "../../util/ids.js";
 import { AgentFlowError } from "../errors.js";
 import type { AgentFlowContext } from "../context.js";
@@ -102,10 +102,11 @@ export async function reconcileInitiative(context: AgentFlowContext, id: string)
   let initiative = context.store.initiatives.get(id);
   if (!["running", "partial"].includes(initiative.status)) throw new AgentFlowError("INITIATIVE_NOT_RUNNING", `Initiative ${id} cannot reconcile from ${initiative.status}`, 409);
   const memberByPlan = new Map(initiative.members.map((member) => [member.planId, member]));
+  const executionEdges = executionDependencies(initiative.dependencies);
   let startedCount = 0;
   for (const member of initiative.members) {
     if (member.buildId !== null) continue;
-    const memberBlockers = blockersForPlan(context, initiative, memberByPlan, member.planId);
+    const memberBlockers = blockersForPlan(context, executionEdges, memberByPlan, member.planId);
     if (memberBlockers.length > 0) continue;
     const build = await createBuildForPlan(context, member.planId);
     context.store.initiatives.attachBuild(id, member.planId, build.id);
@@ -122,13 +123,13 @@ export async function reconcileInitiative(context: AgentFlowContext, id: string)
 
 function describeInitiative(context: AgentFlowContext, initiative: ReturnType<AgentFlowContext["store"]["initiatives"]["get"]>): Record<string, unknown> {
   const memberByPlan = new Map(initiative.members.map((member) => [member.planId, member]));
-  const blockers = initiative.members.filter((member) => member.buildId === null).flatMap((member) => blockersForPlan(context, initiative, memberByPlan, member.planId));
+  const blockers = initiative.members.filter((member) => member.buildId === null).flatMap((member) => blockersForPlan(context, executionDependencies(initiative.dependencies), memberByPlan, member.planId));
   const builds = initiative.members.flatMap((member) => member.buildId === null ? [] : [context.store.builds.getById(member.buildId)]);
   return { ...initiative, builds, blockers };
 }
 
-function blockersForPlan(context: AgentFlowContext, initiative: ReturnType<AgentFlowContext["store"]["initiatives"]["get"]>, memberByPlan: Map<string, (typeof initiative.members)[number]>, planId: string): Array<{ planId: string; code: string; message: string; recovery: string }> {
-  return initiative.dependencies.filter((edge) => edge.consumerPlanId === planId).flatMap((edge) => {
+function blockersForPlan(context: AgentFlowContext, dependencies: ReturnType<typeof executionDependencies>, memberByPlan: Map<string, ReturnType<AgentFlowContext["store"]["initiatives"]["get"]>["members"][number]>, planId: string): Array<{ planId: string; code: string; message: string; recovery: string }> {
+  return dependencies.filter((edge) => edge.consumerPlanId === planId).flatMap((edge) => {
     const producer = memberByPlan.get(edge.producerPlanId);
     if (producer?.buildId === null || producer?.buildId === undefined) return [{ planId, code: "UPSTREAM_NOT_STARTED", message: `Waiting for upstream plan ${edge.producerPlanId} to start`, recovery: "Start or recover the upstream repository build" }];
     const producerBuild = context.store.builds.getById(producer.buildId);

@@ -3,6 +3,22 @@ import type { InitiativeDependencyInput, InitiativeMemberInput } from "../domain
 export interface InitiativeValidationError { code: string; message: string; planId?: string }
 export interface InitiativePlanEvidence extends InitiativeMemberInput { producedArtifacts: Array<{ name: string; version: string }> }
 
+export function executionDependencies(dependencies: readonly InitiativeDependencyInput[]): InitiativeDependencyInput[] {
+  const ordinary = dependencies.filter((edge) => edge.dependencyType !== "shared_resource");
+  const participantsByResource = new Map<string, Set<string>>();
+  for (const edge of dependencies) {
+    if (edge.dependencyType !== "shared_resource" || !edge.sharedResource) continue;
+    const participants = participantsByResource.get(edge.sharedResource) ?? new Set<string>();
+    participants.add(edge.producerPlanId); participants.add(edge.consumerPlanId);
+    participantsByResource.set(edge.sharedResource, participants);
+  }
+  const serialized = [...participantsByResource].sort(([left], [right]) => left.localeCompare(right)).flatMap(([sharedResource, participants]) => {
+    const ordered = [...participants].sort();
+    return ordered.slice(1).map((consumerPlanId, index) => ({ producerPlanId: ordered[index] ?? "", consumerPlanId, dependencyType: "shared_resource" as const, sharedResource }));
+  });
+  return [...ordinary, ...serialized];
+}
+
 export function validateInitiativeGraph(plans: readonly InitiativePlanEvidence[], dependencies: readonly InitiativeDependencyInput[]): { valid: boolean; errors: InitiativeValidationError[]; waves: string[][] } {
   const errors: InitiativeValidationError[] = [];
   const byPlan = new Map(plans.map((plan) => [plan.planId, plan]));
@@ -19,9 +35,10 @@ export function validateInitiativeGraph(plans: readonly InitiativePlanEvidence[]
     }
     if (edge.dependencyType === "shared_resource" && !edge.sharedResource) errors.push({ code: "SHARED_RESOURCE_REQUIRED", message: "Shared-resource dependencies require a resource name", planId: edge.consumerPlanId });
   }
+  const executionEdges = executionDependencies(dependencies);
   const incoming = new Map(plans.map((plan) => [plan.planId, 0]));
   const outgoing = new Map(plans.map((plan) => [plan.planId, [] as string[]]));
-  for (const edge of dependencies) if (byPlan.has(edge.producerPlanId) && byPlan.has(edge.consumerPlanId)) { outgoing.get(edge.producerPlanId)?.push(edge.consumerPlanId); incoming.set(edge.consumerPlanId, (incoming.get(edge.consumerPlanId) ?? 0) + 1); }
+  for (const edge of executionEdges) if (byPlan.has(edge.producerPlanId) && byPlan.has(edge.consumerPlanId)) { outgoing.get(edge.producerPlanId)?.push(edge.consumerPlanId); incoming.set(edge.consumerPlanId, (incoming.get(edge.consumerPlanId) ?? 0) + 1); }
   const waves: string[][] = [];
   let ready = [...incoming].filter(([, count]) => count === 0).map(([id]) => id).sort();
   let visited = 0;
