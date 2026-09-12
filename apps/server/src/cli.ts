@@ -26,7 +26,8 @@ import {
   openDatabase,
 } from "./db/index.js";
 import { GitWorktreeManager } from "./git/index.js";
-import { buildApp } from "./http/app.js";
+import { requestApi } from "./client/api.js";
+import { assessRepository, writeBacklogWorksheet } from "./onboarding/repository.js";
 
 const execFileAsync = promisify(execFile);
 const installation = await locateAgentFlowInstallation();
@@ -145,6 +146,79 @@ repo
   });
 
 program
+  .command("setup")
+  .argument("[path]", "repository directory", ".")
+  .option("--prepare", "create missing configuration without overwriting existing files")
+  .option("--worksheet", "create a non-executable BACKLOG.draft.md worksheet")
+  .description("Assess repository readiness locally and show the next action")
+  .action(async (input: string, options: { prepare?: boolean; worksheet?: boolean }) => {
+    const result = await assessRepository(input, options.prepare === true);
+    if (options.worksheet === true) {
+      await writeBacklogWorksheet(result.localPath);
+      printJson(await assessRepository(result.localPath));
+    } else printJson(result);
+  });
+
+const backlog = program.command("backlog").description("Prepare reviewed work from a repository objective");
+backlog.command("generate")
+  .argument("<repository-id>")
+  .option("--objective <text>", "repository-grounded outcome to decompose")
+  .option("--auto", "explicitly let Codex select an evidence-backed program")
+  .option("--backlog <path>", "repository-relative output path")
+  .description("Generate a draft, then stop for review and commit")
+  .action(async (id: string, options: { objective?: string; auto?: boolean; backlog?: string }) => {
+    if ((options.objective !== undefined) === (options.auto === true)) {
+      throw new Error("Choose exactly one of --objective or --auto.");
+    }
+    printJson(await callApi("POST", `/api/repositories/${encodeURIComponent(id)}/backlog/generate`, {
+      mode: options.auto === true ? "auto" : "objective",
+      ...(options.objective === undefined ? {} : { objective: options.objective }),
+      ...(options.backlog === undefined ? {} : { backlogPath: options.backlog }),
+    }));
+  });
+
+program.command("start")
+  .argument("[path]", "repository directory", ".")
+  .option("--objective <text>", "generate a missing backlog for this outcome")
+  .option("--auto", "explicitly let Codex choose work when the backlog is missing")
+  .description("Assess, reuse registration, and prepare a backlog or reviewed plan; never starts workers")
+  .action(async (input: string, options: { objective?: string; auto?: boolean }) => {
+    if (options.objective !== undefined && options.auto === true) throw new Error("Choose --objective or --auto, not both.");
+    const readiness = await assessRepository(input);
+    const generate = !readiness.backlog.present && readiness.issues.every(issue => issue.code === "BACKLOG_MISSING")
+      && (options.objective !== undefined || options.auto === true);
+    if (!readiness.ready && !generate) { printJson(readiness); process.exitCode = 1; return; }
+    const repositories = await callApi<CliRepository[]>("GET", "/api/repositories");
+    const repository = repositories.find((item) => item.localPath === readiness.localPath)
+      ?? await callApi<CliRepository>("POST", "/api/repositories", { path: readiness.localPath, initializeIfMissing: false });
+    const active = await callApi<CliBuild[]>("GET", `/api/builds?scope=active&repositoryId=${encodeURIComponent(repository.id)}`);
+    const activeBuild = active[0];
+    if (activeBuild !== undefined) {
+      printJson({ repositoryId: repository.id, activeBuild, nextAction: `agentflow inspect ${activeBuild.id}; use launch for ready builds, resume for paused/interrupted builds, or retry for failed tasks.` });
+      return;
+    }
+    if (generate) {
+      printJson(await callApi("POST", `/api/repositories/${encodeURIComponent(repository.id)}/backlog/generate`, {
+        mode: options.auto === true ? "auto" : "objective",
+        ...(options.objective === undefined ? {} : { objective: options.objective }),
+      }));
+      return;
+    }
+    const plan = await callApi<{ id: string }>("POST", "/api/plans", { repositoryId: repository.id });
+    printJson({ ...plan, nextAction: `Review this plan, then agentflow run ${plan.id}` });
+  });
+
+program.command("launch").argument("<build-id>")
+  .description("Start an existing ready build without creating another build")
+  .action(async (id: string) => printJson(await callApi("POST", `/api/builds/${encodeURIComponent(id)}/start`)));
+
+for (const action of ["pause", "resume", "cancel"] as const) {
+  program.command(action).argument("<build-id>")
+    .description(`${capitalize(action)} an existing build on the persistent server`)
+    .action(async (id: string) => printJson(await callApi("POST", `/api/builds/${encodeURIComponent(id)}/${action}`)));
+}
+
+program
   .command("plan")
   .argument("<repository-id>")
   .option("--backlog <path>", "repository-relative backlog path")
@@ -173,12 +247,11 @@ program
     const created = await callApi<{ id: string }>("POST", "/api/builds", {
       planId,
     });
-    printJson(
-      await callApi(
-        "POST",
-        `/api/builds/${encodeURIComponent(created.id)}/start`,
-      ),
-    );
+    try {
+      printJson(await callApi("POST", `/api/builds/${encodeURIComponent(created.id)}/start`));
+    } catch (error) {
+      throw new Error(`Build ${created.id} was created. Inspect it with agentflow inspect ${created.id} before retrying. ${String(error)}`, { cause: error });
+    }
   });
 
 program
@@ -370,28 +443,8 @@ async function callApi<T = unknown>(
   url: string,
   payload?: Record<string, unknown>,
 ): Promise<T> {
-  const { app } = await buildApp({ staticRoot: false, logger: false });
-  try {
-    const response = await app.inject({
-      method,
-      url,
-      ...(payload === undefined ? {} : { payload }),
-    });
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      const body: {
-        error?: { code?: string; message?: string };
-      } = response.json();
-      throw new Error(
-        `${body.error?.code ?? response.statusCode}: ${body.error?.message ?? response.body}`,
-      );
-    }
-    if (response.statusCode === 204 || response.body.length === 0) {
-      return undefined as T;
-    }
-    return response.json<T>();
-  } finally {
-    await app.close();
-  }
+  const environment = resolveEnvironment();
+  return requestApi<T>(`http://${environment.host}:${environment.port}`, environment.home, method, url, payload);
 }
 
 async function commandAvailable(command: string): Promise<boolean> {
