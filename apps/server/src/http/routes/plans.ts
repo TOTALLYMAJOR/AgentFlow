@@ -22,6 +22,7 @@ import {
   validateRepositoryAgainstPolicy,
   validateTaskOwnershipAgainstPolicy,
 } from "../../governance/organization-policy.js";
+import { backlogHandoffErrors, canonicalJsonSha256, handoffBinding, loadGovernedTaskHandoff, parseHandoffBinding, verifyHandoffAuthoritySources, type GovernedTaskHandoff } from "../../integration/design-intelligence.js";
 
 const CreatePlanBody = z.object({
   repositoryId: z.string().min(1),
@@ -198,6 +199,23 @@ export function registerPlanRoutes(
       relativeBacklogPath,
     );
     const markdown = await readFile(backlogPath, "utf8");
+    const declaredBinding = parseHandoffBinding(markdown);
+    let governedHandoff: ReturnType<typeof handoffBinding> | undefined;
+    let governedTaskHandoff: GovernedTaskHandoff | undefined;
+    if (declaredBinding !== undefined) {
+      const handoffPath = await resolveRepositoryFile(repository.localPath, declaredBinding.path);
+      const handoff = await loadGovernedTaskHandoff(handoffPath);
+      const authorityErrors = await verifyHandoffAuthoritySources(repository.localPath, handoff);
+      if (authorityErrors.length > 0) throw new AgentFlowError("GOVERNED_AUTHORITY_DRIFT", "The governed handoff authority sources are stale or invalid", 409, authorityErrors);
+      governedTaskHandoff = handoff;
+      governedHandoff = handoffBinding(handoff, declaredBinding.path);
+      if (governedHandoff.id !== declaredBinding.id || canonicalJsonSha256(handoff) !== declaredBinding.sha256) {
+        throw new AgentFlowError("GOVERNED_HANDOFF_DRIFT", "The committed backlog is not bound to the current governed handoff", 409);
+      }
+      await new GitCommandRunner().run(repository.localPath, ["merge-base", "--is-ancestor", handoff.repository.baseCommit, "HEAD"]).catch(() => {
+        throw new AgentFlowError("GOVERNED_BASE_MISMATCH", "The governed handoff base commit is not an ancestor of HEAD", 409);
+      });
+    }
     const planning = planBacklogMarkdown(markdown, {
       defaultValidation: config.validation.task_default,
       workerMaximum: config.workers.maximum,
@@ -216,6 +234,10 @@ export function registerPlanRoutes(
         422,
         planning.errors,
       );
+    }
+    if (governedTaskHandoff !== undefined) {
+      const drift = backlogHandoffErrors(planning.plan.tasks, governedTaskHandoff);
+      if (drift.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_SCOPE_DRIFT", "The backlog scope differs from its governed handoff", 409, drift);
     }
     const ownershipPolicyErrors = validateTaskOwnershipAgainstPolicy(
       planning.plan.tasks,
@@ -253,6 +275,7 @@ export function registerPlanRoutes(
         appliedMultiplier: calibration.appliedMultiplier,
         confidence: calibration.confidence,
       },
+      ...(governedHandoff === undefined ? {} : { governedHandoff }),
       createdAt,
     };
     const stored = context.store.plans.create({

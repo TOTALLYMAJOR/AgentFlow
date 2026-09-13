@@ -37,6 +37,7 @@ The implemented post-MVP decisions are authoritative where they differ:
 | ADR-0010 | Persisted codebase knowledge graph |
 | ADR-0011 | Organization policy and repository templates |
 | ADR-0012 | Remote patch execution |
+| ADR-0013 | Coordination experience and execution authority |
 
 `implementation/AgentFlow-Codex-Implementation-Prompts.md` is also retained as
 historical implementation provenance. It is not a current operations manual.

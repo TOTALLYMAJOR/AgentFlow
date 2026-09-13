@@ -349,6 +349,49 @@ program
     await runForeground("npm", ["uninstall", "--global", "agentflow"]);
   });
 
+const designIntelligence = program
+  .command("design-intelligence")
+  .description("Exchange governed contracts with Design Intelligence");
+
+designIntelligence
+  .command("import")
+  .argument("<repository-id>")
+  .argument("<handoff-path>", "repository-relative approved handoff JSON")
+  .option(
+    "--backlog <path>",
+    "repository-relative proposed backlog output",
+    "BACKLOG.design-intelligence.proposed.md",
+  )
+  .description("Import an approved handoff as a review-only AgentFlow backlog")
+  .action(
+    async (
+      repositoryId: string,
+      handoffPath: string,
+      options: { backlog: string },
+    ) => {
+      printJson(
+        await callApi("POST", "/api/design-intelligence/handoffs/import", {
+          repositoryId,
+          handoffPath,
+          backlogPath: options.backlog,
+        }),
+      );
+    },
+  );
+
+designIntelligence
+  .command("receipt")
+  .argument("<build-id>")
+  .description("Emit the Design Intelligence receipt for a governed build")
+  .action(async (buildId: string) => {
+    printJson(
+      await callApi(
+        "GET",
+        `/api/builds/${encodeURIComponent(buildId)}/design-intelligence-receipt`,
+      ),
+    );
+  });
+
 try {
   await program.parseAsync(process.argv);
 } catch (error) {

@@ -20,9 +20,9 @@ export function WorkerBoard({
     <section className="build-panel" aria-labelledby="worker-board-title">
       <header className="panel-heading">
         <div>
-          <h2 id="worker-board-title">Worker slots</h2>
+          <h2 id="worker-board-title">Agent sessions</h2>
           <p>
-            {workerLimit} of {SLOT_COUNT} local slots enabled
+            {workerLimit} of {SLOT_COUNT} governed execution slots enabled
           </p>
         </div>
       </header>

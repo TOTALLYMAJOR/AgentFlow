@@ -222,6 +222,8 @@ describe("worker prompt and command contract", () => {
     expect(prompt).toContain("Commit, push, merge");
     expect(prompt).toContain("Control Docker");
     expect(prompt).toContain("Modify the backlog");
+    expect(prompt).toContain("Approve, reject, supersede");
+    expect(prompt).toContain("only AgentFlow's reviewed governance flow can approve it");
   });
 
   it("includes the previous attempt failure in retry prompts", () => {

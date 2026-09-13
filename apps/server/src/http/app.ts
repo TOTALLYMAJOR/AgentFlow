@@ -41,6 +41,7 @@ import { registerKnowledgeRoutes } from "./routes/knowledge.js";
 import { ensureOrganizationPolicy } from "../governance/organization-policy.js";
 import { registerGovernanceRoutes } from "./routes/governance.js";
 import { reconcileInitiative, registerInitiativeRoutes } from "./routes/initiatives.js";
+import { registerDesignIntelligenceRoutes } from "./routes/design-intelligence.js";
 
 export interface BuildAppOptions {
   environment?: AgentFlowEnvironment;
@@ -170,6 +171,7 @@ export async function buildApp(
   registerGovernanceRoutes(app, context);
   registerRepositoryRoutes(app, context);
   registerPlanRoutes(app, context);
+  registerDesignIntelligenceRoutes(app, context);
   registerInitiativeRoutes(app, context);
   registerBuildRoutes(app, context);
   registerErrorHandling(app);

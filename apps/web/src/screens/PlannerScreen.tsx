@@ -21,7 +21,7 @@ import type {
   BuildSummary,
   BacklogGenerationResult,
   PlanSummary,
-  RepositorySummary,
+  RepositoryTarget,
 } from "../api/types.js";
 import { EmptyState } from "../components/EmptyState.js";
 import { LoadingState } from "../components/LoadingState.js";
@@ -31,7 +31,7 @@ import { StatusBadge } from "../components/StatusBadge.js";
 
 interface PlannerScreenProps {
   onNavigateRepositories: () => void;
-  onBuildStarted: () => void;
+  onBuildStarted: (buildId: string) => void;
   initialDraft: {
     repositoryId: string;
     objective: string;
@@ -43,9 +43,10 @@ export function PlannerScreen({
   onBuildStarted,
   initialDraft,
 }: PlannerScreenProps): React.JSX.Element {
-  const repositories = useSWR<RepositorySummary[]>(
-    "/api/repositories",
+  const repositories = useSWR<RepositoryTarget[]>(
+    "/api/repositories/targets",
     apiFetch,
+    { refreshInterval: 5_000 },
   );
   const [repositoryId, setRepositoryId] = useState(
     initialDraft?.repositoryId ?? "",
@@ -68,7 +69,7 @@ export function PlannerScreen({
   const selectedRepository = useMemo(
     () =>
       repositories.data?.find(
-        (repository) => repository.id === repositoryId,
+        (repository) => repository.repositoryId === repositoryId,
       ) ?? null,
     [repositories.data, repositoryId],
   );
@@ -151,7 +152,7 @@ export function PlannerScreen({
         planId: plan.id,
       });
       await postJson<BuildSummary>(`/api/builds/${createdBuild.id}/start`);
-      onBuildStarted();
+      onBuildStarted(createdBuild.id);
     } catch (cause) {
       const message =
         cause instanceof Error ? cause.message : "The build could not be started.";
@@ -244,8 +245,17 @@ export function PlannerScreen({
           >
             <Select.Option value="">Select repository</Select.Option>
             {repositories.data?.map((repository) => (
-              <Select.Option key={repository.id} value={repository.id}>
-                {repository.name} · {repository.status}
+              <Select.Option
+                key={repository.repositoryId}
+                value={repository.repositoryId}
+                disabled={!repository.eligible}
+              >
+                {repository.name}
+                {repository.eligible
+                  ? repository.designIntelligence.configured
+                    ? " · Design Intelligence ready"
+                    : " · ready"
+                  : ` · ${repository.blockers[0]?.message ?? "unavailable"}`}
               </Select.Option>
             ))}
           </Select>
@@ -311,7 +321,7 @@ export function PlannerScreen({
                 backlog in a checkout with uncommitted changes.
               </p>
               {selectedRepository === null ? null : (
-                <code>{selectedRepository.localPath}</code>
+                <code>{selectedRepository.path}</code>
               )}
             </div>
           </li>

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import type { AgentFlowContext } from "../context.js";
 import { calculateEstimateCalibration } from "../../planning/calibration.js";
+import { inspectRepositoryTarget } from "../../repositories/target-catalog.js";
 
 const RepositoryIdParameters = z.object({
   id: z.string().min(1),
@@ -21,6 +22,20 @@ export function registerRepositoryRoutes(
   context: AgentFlowContext,
 ): void {
   app.get("/api/repositories", async () => context.repositoryService.list());
+
+  app.get("/api/repositories/targets", async () => {
+    const repositories = await context.repositoryService.list();
+    const checkedAt = new Date().toISOString();
+    return Promise.all(
+      repositories.map((repository) =>
+        inspectRepositoryTarget(
+          repository,
+          context.store.builds.findActive(repository.id),
+          checkedAt,
+        ),
+      ),
+    );
+  });
 
   app.post("/api/repositories", async (request, reply) => {
     const input = RegisterRepositoryBody.parse(request.body);

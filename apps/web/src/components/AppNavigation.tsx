@@ -21,10 +21,10 @@ interface NavigationItem {
 }
 
 const navigationItems: NavigationItem[] = [
-  { id: "overview", label: "Home", icon: HouseIcon },
+  { id: "overview", label: "Workspace", icon: HouseIcon },
   { id: "repositories", label: "Projects", icon: FolderOpenIcon },
   { id: "initiatives", label: "Initiatives", icon: TreeStructureIcon },
-  { id: "planner", label: "New task", icon: PlusCircleIcon },
+  { id: "planner", label: "Plan", icon: PlusCircleIcon },
   { id: "build", label: "Activity", icon: ActivityIcon },
   { id: "results", label: "Completed", icon: ChartLineIcon },
 ];

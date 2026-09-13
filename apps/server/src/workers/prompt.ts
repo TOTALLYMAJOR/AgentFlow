@@ -12,6 +12,7 @@ export const PROHIBITED_WORKER_ACTIONS = [
   "Modify the backlog or task plan.",
   "Change files outside the explicitly owned paths.",
   "Control Docker, Docker Compose, or the Docker daemon directly.",
+  "Approve, reject, supersede, or otherwise mutate plans or project governance decisions.",
 ] as const;
 
 function requireNonEmpty(value: string, label: string): string {
@@ -122,6 +123,7 @@ ${PROHIBITED_WORKER_ACTIONS.map((action) => `- ${action}`).join("\n")}
 
 DELIVERY CONTRACT
 - Implement the task completely and keep the change focused.
+- You may propose a scope or architecture decision in your result, but only AgentFlow's reviewed governance flow can approve it.
 - Do not claim validation or acceptance evidence you did not actually observe.
 - Do not include secrets, credentials, or private keys in output.
 - Your final response must be one JSON object matching the supplied result schema.

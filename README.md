@@ -28,6 +28,8 @@ repositories under `$AGENTFLOW_HOME` (default `~/.agentflow`).
 - Installation-wide organization policy and explicit repository templates.
 - A dashboard for repositories, planning, builds, runners, evidence, and next
   actions.
+- A continuous project workspace and live work board that preserve the exact
+  governed build handoff without creating a second execution authority.
 
 ## Requirements
 
@@ -188,3 +190,8 @@ worktrees, mutate AgentFlow state, or control Docker. AgentFlow performs those
 operations only after its independent gates pass. Remote worker output is
 treated as untrusted patch input until digest, path ownership, validation, and
 integration checks succeed.
+
+Project-level orchestration is advisory: it may help shape an objective or
+propose work, but only a reviewed backlog, immutable plan, explicit build start,
+and the AgentFlow coordinator can dispatch or integrate tasks. See
+[ADR-0013](docs/architecture/ADR-0013-coordination-and-execution-authority.md).
