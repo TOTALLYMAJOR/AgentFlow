@@ -136,6 +136,33 @@ describe("Design Intelligence integration", () => {
     const parsed = GovernedTaskHandoffSchema.parse(handoff);
     await expect(verifyHandoffAuthoritySources(root, parsed)).resolves.toEqual(["AGENTS.md: authority source hash mismatch"]);
   });
+  it("detects governed repository snapshot drift", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agentflow-di-snapshot-"));
+    try {
+      await writeFile(path.join(root, "AGENTS.md"), "current authority\n");
+      const authority = await import("node:fs/promises").then(({ readFile }) =>
+        readFile(path.join(root, "AGENTS.md")),
+      );
+      const parsed = GovernedTaskHandoffSchema.parse({
+        ...handoff,
+        authority: {
+          ...handoff.authority,
+          sources: [
+            {
+              path: "AGENTS.md",
+              sha256: createHash("sha256").update(authority).digest("hex"),
+            },
+          ],
+        },
+      });
+
+      await expect(verifyHandoffAuthoritySources(root, parsed)).resolves.toEqual([
+        "repository snapshot digest mismatch",
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it("round trips an approved handoff through planning and a build receipt", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agentflow-di-roundtrip-"));
     const runtime = await mkdtemp(path.join(tmpdir(), "agentflow-di-runtime-"));
@@ -162,10 +189,28 @@ describe("Design Intelligence integration", () => {
         const registered = await app.inject({ method: "POST", url: "/api/repositories", payload: { path: root } });
         expect(registered.statusCode, registered.body).toBe(201);
         const repositoryId = registered.json<{ id: string }>().id;
+
+        await writeFile(path.join(root, "src", "index.js"), "export const ok = false;\n");
+        await execFileAsync("git", ["-C", root, "add", "src/index.js"]);
+        await execFileAsync("git", ["-C", root, "commit", "-m", "unreviewed source drift"]);
+        const driftedImport = await app.inject({ method: "POST", url: "/api/design-intelligence/handoffs/import", payload: { repositoryId, handoffPath: "artifacts/handoff.json" } });
+        expect(driftedImport.statusCode).toBe(409);
+        expect(driftedImport.body).toContain("GOVERNED_SOURCE_DRIFT");
+        await execFileAsync("git", ["-C", root, "revert", "--no-edit", "HEAD"]);
+
         const imported = await app.inject({ method: "POST", url: "/api/design-intelligence/handoffs/import", payload: { repositoryId, handoffPath: "artifacts/handoff.json" } });
         expect(imported.statusCode).toBe(200);
         await execFileAsync("git", ["-C", root, "add", "BACKLOG.design-intelligence.proposed.md"]);
         await execFileAsync("git", ["-C", root, "commit", "-m", "review execution packet"]);
+
+        await writeFile(path.join(root, "src", "index.js"), "export const ok = false;\n");
+        await execFileAsync("git", ["-C", root, "add", "src/index.js"]);
+        await execFileAsync("git", ["-C", root, "commit", "-m", "drift before planning"]);
+        const driftedPlan = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId, backlogPath: "BACKLOG.design-intelligence.proposed.md" } });
+        expect(driftedPlan.statusCode).toBe(409);
+        expect(driftedPlan.body).toContain("GOVERNED_SOURCE_DRIFT");
+        await execFileAsync("git", ["-C", root, "revert", "--no-edit", "HEAD"]);
+
         const planned = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId, backlogPath: "BACKLOG.design-intelligence.proposed.md" } });
         expect(planned.statusCode).toBe(201);
         expect(planned.json()).toMatchObject({ governedHandoff: { id: approved.handoffId, programId: approved.programId, sha256: canonicalJsonSha256(approved), governedBaseCommit: baseCommit } });
@@ -182,10 +227,14 @@ describe("Design Intelligence integration", () => {
         const retry = await app.inject({ method: "POST", url: `/api/builds/${created.json<{ id: string }>().id}/tasks/${taskId}/retry` });
         expect(retry.statusCode).toBe(409);
         expect(retry.json()).toMatchObject({ error: { code: "GOVERNED_RECOVERY_NOT_AUTHORIZED" } });
+        const governed = await app.inject({ method: "POST", url: `/api/builds/${created.json<{ id: string }>().id}/governor/evaluate` });
+        expect(governed.statusCode, governed.body).toBe(200);
+        expect(governed.json()).toMatchObject({ decision: { policyVersion: "governor.v1", action: "CONTINUE" }, acknowledgement: { acknowledged: true } });
         const receipt = await app.inject({ method: "GET", url: `/api/builds/${created.json<{ id: string }>().id}/design-intelligence-receipt` });
         expect(receipt.statusCode).toBe(200);
         expect(receipt.json()).toMatchObject({ schemaVersion: "1.1.0", kind: "agentflow/build-receipt", programId: approved.programId, handoff: { id: approved.handoffId, sha256: canonicalJsonSha256(approved) }, build: { status: "ready", governedBaseCommit: baseCommit } });
         expect(receipt.json<{ evidence: { events: Array<Record<string, unknown>> } }>().evidence.events.every((event) => Object.keys(event).every((key) => ["type", "payload", "sha256"].includes(key)))).toBe(true);
+        expect(receipt.json<{ evidence: { events: Array<{ type: string }> } }>().evidence.events.some((event) => event.type === "governor.decision")).toBe(true);
       } finally {
         await app.close();
       }

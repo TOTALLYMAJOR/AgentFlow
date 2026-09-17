@@ -199,7 +199,7 @@ export async function loadGovernedTaskHandoff(path: string): Promise<GovernedTas
 export async function verifyHandoffAuthoritySources(repositoryRoot: string, handoff: GovernedTaskHandoff): Promise<string[]> {
   const errors: string[] = [];
   const canonicalRoot = await realpath(repositoryRoot);
-  for (const source of handoff.authority.sources) {
+    for (const source of handoff.authority.sources) {
     if (path.isAbsolute(source.path)) {
       errors.push(`${source.path}: authority source must be repository-relative`);
       continue;
@@ -221,9 +221,43 @@ export async function verifyHandoffAuthoritySources(repositoryRoot: string, hand
       if (digest !== source.sha256) errors.push(`${source.path}: authority source hash mismatch`);
     } catch {
       errors.push(`${source.path}: authority source is unavailable`);
+      }
     }
-  }
-  return errors;
+    if (errors.length === 0) {
+      const sources = [...handoff.authority.sources]
+        .map((source) => ({ path: source.path, sha256: source.sha256 }))
+        .sort((left, right) => left.path.localeCompare(right.path));
+      const snapshotSha256 = canonicalJsonSha256({
+        baseCommit: handoff.repository.baseCommit,
+        worktreeState: "clean",
+        authorityStateSha256: handoff.authority.stateSha256,
+        governanceReportSha256: handoff.authority.governanceReportSha256,
+        sources,
+      });
+      if (snapshotSha256 !== handoff.repository.snapshotSha256) {
+        errors.push("repository snapshot digest mismatch");
+      }
+    }
+    return errors;
+}
+
+export async function governedSourceDriftPaths(
+  repositoryRoot: string,
+  baseCommit: string,
+  allowedControlArtifacts: readonly string[],
+): Promise<string[]> {
+  const changed = await new GitCommandRunner().run(repositoryRoot, [
+    "diff",
+    "--name-only",
+    "--diff-filter=ACDMRTUXB",
+    `${baseCommit}..HEAD`,
+    "--",
+  ]);
+  const allowed = new Set(allowedControlArtifacts.map(normalizeOwnershipPath));
+  return changed.stdout
+    .split("\n")
+    .map((value) => normalizeOwnershipPath(value.trim()))
+    .filter((value) => value.length > 0 && !allowed.has(value));
 }
 
 export function handoffBinding(handoff: GovernedTaskHandoff, path: string, carrierPaths: string[], executionBaseCommit?: string): GovernedHandoffBinding {
