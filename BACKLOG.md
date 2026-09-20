@@ -1,266 +1,451 @@
-# Multi-repository orchestration closeout
+# Harness Profile enforcement and governed return-loop backlog
 
 ## Backlog Coverage
 
-This packet closes the gap between independent concurrent repository builds and a governed multi-repository initiative. Evidence: `README.md`, ADR-0013, planning/build routes, repository-scoped build persistence, global scheduling, artifact validation, recovery, integration, and managed-worktree code and tests.
+This is the only AgentFlow execution backlog for the initiative. MRI-001 through MRI-008 are completed baseline capabilities and are not executable prerequisites to rerun. The unfinished Proofloom / AgentFlow / Traffic Control work is sequenced first; Harness Profile enforcement cannot start until the real local return loop passes.
 
-Completion means one immutable initiative can bind exact per-repository plans and commits, enforce cross-repository dependencies and artifacts, coordinate failure/recovery, expose one honest program status, and retire only branches proven safe to delete. Remote publication, provider deployment, and automatic rollback of external systems remain explicit exclusions. Whether remote branches should be deleted is an unresolved human policy choice; the default remains local-only cleanup with durable receipts.
+AgentFlow retains sole authority over immutable plans, task state, dependency DAGs, worktrees, scheduling, concurrency, retries, backoff, cancellation, remote jobs, leases, idempotency, validation, changed-path ownership, commits, integration, recovery, durable execution records, and multi-repository coordination. Proofloom supplies approved semantic requirements; it does not dispatch work or mutate AgentFlow state. Traffic Control observations and Governor decisions are projections into existing AgentFlow records and coordinator transitions, not a second control plane.
 
-## MRI-001 - Define immutable initiative contracts and persistence
+The MVP is trusted-repository-only. Repository validation commands continue to execute as the current Linux user and are not an arbitrary-code sandbox. Profiles that require unavailable filesystem, network, environment, secret, provider, or isolation controls must be denied before dispatch. Untrusted repository execution remains prohibited until HP-005 is complete and its enforcement is independently accepted.
+
+External Proofloom and Traffic Control prerequisites retain their source IDs and digests, but enter AgentFlow only through governed-task-handoff v2 and existing initiative/artifact gates. They are not copied into a parallel backlog.
+
+## AFI-001 - Admit governed-task-handoff v2 and preserve receipt integrity
+
+Classification: **MVP**
 
 ```yaml
-epic_id: MRI-CONTROL
-epic_title: Multi-repository initiative authority
-epic_outcome: One immutable reviewed record governs every repository build in an initiative.
-estimate_hours: 6
+epic_id: AFI-PREREQUISITE
+epic_title: Proofloom and Traffic Control return-loop prerequisites
+epic_outcome: AgentFlow admits only an exact approved v2 authority snapshot and emits integrity-bound native execution evidence.
+estimate_hours: 8
 depends_on: []
 owns:
-  - apps/server/src/domain/multi-repo.ts
-  - apps/server/src/db/initiative-repository.ts
+  - apps/server/src/integration/design-intelligence.ts
+  - apps/server/src/http/routes/design-intelligence.ts
+  - apps/server/src/http/routes/plans.ts
+  - apps/server/src/domain/types.ts
+  - apps/server/test/design-intelligence-integration.test.ts
+  - apps/server/test/planning.test.ts
+validate:
+  - npm test -- --run apps/server/test/design-intelligence-integration.test.ts apps/server/test/planning.test.ts
+  - npm run typecheck
+produces:
+  - name: governed-handoff-v2-binding
+    type: agentflow-admission-contract
+    version: 2.0.0
+    path: apps/server/src/integration/design-intelligence.ts
+  - name: agentflow-receipt-integrity-contract
+    type: agentflow-receipt-contract
+    version: 2.0.0
+    path: apps/server/src/http/routes/design-intelligence.ts
+```
+
+Extend the existing additive importer and immutable-plan binding for `governed-task-handoff@2.0.0`. Preserve the exact repository/authority snapshot, canonical digest, source task IDs, dependency DAG, ownership, acceptance criteria, validations, and produces/consumes semantics. Keep v1 behavior available only where explicitly supported outside v2 execution; never downgrade a v2 request.
+
+### Acceptance Criteria
+
+- Admission independently verifies approval authority, repository identity, exact commit and clean state, complete authority-source hashes, governance currency, canonical payload digest, and base ancestry before plan creation.
+- The immutable plan stores the exact v2 handoff digest and authority snapshot; later source, task, dependency, ownership, acceptance, validation, or artifact drift invalidates execution.
+- The governed build receipt is derived from native AgentFlow task, validation, changed-path, commit, integration, approval, event, and artifact records rather than a worker claim or HandoffManifest alone.
+
+### Refusal and negative tests
+
+- Reject unsupported schema versions, v1-as-v2 fallback, missing fields, non-canonical payloads, stale or dirty bases, source/authority drift, forged or unverified approval references, task substitution, and digest mismatch.
+- Reject receipts with omitted changed files, missing required validations, substituted task IDs, altered commits, or tampered evidence references.
+
+### Proof boundary
+
+Passing proves local AgentFlow v2 admission, immutable binding, and receipt construction only. It does not prove Traffic Control parity, runtime dispatch, deployment, provider behavior, production readiness, human acceptance, or outcomes.
+
+## AFI-002 - Project native Traffic Control observations and Governor interventions
+
+Classification: **MVP**
+
+```yaml
+epic_id: AFI-PREREQUISITE
+epic_title: Proofloom and Traffic Control return-loop prerequisites
+epic_outcome: AgentFlow admits only an exact approved v2 authority snapshot and emits integrity-bound native execution evidence.
+estimate_hours: 8
+depends_on:
+  - AFI-001
+owns:
+  - apps/server/src/integration/traffic-control.ts
+  - apps/server/src/http/routes/traffic-control.ts
+  - apps/server/src/http/app.ts
+  - apps/server/src/orchestration/coordinator.ts
+  - apps/server/src/orchestration/state-machines.ts
+  - apps/server/src/db/governor-repository.ts
   - apps/server/src/db/migrations.ts
   - apps/server/src/db/types.ts
   - apps/server/src/db/repositories.ts
-  - apps/server/test/initiative-repository.test.ts
+  - apps/server/test/traffic-control-integration.test.ts
 validate:
-  - npm test -- --run apps/server/test/initiative-repository.test.ts
-  - npm run typecheck
-produces:
-  - name: initiative-contract
-    type: typescript-contract
-    version: 1.0.0
-    path: apps/server/src/domain/multi-repo.ts
-```
-
-Add initiative, repository-plan membership, exact plan/backlog/base-commit digests, cross-repository dependencies, lifecycle states, approvals, and append-only events. Reject duplicate repositories, mutable membership after approval, and cycles.
-
-### Acceptance Criteria
-
-- Persistence round-trips an initiative with two or more repository plans and exact source digests.
-- Invalid membership and dependency cycles fail without partial writes.
-- Approved initiative membership and digests are immutable.
-
-## MRI-002 - Validate cross-repository dependencies and artifact handoffs
-
-```yaml
-epic_id: MRI-CONTROL
-epic_title: Multi-repository initiative authority
-epic_outcome: One immutable reviewed record governs every repository build in an initiative.
-estimate_hours: 6
-depends_on:
-  - MRI-001
-owns:
-  - apps/server/src/multi-repo/validation.ts
-  - apps/server/test/multi-repo-validation.test.ts
-validate:
-  - npm test -- --run apps/server/test/multi-repo-validation.test.ts
+  - npm test -- --run apps/server/test/traffic-control-integration.test.ts apps/server/test/orchestration.test.ts
   - npm run typecheck
 consumes:
-  - task: MRI-001
-    artifact: initiative-contract
-    version: 1.0.0
+  - task: AFI-001
+    artifact: governed-handoff-v2-binding
+    version: 2.0.0
 produces:
-  - name: initiative-validator
-    type: validation-service
+  - name: native-governor-record
+    type: traffic-control-observation-decision-contract
     version: 1.0.0
-    path: apps/server/src/multi-repo/validation.ts
+    path: apps/server/src/integration/traffic-control.ts
 ```
 
-Resolve cross-repository task dependencies and versioned artifacts against immutable member plans. Detect missing producers, version mismatches, cross-repository cycles, and ambiguous producers before any build starts.
+Implement TCP-002 observations as immutable projections from existing AgentFlow plans, tasks, attempts, validations, events, artifacts, leases, retries, and integration records. Implement TCP-003 decisions and bounded interventions only through existing coordinator transitions. Persist decision provenance and explicit intervention acknowledgement; replay must be idempotent and mutation-free. Reconsideration and replanning remain proposals requiring normal AgentFlow authority.
 
 ### Acceptance Criteria
 
-- Valid provider-consumer chains across repositories produce deterministic execution waves.
-- Missing, mismatched, ambiguous, and cyclic handoffs return actionable errors.
-- Repository-local dependencies retain their existing behavior.
+- Every observation names its native source record, build/task attribution, cross-plane correlation ID, source revision, and evidence digest without synthesizing missing data.
+- Every allowed intervention maps to an existing guarded coordinator transition and records actor/authority provenance, requested action, decision, acknowledgement, resulting state, and immutable timestamps.
+- Feature-disabled operation leaves native scheduling unchanged, and replay never repeats an acknowledged mutation.
 
-## MRI-003 - Add reviewed initiative planning and approval APIs
+### Refusal and negative tests
+
+- Reject observations missing task attribution, source evidence, correlation identity, or approval provenance.
+- Reject stale, duplicate-conflicting, out-of-order, unsupported, unacknowledged, or state-invalid interventions; reject direct status writes and retry/replan bypasses.
+
+### Proof boundary
+
+Passing proves local projections and acknowledged use of existing AgentFlow transitions. It does not make Traffic Control authoritative, prove remote transport, or authorize production intervention.
+
+## AFI-003 - Prove the Proofloom to AgentFlow to Traffic Control return loop
+
+Classification: **MVP**
 
 ```yaml
-epic_id: MRI-CONTROL
-epic_title: Multi-repository initiative authority
-epic_outcome: One immutable reviewed record governs every repository build in an initiative.
+epic_id: AFI-PREREQUISITE
+epic_title: Proofloom and Traffic Control return-loop prerequisites
+epic_outcome: AgentFlow admits only an exact approved v2 authority snapshot and emits integrity-bound native execution evidence.
 estimate_hours: 6
 depends_on:
-  - MRI-002
+  - AFI-001
+  - AFI-002
 owns:
-  - apps/server/src/http/routes/initiatives.ts
-  - apps/server/src/http/app.ts
-  - apps/server/test/initiative-api.test.ts
+  - tests/proofloom-agentflow-traffic-control.acceptance.integration.test.ts
+  - tests/fixtures/proofloom-agentflow-traffic-control/
 validate:
-  - npm test -- --run apps/server/test/initiative-api.test.ts
+  - npm run test:integration -- tests/proofloom-agentflow-traffic-control.acceptance.integration.test.ts
   - npm run typecheck
 consumes:
-  - task: MRI-002
-    artifact: initiative-validator
+  - task: AFI-001
+    artifact: agentflow-receipt-integrity-contract
+    version: 2.0.0
+  - task: AFI-002
+    artifact: native-governor-record
     version: 1.0.0
-```
-
-Provide create, inspect, validate, approve, start, pause, cancel, and replan endpoints. Starting must require an approved immutable digest and clean exact repository commits.
-
-### Acceptance Criteria
-
-- No repository build starts before initiative approval.
-- Commit or plan drift invalidates approval and explains recovery.
-- API responses distinguish proposed, approved, running, blocked, partial, failed, and completed states.
-
-## MRI-004 - Coordinate repository builds and shared resource locks
-
-```yaml
-epic_id: MRI-RUNTIME
-epic_title: Coordinated multi-repository execution
-epic_outcome: Repository builds advance in dependency order without starving unrelated work or racing shared resources.
-estimate_hours: 8
-depends_on:
-  - MRI-003
-owns:
-  - apps/server/src/multi-repo/coordinator.ts
-  - apps/server/src/multi-repo/resources.ts
-  - apps/server/test/multi-repo-coordinator.test.ts
-validate:
-  - npm test -- --run apps/server/test/multi-repo-coordinator.test.ts
-  - npm run typecheck
 produces:
-  - name: initiative-runtime
-    type: orchestration-service
+  - name: governed-return-loop-evidence
+    type: local-acceptance-evidence
     version: 1.0.0
-    path: apps/server/src/multi-repo/coordinator.ts
+    path: tests/proofloom-agentflow-traffic-control.acceptance.integration.test.ts
 ```
 
-Start eligible repository builds by cross-repository wave, propagate blockers, retain fair global worker allocation, and serialize declared shared environments, schemas, provider accounts, or release lanes.
+Exercise the real local service path with bounded temporary repositories: approved Proofloom handoff, AgentFlow admission and immutable plan, native dispatch/integration, Traffic Control observation, acknowledged Governor decision, AgentFlow build receipt, and Proofloom receipt audit. Use shared canonical fixtures to prove protocol parity across the boundary.
 
 ### Acceptance Criteria
 
-- A downstream repository cannot start before required upstream evidence is integrated.
-- Independent repositories continue without starvation.
-- Shared-resource conflicts serialize deterministically and appear as visible blocked reasons.
+- The exact v2 snapshot and digest survive every plane unchanged, and the audited return receipt binds task set, commits, actual changes, validations, Governor records, and correlation IDs.
+- The integrated combined tree passes the declared acceptance path; worker completion alone cannot release dependents or satisfy the return loop.
+- Success and refusal evidence is durable and reproducible from native records.
 
-## MRI-005 - Implement partial-failure recovery and governed replanning
+### Refusal and negative tests
 
-```yaml
-epic_id: MRI-RUNTIME
-epic_title: Coordinated multi-repository execution
-epic_outcome: Repository builds advance in dependency order without starving unrelated work or racing shared resources.
-estimate_hours: 6
-depends_on:
-  - MRI-004
-owns:
-  - apps/server/src/multi-repo/recovery.ts
-  - apps/server/test/multi-repo-recovery.test.ts
-validate:
-  - npm test -- --run apps/server/test/multi-repo-recovery.test.ts
-  - npm run typecheck
-consumes:
-  - task: MRI-004
-    artifact: initiative-runtime
-    version: 1.0.0
-```
+- Cover canonicalization disagreement, stale approval, digest drift, task/dependency substitution, missing validation, omitted changed files, tampered Governor acknowledgement, interrupted execution, and replay.
 
-Recover after process restart, distinguish retryable repository failure from initiative failure, invalidate downstream evidence after upstream change, and require a new reviewed digest for replanning.
+### Proof boundary
 
-### Acceptance Criteria
+Passing proves one bounded local return loop. It does not prove deployment, remote/provider operation, a consuming-repository pilot, production use, or human outcome acceptance.
 
-- Restart reconstructs initiative status without duplicate build starts.
-- Partial success remains visible and recoverable.
-- Replanning never mutates the previously approved initiative snapshot.
+## HP-001 - Admit and immutably bind the Harness Profile
 
-## MRI-006 - Complete safe terminal branch retirement with receipts
+Classification: **MVP**
 
 ```yaml
-epic_id: MRI-GIT
-epic_title: Terminal Git lifecycle
-epic_outcome: Managed worktrees and branches are retired safely without destroying recoverable or unpublished work.
-estimate_hours: 5
-depends_on:
-  - MRI-005
-owns:
-  - apps/server/src/git/worktree-manager.ts
-  - apps/server/src/git/types.ts
-  - apps/server/src/git/index.ts
-  - apps/server/src/cli.ts
-  - apps/server/test/git-runtime.test.ts
-  - apps/server/test/branch-retirement.test.ts
-validate:
-  - npm test -- --run apps/server/test/git-runtime.test.ts apps/server/test/branch-retirement.test.ts
-  - npm run typecheck
-```
-
-Build on the local merged-branch retirement slice by adding terminal-state policy, retention windows, durable cleanup receipts, idempotency, and an explicit separately approved remote-deletion policy.
-
-### Acceptance Criteria
-
-- Active, dirty, unmerged, unpublished, failed, and interrupted branches are preserved with reasons.
-- Eligible local task and integration branches are deleted idempotently after their worktrees are removed.
-- Every removal or preservation decision has a durable receipt; remote deletion is disabled by default.
-
-## MRI-007 - Present one initiative workspace with honest proof boundaries
-
-```yaml
-epic_id: MRI-UX
-epic_title: Multi-repository supervision
-epic_outcome: A consumer can understand and safely control the whole initiative without terminal-only knowledge.
+epic_id: HARNESS-PROFILE
+epic_title: Digest-bound Harness Profile enforcement
+epic_outcome: AgentFlow dispatches only work whose approved semantic execution requirements are enforceable and evidenced by native controls.
 estimate_hours: 7
 depends_on:
-  - MRI-004
-  - MRI-005
+  - AFI-003
 owns:
-  - apps/web/src/screens/InitiativeScreen.tsx
-  - apps/web/src/components/InitiativeGraph.tsx
-  - apps/web/src/api/multi-repo-types.ts
-  - apps/web/test/InitiativeScreen.test.tsx
+  - apps/server/src/harness/profile.ts
+  - apps/server/src/harness/index.ts
+  - apps/server/src/http/routes/plans.ts
+  - apps/server/src/domain/types.ts
+  - apps/server/src/db/plan-repository.ts
+  - apps/server/test/harness-profile.test.ts
+  - apps/server/test/planning.test.ts
 validate:
-  - npm test -- --run apps/web/test/InitiativeScreen.test.tsx
+  - npm test -- --run apps/server/test/harness-profile.test.ts apps/server/test/planning.test.ts
   - npm run typecheck
 consumes:
-  - task: MRI-004
-    artifact: initiative-runtime
+  - task: AFI-003
+    artifact: governed-return-loop-evidence
     version: 1.0.0
+produces:
+  - name: immutable-harness-profile-binding
+    type: agentflow-plan-binding
+    version: 1.0.0
+    path: apps/server/src/harness/profile.ts
 ```
 
-Show repository waves, cross-repository handoffs, shared locks, approvals, partial failures, release readiness, retained branches, cleanup eligibility, and the next recovery action.
+Add a strict, versioned Harness Profile contract carried by the approved v2 handoff. Canonicalize once, verify the supplied digest, and bind the exact profile bytes/digest, source identity, approval reference, repository snapshot, plan digest, build ID, and cross-plane correlation IDs into immutable plan/build state.
 
 ### Acceptance Criteria
 
-- The interface never equates integrated, published, deployed, or externally operational states.
-- Every blocked or partial state names its cause and recovery action.
-- Desktop and mobile flows remain keyboard accessible without horizontal overflow.
+- Supported profile versions validate all required filesystem, network, environment/secret, side-effect, provider/runtime, validation-isolation, checkpoint/recovery, evidence, and budget declarations without inventing defaults that weaken policy.
+- Plan/build creation persists an immutable binding to the exact approved profile and rejects any later mutation or substitution.
+- Correlation IDs are stable, collision-checked, and distinct from authority or approval.
 
-## MRI-008 - Prove the complete multi-repository lifecycle
+### Refusal and negative tests
+
+- Reject absent profiles where required, unsupported versions, unknown policy values, duplicate/colliding IDs, non-canonical digests, mismatched source snapshots, unapproved profiles, and profile/plan/build drift.
+
+### Proof boundary
+
+Passing proves schema admission and immutable binding only. It does not prove that a declared capability exists or that runtime enforcement occurred.
+
+## HP-002 - Decide runtime compatibility and trusted-repository policy before dispatch
+
+Classification: **MVP**
 
 ```yaml
-epic_id: MRI-PROOF
-epic_title: Multi-repository acceptance evidence
-epic_outcome: The shipped control plane proves successful and adverse multi-repository journeys end to end.
+epic_id: HARNESS-PROFILE
+epic_title: Digest-bound Harness Profile enforcement
+epic_outcome: AgentFlow dispatches only work whose approved semantic execution requirements are enforceable and evidenced by native controls.
 estimate_hours: 8
 depends_on:
-  - MRI-006
-  - MRI-007
+  - HP-001
 owns:
-  - tests/multi-repo.acceptance.test.ts
-  - tests/fixtures/multi-repo/
+  - apps/server/src/harness/capabilities.ts
+  - apps/server/src/harness/policy.ts
+  - apps/server/src/governance/organization-policy.ts
+  - apps/server/src/repositories/config.ts
+  - apps/server/src/orchestration/scheduler.ts
+  - apps/server/src/validation/types.ts
+  - apps/server/src/validation/task-validator.ts
+  - apps/server/test/harness-policy.test.ts
+  - apps/server/test/governance.test.ts
+  - apps/server/test/validation-runtime.test.ts
 validate:
-  - npm run test:integration
-  - npm run build
+  - npm test -- --run apps/server/test/harness-policy.test.ts apps/server/test/governance.test.ts apps/server/test/validation-runtime.test.ts
+  - npm run typecheck
+consumes:
+  - task: HP-001
+    artifact: immutable-harness-profile-binding
+    version: 1.0.0
+produces:
+  - name: harness-dispatch-decision
+    type: capability-policy-decision
+    version: 1.0.0
+    path: apps/server/src/harness/policy.ts
 ```
 
-Exercise at least three fixture repositories through success, cross-repository artifact mismatch, shared-resource contention, worker starvation pressure, restart, partial failure, replan, cancellation, dirty cleanup refusal, merged-branch retirement, and retained-unmerged recovery.
+Build the pre-dispatch decision from independently detected provider/runtime capabilities plus repository and organization policy. Classify filesystem reads/writes, network egress, environment and secret exposure, command/process execution, external mutations, durable writes, and irreversible effects. Return `allow`, `deny`, or `approval_required` with stable reason codes. For MVP validation, require an explicitly trusted reviewed repository snapshot; do not describe current-user command execution as sandboxed.
 
 ### Acceptance Criteria
 
-- The full success journey completes from approved initiative through cleanup receipts.
-- Every adverse scenario fails closed without source loss or false completion.
-- Evidence identifies local integration separately from publication and deployment.
+- Dispatch cannot occur until every required capability has a compatible enforced runtime and every side effect has a deterministic decision.
+- Secret/environment exposure is deny-by-default and allowlisted by identifier, never by secret value; decision records are redacted and digest-bound.
+- Profiles requiring unavailable filesystem read isolation, network restriction, provider behavior, secret controls, or sandboxing are denied rather than approximated.
+- Approval-required decisions bind the exact profile, plan, build, repository snapshot, capability set, actor authority, and expiration.
 
-## Closeout Evidence
+### Refusal and negative tests
 
-| Item | Status | Authoritative evidence |
-| --- | --- | --- |
-| MRI-001 | Complete | Migrations 14-17, immutable initiative repository, digest and superseding-replan tests |
-| MRI-002 | Complete | Exact artifact validation, ambiguous-producer rejection, cycle checks, deterministic waves |
-| MRI-003 | Complete | Create, inspect, approve, start, pause, resume, cancel, reconcile, and replan APIs with commit-drift refusal |
-| MRI-004 | Complete | Dependency-wave release, integrated-artifact gate, fair global scheduling, and deterministic shared-resource serialization |
-| MRI-005 | Complete | Startup reconciliation, pause propagation, partial-failure retry recovery, immutable replanning, and no-duplicate restart acceptance |
-| MRI-006 | Complete | Completed-only cleanup, default retention window, dirty/unmerged preservation, local merged-branch retirement, remote deletion refusal, and durable receipts |
-| MRI-007 | Complete | Governed initiative creation and supervision workspace with blockers, recovery actions, handoffs, proof boundaries, and cleanup evidence |
-| MRI-008 | Complete | `tests/multi-repo.acceptance.test.ts`, broad unit suite, full integration gate, and production build |
+- Reject unknown capabilities, unsupported providers, capability drift, overbroad path/network/secret requests, forged/expired approvals, policy conflicts, unclassified side effects, and untrusted validation mode.
 
-Validated on 2026-09-12: `npm test` (145 tests), `npm run typecheck`, `npm run test:integration` (4 tests across 3 suites), and `npm run build`. Scoped orchestration files pass ESLint. Full-repository lint additionally reaches a pre-existing error in the unrelated untracked `apps/web/test/TaskQueues.test.tsx` workstream.
+### Proof boundary
+
+Passing proves deterministic admission decisions and trusted-repository-only validation policy. It does not isolate arbitrary repository commands or make post-execution detection equivalent to preventive containment.
+
+## HP-003 - Enforce the Harness Profile through native lifecycle transitions
+
+Classification: **MVP**
+
+```yaml
+epic_id: HARNESS-PROFILE
+epic_title: Digest-bound Harness Profile enforcement
+epic_outcome: AgentFlow dispatches only work whose approved semantic execution requirements are enforceable and evidenced by native controls.
+estimate_hours: 10
+depends_on:
+  - HP-002
+owns:
+  - apps/server/src/orchestration/coordinator.ts
+  - apps/server/src/orchestration/state-machines.ts
+  - apps/server/src/orchestration/retry-policy.ts
+  - apps/server/src/recovery/service.ts
+  - apps/server/src/workers/types.ts
+  - apps/server/src/workers/providers.ts
+  - apps/server/src/validation/environment.ts
+  - apps/server/src/db/migrations.ts
+  - apps/server/src/db/types.ts
+  - apps/server/src/db/repositories.ts
+  - apps/server/test/harness-lifecycle.test.ts
+  - apps/server/test/orchestration.test.ts
+  - apps/server/test/recovery.test.ts
+  - apps/server/test/retry-policy.test.ts
+validate:
+  - npm test -- --run apps/server/test/harness-lifecycle.test.ts apps/server/test/orchestration.test.ts apps/server/test/recovery.test.ts apps/server/test/retry-policy.test.ts
+  - npm run typecheck
+consumes:
+  - task: HP-002
+    artifact: harness-dispatch-decision
+    version: 1.0.0
+produces:
+  - name: harness-lifecycle-evidence
+    type: native-lifecycle-enforcement-record
+    version: 1.0.0
+    path: apps/server/src/orchestration/coordinator.ts
+```
+
+Gate existing plan start, task dispatch, retry, resume, validation, integration, cancellation, and recovery transitions with the immutable profile binding and current capability decision. Reuse native state machines, leases, idempotency, retry/backoff, cancellation, worktrees, ownership checks, and recovery. Persist checkpoints through existing durable records. Enforce only justified profile budgets: elapsed time, attempts, output bytes, worker concurrency, validation limits, and declared resource limits that the selected runtime can measure and stop.
+
+### Acceptance Criteria
+
+- Every transition revalidates the immutable binding and relevant capability decision; retries and recovery cannot shed profile restrictions or approvals.
+- Filesystem write limits route through worktree/ownership enforcement, environment/secrets through explicit allowlists, network through provider/runtime capability, and side effects through the prior allow/deny/approval decision.
+- Checkpoint requirements, budget consumption, correlation IDs, cancellation, retry/backoff, leases, and recovery results are durable and idempotent.
+- Unsupported or unmeasurable budgets fail closed; no generic hook runtime or parallel lifecycle is introduced.
+
+### Refusal and negative tests
+
+- Reject dispatch after profile/capability/approval drift, retry with expanded access, recovery without required checkpoint, exhausted budgets, correlation mismatch, missing acknowledgement, lease loss, or state-invalid transition.
+- Prove cancellation and failure preserve evidence without committing or integrating unauthorized changes.
+
+### Proof boundary
+
+Passing proves enforcement through AgentFlow's existing lifecycle for capabilities the runtime actually supplies. It does not prove unavailable isolation, remote-runner parity, deployment, or successful external side effects.
+
+## HP-004 - Emit profile-required evidence and prove trusted-repository execution
+
+Classification: **MVP**
+
+```yaml
+epic_id: HARNESS-PROFILE
+epic_title: Digest-bound Harness Profile enforcement
+epic_outcome: AgentFlow dispatches only work whose approved semantic execution requirements are enforceable and evidenced by native controls.
+estimate_hours: 8
+depends_on:
+  - HP-003
+owns:
+  - apps/server/src/artifacts/contracts.ts
+  - apps/server/src/artifacts/types.ts
+  - apps/server/src/artifacts/manifest-service.ts
+  - apps/server/src/http/routes/harness.ts
+  - apps/server/src/http/app.ts
+  - apps/server/test/harness-evidence.test.ts
+  - tests/harness-profile.acceptance.integration.test.ts
+  - tests/fixtures/harness-profile/
+validate:
+  - npm test -- --run apps/server/test/harness-evidence.test.ts
+  - npm run test:integration -- tests/harness-profile.acceptance.integration.test.ts
+  - npm run typecheck
+consumes:
+  - task: HP-003
+    artifact: harness-lifecycle-evidence
+    version: 1.0.0
+produces:
+  - name: harness-profile-execution-receipt
+    type: agentflow-evidence-envelope
+    version: 1.0.0
+    path: apps/server/src/artifacts/contracts.ts
+```
+
+Emit the evidence explicitly required by the profile from native immutable plan/build/task, changed-path, validation, commit, integration, approval, capability-decision, budget, checkpoint, recovery, Traffic Control, and Governor records. Prove success and refusals through the real local API/coordinator path using a reviewed trusted fixture repository.
+
+### Acceptance Criteria
+
+- The receipt binds profile/handoff/plan/build digests, repository snapshot, task set, correlation IDs, capability decisions, approvals, side-effect classifications, budget/checkpoint results, actual changes, validations, commits, Governor acknowledgements, and terminal state.
+- Missing required evidence makes the receipt incomplete and prevents a compliant-success claim.
+- The trusted-repository fixture completes through native dispatch and integration; all declared refusal cases fail before unauthorized execution or integration.
+
+### Refusal and negative tests
+
+- Cover missing/tampered evidence, correlation mismatch, forged approval, capability drift, undeclared side effect, budget overrun, checkpoint loss, omitted changed files, failed validation, receipt replay, and interrupted recovery.
+
+### Proof boundary
+
+Passing proves local trusted-repository enforcement and receipt integrity. Validation commands still run as the current Linux user; this is not proof of arbitrary-code sandboxing, untrusted repository safety, remote/provider parity, deployment, or human acceptance.
+
+## HP-005 - Add enforceable isolated execution and validation profiles
+
+Classification: **required before untrusted repository execution**
+
+```yaml
+epic_id: HARNESS-ISOLATION
+epic_title: Optional isolation for untrusted repository execution
+epic_outcome: AgentFlow can enforce an approved isolation profile before any untrusted repository code or validation command runs.
+estimate_hours: 12
+depends_on:
+  - HP-004
+owns:
+  - apps/server/src/harness/isolation.ts
+  - apps/server/src/workers/runtime.ts
+  - apps/server/src/validation/process-runner.ts
+  - apps/server/src/validation/command.ts
+  - apps/server/src/config/environment.ts
+  - apps/server/test/harness-isolation.test.ts
+  - apps/server/test/worker-runtime.test.ts
+  - apps/server/test/validation-runtime.test.ts
+  - tests/harness-isolation.acceptance.integration.test.ts
+  - tests/fixtures/harness-isolation/
+validate:
+  - npm test -- --run apps/server/test/harness-isolation.test.ts apps/server/test/worker-runtime.test.ts apps/server/test/validation-runtime.test.ts
+  - npm run test:integration -- tests/harness-isolation.acceptance.integration.test.ts
+  - npm run typecheck
+consumes:
+  - task: HP-004
+    artifact: harness-profile-execution-receipt
+    version: 1.0.0
+produces:
+  - name: isolated-harness-runtime
+    type: enforced-execution-capability
+    version: 1.0.0
+    path: apps/server/src/harness/isolation.ts
+```
+
+Add an optional, explicit isolation profile for both worker execution and repository validation. Use a pinned runtime/image and enforce mount scope, read-only inputs, writable worktree/output paths, network mode/egress policy, environment and secret allowlists, process/resource limits, timeouts, cancellation, and artifact extraction. Do not expose the host Docker socket or inherit undeclared host credentials. Keep trusted-current-user mode separate and honestly labeled.
+
+### Acceptance Criteria
+
+- Untrusted mode cannot start unless the selected runtime can enforce every required filesystem, network, environment/secret, process, and resource control and can report its exact capability/version digest.
+- Worker and validation processes run inside the same approved isolation boundary or separately declared compatible boundaries; outputs return through existing ownership, validation, commit, and integration gates.
+- Escape, path traversal, undeclared mount/write, network egress, secret access, resource exhaustion, cancellation, and restart cases are independently tested with bounded fixtures.
+- Failure to initialize or attest isolation denies execution; there is no fallback to current-user host commands.
+
+### Refusal and negative tests
+
+- Reject missing runtime/image digest, mutable image reference, unavailable network enforcement, path escape, host socket/device mount, inherited credential, secret leakage, incompatible provider, unsupported resource budget, tampered attestation, and fallback after isolation failure.
+
+### Proof boundary
+
+Passing proves only the tested isolation profile on the tested host/runtime version. It does not establish a general multi-tenant security boundary, protect against host/kernel compromise, prove remote-runner parity, or make all repositories safe.
+
+## Rejected duplicate complexity
+
+These are classifications, not executable tasks:
+
+- **rejected duplicate complexity** - generic hook runtime beside the coordinator; native transitions already provide the enforcement points.
+- **rejected duplicate complexity** - second scheduler, retry/backoff engine, execution database, lease service, recovery service, coordinator, or backlog.
+- **rejected duplicate complexity** - model-prompt compliance as a security boundary; prompts remain advisory and independently checked.
+- **rejected duplicate complexity** - automatic v1 fallback, invented approval defaults, synthesized evidence, or self-attestation by the candidate verifier.
+
+No separate **later** task is admitted now. Remote-runner Harness Profile execution remains denied unless a future measured need justifies a digest-bound runner capability/attestation task; local MVP work must not speculate that layer into existence.
+
+## Completion Evidence
+
+| Task | Completion evidence required |
+| --- | --- |
+| AFI-001 | Focused v2 admission/receipt tests and typecheck at the exact integrated revision |
+| AFI-002 | Native observation/intervention tests, durable acknowledgement evidence, and typecheck |
+| AFI-003 | Real bounded local Proofloom -> AgentFlow -> Traffic Control -> Proofloom acceptance and refusals |
+| HP-001 | Profile schema/digest/immutable-binding tests and typecheck |
+| HP-002 | Capability, policy, trusted-validation, approval, and refusal tests |
+| HP-003 | Native lifecycle, retry, recovery, checkpoint, budget, and correlation tests |
+| HP-004 | Evidence contract tests plus trusted-repository local integration acceptance |
+| HP-005 | Isolated worker/validation unit and integration acceptance on a named runtime/version |
+
+Backlog completion proves only the evidence named above. Publication, deployment, provider operation, production use, consuming-repository adoption, and human outcome acceptance require separate authority and evidence.
