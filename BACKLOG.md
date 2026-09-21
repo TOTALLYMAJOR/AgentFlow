@@ -2,7 +2,7 @@
 
 ## Backlog Coverage
 
-This is the only AgentFlow execution backlog for the initiative. MRI-001 through MRI-008 are completed baseline capabilities and are not executable prerequisites to rerun. The unfinished Proofloom / AgentFlow / Traffic Control work is sequenced first; Harness Profile enforcement cannot start until the real local return loop passes.
+This is the only AgentFlow execution backlog for the initiative. MRI-001 through MRI-008 are completed baseline capabilities and are not executable prerequisites to rerun. Wave 0 already exists on `codex/traffic-control-integration`; AFI-001 through AFI-003 converge and verify that implementation against current `main` rather than rebuilding it. Harness Profile enforcement cannot start until the converged real local return loop passes.
 
 AgentFlow retains sole authority over immutable plans, task state, dependency DAGs, worktrees, scheduling, concurrency, retries, backoff, cancellation, remote jobs, leases, idempotency, validation, changed-path ownership, commits, integration, recovery, durable execution records, and multi-repository coordination. Proofloom supplies approved semantic requirements; it does not dispatch work or mutate AgentFlow state. Traffic Control observations and Governor decisions are projections into existing AgentFlow records and coordinator transitions, not a second control plane.
 
@@ -10,7 +10,7 @@ The MVP is trusted-repository-only. Repository validation commands continue to e
 
 External Proofloom and Traffic Control prerequisites retain their source IDs and digests, but enter AgentFlow only through governed-task-handoff v2 and existing initiative/artifact gates. They are not copied into a parallel backlog.
 
-## AFI-001 - Admit governed-task-handoff v2 and preserve receipt integrity
+## AFI-001 - Converge Wave 0 handoff admission and receipt integrity
 
 Classification: **MVP**
 
@@ -31,23 +31,24 @@ validate:
   - npm test -- --run apps/server/test/design-intelligence-integration.test.ts apps/server/test/planning.test.ts
   - npm run typecheck
 produces:
-  - name: governed-handoff-v2-binding
-    type: agentflow-admission-contract
+  - name: design-intelligence-governed-task-handoff
+    type: design-intelligence/governed-task-handoff
     version: 2.0.0
     path: apps/server/src/integration/design-intelligence.ts
-  - name: agentflow-receipt-integrity-contract
-    type: agentflow-receipt-contract
-    version: 2.0.0
+  - name: agentflow-build-receipt
+    type: agentflow/build-receipt
+    version: 1.0.0
     path: apps/server/src/http/routes/design-intelligence.ts
 ```
 
-Extend the existing additive importer and immutable-plan binding for `governed-task-handoff@2.0.0`. Preserve the exact repository/authority snapshot, canonical digest, source task IDs, dependency DAG, ownership, acceptance criteria, validations, and produces/consumes semantics. Keep v1 behavior available only where explicitly supported outside v2 execution; never downgrade a v2 request.
+Converge the existing `codex/traffic-control-integration` implementation with current `main`, retaining the additive importer and immutable-plan binding for `design-intelligence/governed-task-handoff@2.0.0` and the emitted `agentflow/build-receipt@1.0.0`. Preserve the exact repository/authority snapshot, canonical digest, source task IDs, dependency DAG, ownership, acceptance criteria, validations, and produces/consumes semantics. Keep v1 behavior available only where explicitly supported outside v2 execution; never downgrade a v2 request. Resolve integration conflicts through current AgentFlow authorities rather than reimplementing the Wave 0 contracts.
 
 ### Acceptance Criteria
 
 - Admission independently verifies approval authority, repository identity, exact commit and clean state, complete authority-source hashes, governance currency, canonical payload digest, and base ancestry before plan creation.
 - The immutable plan stores the exact v2 handoff digest and authority snapshot; later source, task, dependency, ownership, acceptance, validation, or artifact drift invalidates execution.
 - The governed build receipt is derived from native AgentFlow task, validation, changed-path, commit, integration, approval, event, and artifact records rather than a worker claim or HandoffManifest alone.
+- The converged implementation preserves the accepted `2.0.0` handoff and `1.0.0` receipt behavior; proposed `2.1.0` or `1.1.0` extensions remain unratified until canonical JSON, digest rules, required fields, compatibility fixtures, and refusal behavior are frozen.
 
 ### Refusal and negative tests
 
@@ -58,7 +59,7 @@ Extend the existing additive importer and immutable-plan binding for `governed-t
 
 Passing proves local AgentFlow v2 admission, immutable binding, and receipt construction only. It does not prove Traffic Control parity, runtime dispatch, deployment, provider behavior, production readiness, human acceptance, or outcomes.
 
-## AFI-002 - Project native Traffic Control observations and Governor interventions
+## AFI-002 - Converge native observations and Governor interventions
 
 Classification: **MVP**
 
@@ -85,16 +86,20 @@ validate:
   - npm run typecheck
 consumes:
   - task: AFI-001
-    artifact: governed-handoff-v2-binding
+    artifact: design-intelligence-governed-task-handoff
     version: 2.0.0
 produces:
-  - name: native-governor-record
-    type: traffic-control-observation-decision-contract
+  - name: traffic-control-execution-observation
+    type: traffic-control/execution-observation
     version: 1.0.0
     path: apps/server/src/integration/traffic-control.ts
+  - name: traffic-control-governor-decision-record
+    type: traffic-control/governor-decision-record
+    version: 1.0.0
+    path: apps/server/src/db/governor-repository.ts
 ```
 
-Implement TCP-002 observations as immutable projections from existing AgentFlow plans, tasks, attempts, validations, events, artifacts, leases, retries, and integration records. Implement TCP-003 decisions and bounded interventions only through existing coordinator transitions. Persist decision provenance and explicit intervention acknowledgement; replay must be idempotent and mutation-free. Reconsideration and replanning remain proposals requiring normal AgentFlow authority.
+Converge the existing Wave 0 TCP-002 observations as immutable projections from AgentFlow plans, tasks, attempts, validations, events, artifacts, leases, retries, and integration records. Converge TCP-003 decisions and bounded interventions only through existing coordinator transitions. Preserve decision provenance and explicit intervention acknowledgement; replay must be idempotent and mutation-free. Reconsideration and replanning remain proposals requiring normal AgentFlow authority.
 
 ### Acceptance Criteria
 
@@ -111,7 +116,7 @@ Implement TCP-002 observations as immutable projections from existing AgentFlow 
 
 Passing proves local projections and acknowledged use of existing AgentFlow transitions. It does not make Traffic Control authoritative, prove remote transport, or authorize production intervention.
 
-## AFI-003 - Prove the Proofloom to AgentFlow to Traffic Control return loop
+## AFI-003 - Re-prove the return loop on the converged branch
 
 Classification: **MVP**
 
@@ -131,10 +136,13 @@ validate:
   - npm run typecheck
 consumes:
   - task: AFI-001
-    artifact: agentflow-receipt-integrity-contract
-    version: 2.0.0
+    artifact: agentflow-build-receipt
+    version: 1.0.0
   - task: AFI-002
-    artifact: native-governor-record
+    artifact: traffic-control-execution-observation
+    version: 1.0.0
+  - task: AFI-002
+    artifact: traffic-control-governor-decision-record
     version: 1.0.0
 produces:
   - name: governed-return-loop-evidence
@@ -143,7 +151,7 @@ produces:
     path: tests/proofloom-agentflow-traffic-control.acceptance.integration.test.ts
 ```
 
-Exercise the real local service path with bounded temporary repositories: approved Proofloom handoff, AgentFlow admission and immutable plan, native dispatch/integration, Traffic Control observation, acknowledged Governor decision, AgentFlow build receipt, and Proofloom receipt audit. Use shared canonical fixtures to prove protocol parity across the boundary.
+Re-run the real local service path from the converged AgentFlow branch with bounded temporary repositories: approved Proofloom handoff, AgentFlow admission and immutable plan, native dispatch/integration, Traffic Control observation, acknowledged Governor decision, AgentFlow build receipt, and Proofloom receipt audit. Use shared canonical fixtures to prove protocol parity across the boundary; prior branch-local evidence is input, not acceptance of the converged revision.
 
 ### Acceptance Criteria
 
@@ -191,6 +199,12 @@ produces:
     version: 1.0.0
     path: apps/server/src/harness/profile.ts
 ```
+
+External gate: `TASK-PROOFLOOM-HARNESS-PROFILE-SCHEMA` must publish an accepted,
+digest-bound Harness Profile contract and compatibility fixtures. Its proposed
+handoff extension version remains unratified until canonical JSON, digest
+rules, required fields, compatibility fixtures, and unsupported-version
+behavior are frozen.
 
 Add a strict, versioned Harness Profile contract carried by the approved v2 handoff. Canonicalize once, verify the supplied digest, and bind the exact profile bytes/digest, source identity, approval reference, repository snapshot, plan digest, build ID, and cross-plane correlation IDs into immutable plan/build state.
 
