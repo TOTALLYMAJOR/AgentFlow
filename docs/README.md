@@ -11,6 +11,8 @@ source documents used to build AgentFlow.
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — failure diagnosis and recovery.
 - [SECURITY.md](SECURITY.md) — trust boundaries, credentials, remote runners,
   and repository command execution.
+- [traffic-control-pilot.md](traffic-control-pilot.md) — draft eligibility,
+  in-run intervention, and scope-preservation contract.
 - [ASSUMPTIONS.md](ASSUMPTIONS.md) — explicit implementation choices.
 - [../examples/README.md](../examples/README.md) — configuration and backlog
   templates.

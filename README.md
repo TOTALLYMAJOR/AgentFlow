@@ -6,6 +6,14 @@ Markdown backlog into an immutable plan, executes tasks in isolated worktrees,
 validates declared ownership and repository commands, and serializes accepted
 changes into a build integration branch.
 
+In the Proofloom ecosystem, a human or repository authority selects direction,
+adopts work, and approves scope. Proofloom may investigate and prepare a governed
+handoff; AgentFlow alone plans, dispatches, executes, validates, integrates, and
+returns implementation receipts for that approved work. Traffic Control Pilot
+is an optional governor **inside an eligible AgentFlow run**. It does not approve
+new scope or become a required stage for every build. The draft participation
+and scope contract is in [Traffic Control pilot runs](docs/traffic-control-pilot.md).
+
 The control plane binds to `127.0.0.1`. Operational state, logs, evidence,
 managed worktrees, policies, and the SQLite database live outside registered
 repositories under `$AGENTFLOW_HOME` (default `~/.agentflow`).
@@ -171,6 +179,7 @@ npm run smoke:install -- ./release/agentflow-0.3.0.tgz
 - [Installation and operations](docs/INSTALLATION.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Security model](docs/SECURITY.md)
+- [Traffic Control pilot run contract](docs/traffic-control-pilot.md)
 - [Implementation assumptions](docs/ASSUMPTIONS.md)
 - [Architecture decisions](docs/architecture/)
 - [Repository examples](examples/README.md)
@@ -195,3 +204,8 @@ Project-level orchestration is advisory: it may help shape an objective or
 propose work, but only a reviewed backlog, immutable plan, explicit build start,
 and the AgentFlow coordinator can dispatch or integrate tasks. See
 [ADR-0013](docs/architecture/ADR-0013-coordination-and-execution-authority.md).
+
+Pilot decisions, when present, are bound execution evidence in the same build.
+They cannot adopt a backlog item, change the approved objective or task graph,
+authorize provider effects, or accept the delivered implementation. A requested
+scope change stops bounded execution for the governing authority's decision.
