@@ -8,6 +8,7 @@ export const GOVERNED_HANDOFF_VERSION = "1.0.0" as const;
 export const GOVERNED_HANDOFF_KIND = "design-intelligence/governed-task-handoff" as const;
 export const BUILD_RECEIPT_KIND = "agentflow/build-receipt" as const;
 export const HANDOFF_MARKER = "agentflow:design-intelligence-handoff";
+const PROGRAM_ID_PATTERN = /^program_[a-z0-9][a-z0-9._-]{7,127}$/;
 
 const ProducedArtifact = z.object({
   name: z.string().min(1),
@@ -39,6 +40,7 @@ export const GovernedTaskHandoffSchema = z.object({
   schemaVersion: z.literal(GOVERNED_HANDOFF_VERSION),
   kind: z.literal(GOVERNED_HANDOFF_KIND),
   handoffId: z.string().min(1),
+  programId: z.string().regex(PROGRAM_ID_PATTERN).optional(),
   createdAt: z.iso.datetime(),
   repository: z.object({
     baseCommit: z.string().regex(/^[0-9a-f]{40}$/),
@@ -76,6 +78,7 @@ export type GovernedTaskHandoff = z.infer<typeof GovernedTaskHandoffSchema>;
 
 export interface GovernedHandoffBinding {
   id: string;
+  programId?: string;
   sha256: string;
   path: string;
   baseCommit: string;
@@ -123,6 +126,7 @@ export async function verifyHandoffAuthoritySources(repositoryRoot: string, hand
 export function handoffBinding(handoff: GovernedTaskHandoff, path: string): GovernedHandoffBinding {
   return {
     id: handoff.handoffId,
+    ...(handoff.programId === undefined ? {} : { programId: handoff.programId }),
     sha256: canonicalJsonSha256(handoff),
     path,
     baseCommit: handoff.repository.baseCommit,
@@ -167,10 +171,19 @@ export function parseHandoffBinding(markdown: string): GovernedHandoffBinding | 
   const escaped = HANDOFF_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = markdown.match(new RegExp(`<!--\\s*${escaped}\\s+(\\{[^\\n]+\\})\\s*-->`));
   if (match?.[1] === undefined) return undefined;
-  return z.object({
+  const binding = z.object({
     id: z.string().min(1), sha256: z.string().regex(/^[0-9a-f]{64}$/), path: z.string().min(1),
+    programId: z.string().regex(PROGRAM_ID_PATTERN).optional(),
     baseCommit: z.string().regex(/^[0-9a-f]{40}$/), proofBoundary: z.string().min(1),
   }).strict().parse(JSON.parse(match[1]));
+  return {
+    id: binding.id,
+    ...(binding.programId === undefined ? {} : { programId: binding.programId }),
+    sha256: binding.sha256,
+    path: binding.path,
+    baseCommit: binding.baseCommit,
+    proofBoundary: binding.proofBoundary,
+  };
 }
 
 export function backlogHandoffErrors(tasks: readonly PlannedTask[], handoff: GovernedTaskHandoff): string[] {

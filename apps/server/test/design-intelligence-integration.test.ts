@@ -12,6 +12,7 @@ import { planBacklogMarkdown } from "../src/planning/planner.js";
 
 const handoff = {
   schemaVersion: "1.0.0", kind: "design-intelligence/governed-task-handoff", handoffId: "DI-AF-001", createdAt: "2026-09-12T12:00:00Z",
+  programId: "program_01measurementsuccess",
   repository: { baseCommit: "a".repeat(40) }, objective: "Deliver a verified contract-first integration.",
   authority: { status: "APPROVED", approvedBy: "owner", approvedAt: "2026-09-12T12:01:00Z", sources: [{ path: "AGENTS.md", sha256: "b".repeat(64) }] },
   tasks: [{ id: "AF-001", title: "Implement", description: "Implement the approved task.", estimateHours: 1, dependsOn: [], owns: ["src/"], acceptanceCriteria: ["Tests pass"], validate: ["npm test"], produces: [], consumes: [] }],
@@ -24,7 +25,7 @@ describe("Design Intelligence integration", () => {
   it("renders a digest-bound AgentFlow backlog", () => {
     const parsed = GovernedTaskHandoffSchema.parse(handoff);
     const backlog = renderBacklog(parsed, "artifacts/handoff.json");
-    expect(parseHandoffBinding(backlog)).toEqual(expect.objectContaining({ id: handoff.handoffId, sha256: canonicalJsonSha256(handoff) }));
+    expect(parseHandoffBinding(backlog)).toEqual(expect.objectContaining({ id: handoff.handoffId, programId: handoff.programId, sha256: canonicalJsonSha256(handoff) }));
     expect(backlog).toContain("## AF-001: Implement");
     const plan = planBacklogMarkdown(backlog);
     expect(plan.errors).toEqual([]);
@@ -74,12 +75,12 @@ describe("Design Intelligence integration", () => {
         await execFileAsync("git", ["-C", root, "commit", "-m", "review execution packet"]);
         const planned = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId, backlogPath: "BACKLOG.design-intelligence.proposed.md" } });
         expect(planned.statusCode).toBe(201);
-        expect(planned.json()).toMatchObject({ governedHandoff: { id: approved.handoffId, sha256: canonicalJsonSha256(approved) } });
+        expect(planned.json()).toMatchObject({ governedHandoff: { id: approved.handoffId, programId: approved.programId, sha256: canonicalJsonSha256(approved) } });
         const created = await app.inject({ method: "POST", url: "/api/builds", payload: { planId: planned.json<{ id: string }>().id } });
         expect(created.statusCode).toBe(201);
         const receipt = await app.inject({ method: "GET", url: `/api/builds/${created.json<{ id: string }>().id}/design-intelligence-receipt` });
         expect(receipt.statusCode).toBe(200);
-        expect(receipt.json()).toMatchObject({ kind: "agentflow/build-receipt", handoff: { id: approved.handoffId, sha256: canonicalJsonSha256(approved) }, build: { status: "ready" } });
+        expect(receipt.json()).toMatchObject({ kind: "agentflow/build-receipt", programId: approved.programId, handoff: { id: approved.handoffId, sha256: canonicalJsonSha256(approved) }, build: { status: "ready" } });
       } finally {
         await app.close();
       }

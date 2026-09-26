@@ -122,6 +122,7 @@ export interface PlanResult {
   };
   governedHandoff?: {
     id: string;
+    programId?: string;
     sha256: string;
     path: string;
     baseCommit: string;

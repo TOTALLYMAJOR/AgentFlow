@@ -45,12 +45,13 @@ export function registerDesignIntelligenceRoutes(app: FastifyInstance, context: 
   app.get("/api/builds/:id/design-intelligence-receipt", async (request) => {
     const { id } = BuildParameters.parse(request.params);
     const build = context.store.builds.getById(id);
-    const binding = z.object({ id: z.string(), sha256: z.string(), proofBoundary: z.string() }).loose().safeParse(build.normalizedPlan.governedHandoff);
+    const binding = z.object({ id: z.string(), programId: z.string().optional(), sha256: z.string(), proofBoundary: z.string() }).loose().safeParse(build.normalizedPlan.governedHandoff);
     if (!binding.success) throw new AgentFlowError("GOVERNED_HANDOFF_MISSING", `Build ${id} is not bound to a Design Intelligence handoff`, 409);
     const tasks = context.store.tasks.listForBuild(id);
     return {
       schemaVersion: GOVERNED_HANDOFF_VERSION,
       kind: BUILD_RECEIPT_KIND,
+      ...(binding.data.programId === undefined ? {} : { programId: binding.data.programId }),
       handoff: { id: binding.data.id, sha256: binding.data.sha256 },
       build: { id: build.id, status: build.status, baseCommit: build.baseCommit, integrationCommit: tasks.find((task) => task.integrationCommit !== null)?.integrationCommit ?? null },
       tasks: tasks.map((task) => ({
