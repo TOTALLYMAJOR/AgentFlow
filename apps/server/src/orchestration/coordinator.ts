@@ -208,6 +208,15 @@ export class BuildCoordinator {
     if (task.buildId !== buildId) {
       throw new Error(`Task ${taskId} does not belong to build ${buildId}`);
     }
+    const governedBuild = this.store.builds.getById(buildId);
+    const governed = governedBuild.planId === null ? undefined : this.store.plans.getById(governedBuild.planId).normalizedPlan.governedHandoff;
+    if (governed !== undefined) {
+      throw new AgentFlowError(
+        "GOVERNED_RECOVERY_NOT_AUTHORIZED",
+        `Governed build ${buildId} does not authorize retry`,
+        409,
+      );
+    }
     if (
       this.taskOperations.has(taskId) ||
       this.taskAbortControllers.has(taskId) ||
@@ -484,6 +493,16 @@ export class BuildCoordinator {
     taskId: string,
     failureCode: string,
   ): void {
+    const build = this.store.builds.getById(buildId);
+    if (build.planId !== null && this.store.plans.getById(build.planId).normalizedPlan.governedHandoff !== undefined) {
+      this.store.events.append({
+        buildId,
+        taskId,
+        type: "task.retry_not_scheduled",
+        payload: { failureCode, reason: "governed handoff does not authorize retry" },
+      });
+      return;
+    }
     const task = this.store.tasks.getById(taskId);
     const decision = decideRetry(task.attempt, failureCode, {
       maximumAttempts: Math.min(

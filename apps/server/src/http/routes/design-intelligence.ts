@@ -3,12 +3,12 @@ import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
+  BUILD_RECEIPT_VERSION,
   BUILD_RECEIPT_KIND,
-  GOVERNED_HANDOFF_VERSION,
   handoffBinding,
   loadGovernedTaskHandoff,
   renderBacklog,
-  verifyHandoffAuthoritySources,
+  verifyGovernedHandoffForExecution,
 } from "../../integration/design-intelligence.js";
 import { nowIso } from "../../util/ids.js";
 import type { AgentFlowContext } from "../context.js";
@@ -22,38 +22,33 @@ export function registerDesignIntelligenceRoutes(app: FastifyInstance, context: 
   app.post("/api/design-intelligence/handoffs/import", async (request) => {
     const input = ImportBody.parse(request.body);
     const repository = await context.repositoryService.get(input.repositoryId);
-    const status = await runGit(repository.localPath, ["status", "--porcelain", "--untracked-files=all"]);
-    if (status.stdout.trim().length > 0) throw new AgentFlowError("REPOSITORY_NOT_CLEAN", "Handoff import requires a clean committed checkout", 409, status.stdout.trim().split("\n"));
     const handoffAbsolute = await insideExisting(repository.localPath, input.handoffPath);
     const backlogAbsolute = inside(repository.localPath, input.backlogPath);
     const handoff = await loadGovernedTaskHandoff(handoffAbsolute);
-    const authorityErrors = await verifyHandoffAuthoritySources(repository.localPath, handoff);
-    if (authorityErrors.length > 0) throw new AgentFlowError("GOVERNED_AUTHORITY_DRIFT", "The governed handoff authority sources are stale or invalid", 409, authorityErrors);
+    const verification = await verifyGovernedHandoffForExecution(repository.localPath, handoff, [input.handoffPath]);
+    if (verification.errors.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_NOT_EXECUTABLE", "The governed handoff is not executable at the current repository snapshot", 409, verification.errors);
     await runGit(repository.localPath, ["ls-files", "--error-unmatch", "--", input.handoffPath]).catch(() => {
       throw new AgentFlowError("GOVERNED_HANDOFF_UNCOMMITTED", "The approved handoff must be committed before import", 409);
     });
-    await runGit(repository.localPath, ["merge-base", "--is-ancestor", handoff.repository.baseCommit, "HEAD"]).catch(() => {
-      throw new AgentFlowError("GOVERNED_BASE_MISMATCH", "The governed handoff base commit is not an ancestor of HEAD", 409);
-    });
-    await writeFile(backlogAbsolute, renderBacklog(handoff, input.handoffPath), { encoding: "utf8", flag: "wx" }).catch((error: unknown) => {
+    await writeFile(backlogAbsolute, renderBacklog(handoff, input.handoffPath, input.backlogPath), { encoding: "utf8", flag: "wx" }).catch((error: unknown) => {
       if (errorCode(error) === "EEXIST") throw new AgentFlowError("BACKLOG_ALREADY_EXISTS", `${input.backlogPath} already exists; refusing to overwrite reviewed work`, 409);
       throw error;
     });
-    return { status: "PROPOSED", repositoryId: repository.id, backlogPath: input.backlogPath, handoff: handoffBinding(handoff, input.handoffPath), nextAction: "Review and commit the handoff and backlog before creating a plan." };
+    return { status: "PROPOSED", repositoryId: repository.id, backlogPath: input.backlogPath, handoff: handoffBinding(handoff, input.handoffPath, [input.handoffPath, input.backlogPath]), nextAction: "Review and commit the handoff and backlog before creating a plan." };
   });
 
   app.get("/api/builds/:id/design-intelligence-receipt", async (request) => {
     const { id } = BuildParameters.parse(request.params);
     const build = context.store.builds.getById(id);
-    const binding = z.object({ id: z.string(), programId: z.string().optional(), sha256: z.string(), proofBoundary: z.string() }).loose().safeParse(build.normalizedPlan.governedHandoff);
+    const binding = z.object({ id: z.string(), programId: z.string().optional(), sha256: z.string(), governedBaseCommit: z.string(), proofBoundary: z.string() }).loose().safeParse(build.normalizedPlan.governedHandoff);
     if (!binding.success) throw new AgentFlowError("GOVERNED_HANDOFF_MISSING", `Build ${id} is not bound to a Design Intelligence handoff`, 409);
     const tasks = context.store.tasks.listForBuild(id);
     return {
-      schemaVersion: GOVERNED_HANDOFF_VERSION,
+      schemaVersion: BUILD_RECEIPT_VERSION,
       kind: BUILD_RECEIPT_KIND,
       ...(binding.data.programId === undefined ? {} : { programId: binding.data.programId }),
       handoff: { id: binding.data.id, sha256: binding.data.sha256 },
-      build: { id: build.id, status: build.status, baseCommit: build.baseCommit, integrationCommit: tasks.find((task) => task.integrationCommit !== null)?.integrationCommit ?? null },
+      build: { id: build.id, status: build.status, baseCommit: build.baseCommit, governedBaseCommit: binding.data.governedBaseCommit, integrationCommit: tasks.find((task) => task.integrationCommit !== null)?.integrationCommit ?? null },
       tasks: tasks.map((task) => ({
         id: task.backlogTaskId, status: task.state, resultCommit: task.resultCommit, integrationCommit: task.integrationCommit,
         changedFiles: context.store.tasks.listAttempts(task.id).flatMap((attempt) => context.store.tasks.listChangedFiles(task.id, attempt.attempt).map((file) => file.path)),
