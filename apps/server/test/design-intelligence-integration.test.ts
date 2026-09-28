@@ -185,6 +185,7 @@ describe("Design Intelligence integration", () => {
         const receipt = await app.inject({ method: "GET", url: `/api/builds/${created.json<{ id: string }>().id}/design-intelligence-receipt` });
         expect(receipt.statusCode).toBe(200);
         expect(receipt.json()).toMatchObject({ schemaVersion: "1.1.0", kind: "agentflow/build-receipt", programId: approved.programId, handoff: { id: approved.handoffId, sha256: canonicalJsonSha256(approved) }, build: { status: "ready", governedBaseCommit: baseCommit } });
+        expect(receipt.json<{ evidence: { events: Array<Record<string, unknown>> } }>().evidence.events.every((event) => Object.keys(event).every((key) => ["type", "payload", "sha256"].includes(key)))).toBe(true);
       } finally {
         await app.close();
       }
