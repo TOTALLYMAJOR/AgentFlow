@@ -327,7 +327,7 @@ function snapshotErrors(handoff: GovernedTaskHandoff): string[] {
     worktreeState: handoff.repository.worktreeState,
     authorityStateSha256: handoff.authority.stateSha256,
     governanceReportSha256: handoff.authority.governanceReportSha256,
-    sources: [...handoff.authority.sources].sort((left, right) => left.path.localeCompare(right.path)),
+    sources: [...handoff.authority.sources].sort((left, right) => compareCanonicalStrings(left.path, right.path)),
   };
   return canonicalJsonSha256(payload) === handoff.repository.snapshotSha256 ? [] : ["repository snapshot digest does not match the governed authority snapshot"];
 }
@@ -391,10 +391,23 @@ function normalizeOwnershipPath(value: string): string {
   return normalized.length > 1 ? normalized.replace(/\/+$/, "") : normalized;
 }
 
+function compareCanonicalStrings(left: string, right: string): number {
+  const leftCodePoints = Array.from(left, (character) => character.codePointAt(0) ?? 0);
+  const rightCodePoints = Array.from(right, (character) => character.codePointAt(0) ?? 0);
+  const sharedLength = Math.min(leftCodePoints.length, rightCodePoints.length);
+
+  for (let index = 0; index < sharedLength; index += 1) {
+    const difference = (leftCodePoints[index] ?? 0) - (rightCodePoints[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+
+  return leftCodePoints.length - rightCodePoints.length;
+}
+
 function sortJson(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortJson);
   if (value !== null && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, sortJson(item)]));
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([left], [right]) => compareCanonicalStrings(left, right)).map(([key, item]) => [key, sortJson(item)]));
   }
   return value;
 }

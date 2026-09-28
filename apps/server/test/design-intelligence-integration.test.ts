@@ -74,6 +74,14 @@ const legacyHandoff = {
 const execFileAsync = promisify(execFile);
 
 describe("Design Intelligence integration", () => {
+  it("matches Proofloom canonical JSON ordering for mixed-case path keys", () => {
+    expect(canonicalJsonSha256({
+      "AGENTS.md": 2,
+      "adapters/a": 3,
+      ".dev/a": 1,
+    })).toBe("8438ea312d4aae72209a83ad1179647a8fc7b1524e4043d957db0260953793de");
+  });
+
   it("rejects handoff v1 instead of silently falling back", () => expect(() => GovernedTaskHandoffSchema.parse(legacyHandoff)).toThrow());
   it("rejects proposed authority", () => expect(() => GovernedTaskHandoffSchema.parse({ ...handoff, authority: { ...handoff.authority, status: "PROPOSED" } })).toThrow());
   it("rejects approved authority with an unverified receipt", () => expect(() => GovernedTaskHandoffSchema.parse({ ...handoff, authority: { ...handoff.authority, approvalReceipt: { ...handoff.authority.approvalReceipt, receiptId: `HAR-${"A".repeat(20)}` } } })).toThrow());
