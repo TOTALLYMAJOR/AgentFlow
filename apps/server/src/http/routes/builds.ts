@@ -15,6 +15,7 @@ import {
   runGit,
 } from "../../repositories/index.js";
 import { GitCommandRunner, GitWorktreeManager, isPathInside } from "../../git/index.js";
+import { canonicalJsonSha256, loadGovernedTaskHandoff, verifyGovernedHandoffForExecution } from "../../integration/design-intelligence.js";
 import { createId } from "../../util/ids.js";
 import { AgentFlowError } from "../errors.js";
 import type { AgentFlowContext } from "../context.js";
@@ -367,6 +368,17 @@ export async function createBuildForPlan(
   }
   const repositoryConfig = AgentFlowRepositoryConfigSchema.parse(plan.repositoryConfig);
   const repository = await context.repositoryService.get(plan.repositoryId);
+  const governed = plan.normalizedPlan.governedHandoff;
+  if (governed !== undefined) {
+    const canonicalRoot = await realpath(repository.localPath);
+    const handoffPath = await realpath(path.resolve(canonicalRoot, governed.path));
+    if (!isPathInside(canonicalRoot, handoffPath)) throw new AgentFlowError("GOVERNED_HANDOFF_PATH_INVALID", "The governed handoff path escapes the registered repository", 409);
+    const handoff = await loadGovernedTaskHandoff(handoffPath);
+    if (handoff.handoffId !== governed.id || canonicalJsonSha256(handoff) !== governed.sha256) throw new AgentFlowError("GOVERNED_HANDOFF_DRIFT", "The immutable plan is not bound to the current governed handoff", 409);
+    const verification = await verifyGovernedHandoffForExecution(repository.localPath, handoff, governed.carrierPaths);
+    if (verification.errors.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_NOT_EXECUTABLE", "The governed handoff is not executable at the current repository snapshot", 409, verification.errors);
+    if (governed.executionBaseCommit === undefined || verification.currentHead !== governed.executionBaseCommit) throw new AgentFlowError("GOVERNED_EXECUTION_SNAPSHOT_STALE", "The immutable plan no longer matches the exact execution snapshot", 409, { expected: governed.executionBaseCommit, actual: verification.currentHead });
+  }
   const baseCommit = (await runGit(repository.localPath, ["rev-parse", `${repository.baseBranch}^{commit}`])).stdout.trim();
   const buildId = createId("build");
   const taskIds = new Map(plan.normalizedPlan.tasks.map((task) => [task.id, createId(`task_${safeId(task.id)}`)]));

@@ -124,7 +124,9 @@ export interface PlanResult {
     id: string;
     sha256: string;
     path: string;
-    baseCommit: string;
+    governedBaseCommit: string;
+    executionBaseCommit?: string;
+    carrierPaths: string[];
     proofBoundary: string;
   };
   createdAt: string;

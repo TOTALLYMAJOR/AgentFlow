@@ -22,7 +22,7 @@ import {
   validateRepositoryAgainstPolicy,
   validateTaskOwnershipAgainstPolicy,
 } from "../../governance/organization-policy.js";
-import { backlogHandoffErrors, canonicalJsonSha256, handoffBinding, loadGovernedTaskHandoff, parseHandoffBinding, verifyHandoffAuthoritySources, type GovernedTaskHandoff } from "../../integration/design-intelligence.js";
+import { backlogHandoffErrors, canonicalJsonSha256, handoffBinding, loadGovernedTaskHandoff, parseHandoffBinding, verifyGovernedHandoffForExecution, type GovernedTaskHandoff } from "../../integration/design-intelligence.js";
 
 const CreatePlanBody = z.object({
   repositoryId: z.string().min(1),
@@ -205,16 +205,15 @@ export function registerPlanRoutes(
     if (declaredBinding !== undefined) {
       const handoffPath = await resolveRepositoryFile(repository.localPath, declaredBinding.path);
       const handoff = await loadGovernedTaskHandoff(handoffPath);
-      const authorityErrors = await verifyHandoffAuthoritySources(repository.localPath, handoff);
-      if (authorityErrors.length > 0) throw new AgentFlowError("GOVERNED_AUTHORITY_DRIFT", "The governed handoff authority sources are stale or invalid", 409, authorityErrors);
+      const carrierPaths = [declaredBinding.path, relativeBacklogPath];
+      if (JSON.stringify(declaredBinding.carrierPaths) !== JSON.stringify(carrierPaths)) throw new AgentFlowError("GOVERNED_HANDOFF_CARRIER_DRIFT", "The committed backlog carrier paths do not match the requested handoff and backlog", 409);
+      const verification = await verifyGovernedHandoffForExecution(repository.localPath, handoff, carrierPaths);
+      if (verification.errors.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_NOT_EXECUTABLE", "The governed handoff is not executable at the current repository snapshot", 409, verification.errors);
       governedTaskHandoff = handoff;
-      governedHandoff = handoffBinding(handoff, declaredBinding.path);
+      governedHandoff = handoffBinding(handoff, declaredBinding.path, carrierPaths, verification.currentHead);
       if (governedHandoff.id !== declaredBinding.id || canonicalJsonSha256(handoff) !== declaredBinding.sha256) {
         throw new AgentFlowError("GOVERNED_HANDOFF_DRIFT", "The committed backlog is not bound to the current governed handoff", 409);
       }
-      await new GitCommandRunner().run(repository.localPath, ["merge-base", "--is-ancestor", handoff.repository.baseCommit, "HEAD"]).catch(() => {
-        throw new AgentFlowError("GOVERNED_BASE_MISMATCH", "The governed handoff base commit is not an ancestor of HEAD", 409);
-      });
     }
     const planning = planBacklogMarkdown(markdown, {
       defaultValidation: config.validation.task_default,
