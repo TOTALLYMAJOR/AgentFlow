@@ -22,6 +22,6 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
-      - run: npm test -- --maxWorkers=2
-      - run: npm run test:integration -- --maxWorkers=2
+      - run: npm test -- --maxWorkers=1 --no-file-parallelism
+      - run: npm run test:integration -- --maxWorkers=1 --no-file-parallelism
       - run: npm run build
