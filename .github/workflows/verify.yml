@@ -20,4 +20,8 @@ jobs:
           node-version: 22.12.0
           cache: npm
       - run: npm ci
-      - run: npm run verify
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test -- --maxWorkers=2
+      - run: npm run test:integration -- --maxWorkers=2
+      - run: npm run build
