@@ -1,27 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { GovernedTaskHandoffSchema, canonicalJsonSha256 } from "../src/integration/design-intelligence.js";
+import { canonicalJsonSha256 } from "../src/integration/design-intelligence.js";
 import { bindTrafficControlContract, projectAgentFlowObservation } from "../src/integration/traffic-control.js";
+import { approvedGovernedHandoff } from "./helpers/governed-handoff.js";
 
-const handoff = GovernedTaskHandoffSchema.parse({
-  schemaVersion: "2.0.0",
-  kind: "design-intelligence/governed-task-handoff",
+const handoff = approvedGovernedHandoff({
   handoffId: "DI-TCP-001",
-  createdAt: "2026-09-17T12:00:00Z",
-  repository: { baseCommit: "a".repeat(40), snapshotSha256: "b".repeat(64), worktreeState: "clean", remote: "repo-1" },
+  baseCommit: "a".repeat(40),
+  remote: "repo-1",
   objective: "Exercise a native governed AgentFlow observation.",
-  authority: {
-    status: "APPROVED",
-    approvedBy: "owner",
-    approvedAt: "2026-09-17T12:01:00Z",
-    stateSha256: "c".repeat(64),
-    governanceReportSha256: "d".repeat(64),
-    sources: [{ path: "AGENTS.md", sha256: "e".repeat(64) }],
-  },
   tasks: [
     { id: "AF-001", title: "First", description: "First governed task.", estimateHours: 1, dependsOn: [], owns: ["src/first"], acceptanceCriteria: ["First passes"], validate: ["npm test"], produces: [], consumes: [] },
     { id: "AF-002", title: "Second", description: "Second governed task.", estimateHours: 1, dependsOn: ["AF-001"], owns: ["src/second"], acceptanceCriteria: ["Second passes"], validate: ["npm test"], produces: [], consumes: [] },
   ],
-  proof: { requiredEvidence: ["focused-tests"], claimBoundary: "Local integration proof only." },
+  requiredEvidence: ["focused-tests"], claimBoundary: "Local integration proof only.",
 });
 
 const authority = {

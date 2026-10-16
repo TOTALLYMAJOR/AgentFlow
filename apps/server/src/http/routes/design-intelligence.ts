@@ -68,7 +68,7 @@ export function registerDesignIntelligenceRoutes(app: FastifyInstance, context: 
     const evidenceIds = artifacts.map((artifact) => artifact.id);
     const authoritySource = handoff.authority.sources[0];
     const integrationCommit = tasks.find((task) => task.integrationCommit !== null)?.integrationCommit ?? null;
-    const events = authoritySource === undefined || evidenceIds.length === 0 || integrationCommit === null
+    const transitionEvents = authoritySource === undefined || evidenceIds.length === 0 || integrationCommit === null
       ? []
       : receiptTransitions({
           handoffSha256: binding.data.sha256,
@@ -86,6 +86,15 @@ export function registerDesignIntelligenceRoutes(app: FastifyInstance, context: 
           authoritySource,
           evidenceIds,
         });
+    const governorEvents = context.store.events.listForBuild(id, { limit: 10_000 })
+      .filter((event) => event.type === "governor.decision")
+      .map((event) => {
+        const { authorityObservation, ...record } = event.payload;
+        return {
+          type: "governor.decision" as const,
+          payload: { record, authorityObservation },
+        };
+      });
     return {
       schemaVersion: BUILD_RECEIPT_VERSION,
       kind: BUILD_RECEIPT_KIND,
@@ -102,7 +111,7 @@ export function registerDesignIntelligenceRoutes(app: FastifyInstance, context: 
           evidenceId: artifacts.find((artifact) => artifact.class === `task:${task.backlogTaskId}:validation-passed`)?.id ?? evidenceIds[0],
         })),
       })),
-      evidence: { events, artifacts, approvals: [] },
+      evidence: { events: [...transitionEvents, ...governorEvents], artifacts, approvals: [] },
       proofBoundary: binding.data.proofBoundary,
       generatedAt,
     };

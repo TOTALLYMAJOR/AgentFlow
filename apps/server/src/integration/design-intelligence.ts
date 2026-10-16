@@ -125,6 +125,7 @@ const GovernedTaskHandoffBaseSchema = z.object({
   kind: z.literal(GOVERNED_HANDOFF_KIND),
   handoffId: z.string().min(1),
   createdAt: z.iso.datetime(),
+  programId: z.string().regex(PROGRAM_ID_PATTERN).optional(),
   repository: z.object({
     baseCommit: z.string().regex(/^[0-9a-f]{40}$/),
     snapshotSha256: z.string().regex(SHA256_PATTERN),

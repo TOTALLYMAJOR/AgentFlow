@@ -1,15 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { GovernedTaskHandoffSchema } from "../src/integration/design-intelligence.js";
 import { GovernorControlService } from "../src/governor/control-service.js";
 import { applyGovernorDecision } from "../src/governor/runtime-adapter.js";
 import { bindTrafficControlContract, type TrafficControlObservation } from "../src/integration/traffic-control.js";
+import { approvedGovernedHandoff } from "./helpers/governed-handoff.js";
 
-const governedHandoff = GovernedTaskHandoffSchema.parse({
-  schemaVersion: "2.0.0", kind: "design-intelligence/governed-task-handoff", handoffId: "DI-1", createdAt: "2026-09-17T12:00:00Z",
-  repository: { baseCommit: "b".repeat(40), snapshotSha256: "c".repeat(64), worktreeState: "clean" }, objective: "Exercise deterministic Governor controls.",
-  authority: { status: "APPROVED", approvedBy: "owner", approvedAt: "2026-09-17T12:01:00Z", stateSha256: "d".repeat(64), governanceReportSha256: "e".repeat(64), sources: [{ path: "AGENTS.md", sha256: "f".repeat(64) }] },
+const governedHandoff = approvedGovernedHandoff({
+  handoffId: "DI-1", baseCommit: "b".repeat(40), objective: "Exercise deterministic Governor controls.",
   tasks: [{ id: "AF-001", title: "Task", description: "Governed task.", estimateHours: 1, dependsOn: [], owns: ["src/"], acceptanceCriteria: ["Passes"], validate: ["npm test"], produces: [], consumes: [] }],
-  proof: { requiredEvidence: ["focused-tests"], claimBoundary: "Local only." },
+  requiredEvidence: ["focused-tests"], claimBoundary: "Local only.",
 });
 const contract = bindTrafficControlContract(governedHandoff);
 const authority = {

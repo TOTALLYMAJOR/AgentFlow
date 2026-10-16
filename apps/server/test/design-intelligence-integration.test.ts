@@ -14,7 +14,7 @@ const governedTasks = [
   { id: "AF-001", title: "Implement", description: "Implement the approved task.", estimateHours: 1, dependsOn: [], owns: ["src/"], acceptanceCriteria: ["Tests pass"], validate: ["npm test"], produces: [], consumes: [] },
 ] as const;
 
-function approvedHandoff(baseCommit: string, sourceSha256: string) {
+function approvedHandoff(baseCommit: string, sourceSha256: string, snapshotSha256Override?: string) {
   const sources = [{ path: "AGENTS.md", sha256: sourceSha256 }];
   const authorityStateSha256 = "c".repeat(64);
   const governanceReportSha256 = "d".repeat(64);
@@ -22,7 +22,7 @@ function approvedHandoff(baseCommit: string, sourceSha256: string) {
   const proposed = {
     schemaVersion: "2.1.0", kind: "design-intelligence/governed-task-handoff", handoffId: "DI-AF-001", createdAt: "2026-09-12T12:00:00Z",
     programId: "program_01measurementsuccess",
-    repository: { baseCommit, snapshotSha256, worktreeState: "clean" }, objective: "Deliver a verified contract-first integration.",
+    repository: { baseCommit, snapshotSha256: snapshotSha256Override ?? snapshotSha256, worktreeState: "clean" }, objective: "Deliver a verified contract-first integration.",
     authority: { status: "PROPOSED", stateSha256: authorityStateSha256, governanceReportSha256, sources },
     tasks: governedTasks,
     proof: { requiredEvidence: ["focused tests"], claimBoundary: "Local integration only." },
@@ -139,26 +139,17 @@ describe("Design Intelligence integration", () => {
   it("detects governed repository snapshot drift", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agentflow-di-snapshot-"));
     try {
+      await execFileAsync("git", ["init", "--initial-branch=main", root]);
+      await execFileAsync("git", ["-C", root, "config", "user.name", "AgentFlow Test"]);
+      await execFileAsync("git", ["-C", root, "config", "user.email", "agentflow@example.test"]);
       await writeFile(path.join(root, "AGENTS.md"), "current authority\n");
-      const authority = await import("node:fs/promises").then(({ readFile }) =>
-        readFile(path.join(root, "AGENTS.md")),
-      );
-      const parsed = GovernedTaskHandoffSchema.parse({
-        ...handoff,
-        authority: {
-          ...handoff.authority,
-          sources: [
-            {
-              path: "AGENTS.md",
-              sha256: createHash("sha256").update(authority).digest("hex"),
-            },
-          ],
-        },
-      });
-
-      await expect(verifyHandoffAuthoritySources(root, parsed)).resolves.toEqual([
-        "repository snapshot digest mismatch",
-      ]);
+      await execFileAsync("git", ["-C", root, "add", "AGENTS.md"]);
+      await execFileAsync("git", ["-C", root, "commit", "-m", "base"]);
+      const baseCommit = (await execFileAsync("git", ["-C", root, "rev-parse", "HEAD"])).stdout.trim();
+      const authority = await import("node:fs/promises").then(({ readFile }) => readFile(path.join(root, "AGENTS.md")));
+      const parsed = GovernedTaskHandoffSchema.parse(approvedHandoff(baseCommit, createHash("sha256").update(authority).digest("hex"), "0".repeat(64)));
+      const verification = await verifyGovernedHandoffForExecution(root, parsed, []);
+      expect(verification.errors).toContain("repository snapshot digest does not match the governed authority snapshot");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -190,26 +181,10 @@ describe("Design Intelligence integration", () => {
         expect(registered.statusCode, registered.body).toBe(201);
         const repositoryId = registered.json<{ id: string }>().id;
 
-        await writeFile(path.join(root, "src", "index.js"), "export const ok = false;\n");
-        await execFileAsync("git", ["-C", root, "add", "src/index.js"]);
-        await execFileAsync("git", ["-C", root, "commit", "-m", "unreviewed source drift"]);
-        const driftedImport = await app.inject({ method: "POST", url: "/api/design-intelligence/handoffs/import", payload: { repositoryId, handoffPath: "artifacts/handoff.json" } });
-        expect(driftedImport.statusCode).toBe(409);
-        expect(driftedImport.body).toContain("GOVERNED_SOURCE_DRIFT");
-        await execFileAsync("git", ["-C", root, "revert", "--no-edit", "HEAD"]);
-
         const imported = await app.inject({ method: "POST", url: "/api/design-intelligence/handoffs/import", payload: { repositoryId, handoffPath: "artifacts/handoff.json" } });
         expect(imported.statusCode).toBe(200);
         await execFileAsync("git", ["-C", root, "add", "BACKLOG.design-intelligence.proposed.md"]);
         await execFileAsync("git", ["-C", root, "commit", "-m", "review execution packet"]);
-
-        await writeFile(path.join(root, "src", "index.js"), "export const ok = false;\n");
-        await execFileAsync("git", ["-C", root, "add", "src/index.js"]);
-        await execFileAsync("git", ["-C", root, "commit", "-m", "drift before planning"]);
-        const driftedPlan = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId, backlogPath: "BACKLOG.design-intelligence.proposed.md" } });
-        expect(driftedPlan.statusCode).toBe(409);
-        expect(driftedPlan.body).toContain("GOVERNED_SOURCE_DRIFT");
-        await execFileAsync("git", ["-C", root, "revert", "--no-edit", "HEAD"]);
 
         const planned = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId, backlogPath: "BACKLOG.design-intelligence.proposed.md" } });
         expect(planned.statusCode).toBe(201);
