@@ -58,6 +58,7 @@ import {
   DEFAULT_RETRYABLE_FAILURE_CODES,
 } from "./retry-policy.js";
 import type { OrganizationPolicy } from "../governance/organization-policy.js";
+import { evaluateGovernedBuild } from "../governor/build-control.js";
 
 interface ActiveWorker {
   buildId: string;
@@ -115,6 +116,49 @@ export class BuildCoordinator {
 
   setBuildTerminalHandler(handler: (buildId: string) => Promise<void>): void {
     this.buildTerminalHandler = handler;
+  }
+
+  private async governBuild(buildId: string): Promise<{ continue: boolean; delegateRetry: boolean } | undefined> {
+    try {
+      const evaluated = await evaluateGovernedBuild({
+        store: this.store,
+        repositoryService: this.repositoryService,
+        environment: this.environment,
+        organizationPolicy: this.organizationPolicy,
+      }, buildId);
+      if (evaluated === undefined) return undefined;
+      const action = evaluated.decision.action;
+      const allow = action === "CONTINUE";
+      const delegateRetry = action === "DELEGATE_RETRY";
+      let acknowledged = allow || delegateRetry;
+      if (!allow && !delegateRetry) {
+        const build = this.store.builds.getById(buildId);
+        if (["ready", "running", "interrupted"].includes(build.status)) {
+          this.pause(buildId);
+          acknowledged = true;
+        }
+      }
+      this.store.events.append({
+        buildId,
+        type: "governor.intervention_acknowledged",
+        payload: {
+          decisionRecordHash: evaluated.record.recordHash,
+          action,
+          acknowledged,
+          delegatedTo: delegateRetry ? "agentflow-existing-retry-policy" : null,
+        },
+      });
+      return { continue: allow, delegateRetry };
+    } catch (error) {
+      this.store.events.append({
+        buildId,
+        type: "governor.evaluation_failed",
+        payload: { message: errorMessage(error) },
+      });
+      const build = this.store.builds.getById(buildId);
+      if (["ready", "running", "interrupted"].includes(build.status)) this.pause(buildId);
+      return { continue: false, delegateRetry: false };
+    }
   }
 
   private notifyBuildTerminal(buildId: string): void {
@@ -207,6 +251,15 @@ export class BuildCoordinator {
     const task = this.store.tasks.getById(taskId);
     if (task.buildId !== buildId) {
       throw new Error(`Task ${taskId} does not belong to build ${buildId}`);
+    }
+    const governedBuild = this.store.builds.getById(buildId);
+    const governed = governedBuild.planId === null ? undefined : this.store.plans.getById(governedBuild.planId).normalizedPlan.governedHandoff;
+    if (governed !== undefined) {
+      throw new AgentFlowError(
+        "GOVERNED_RECOVERY_NOT_AUTHORIZED",
+        `Governed build ${buildId} does not authorize retry`,
+        409,
+      );
     }
     if (
       this.taskOperations.has(taskId) ||
@@ -484,6 +537,16 @@ export class BuildCoordinator {
     taskId: string,
     failureCode: string,
   ): void {
+    const build = this.store.builds.getById(buildId);
+    if (build.planId !== null && this.store.plans.getById(build.planId).normalizedPlan.governedHandoff !== undefined) {
+      this.store.events.append({
+        buildId,
+        taskId,
+        type: "task.retry_not_scheduled",
+        payload: { failureCode, reason: "governed handoff does not authorize retry" },
+      });
+      return;
+    }
     const task = this.store.tasks.getById(taskId);
     const decision = decideRetry(task.attempt, failureCode, {
       maximumAttempts: Math.min(
@@ -993,7 +1056,8 @@ export class BuildCoordinator {
             errorCode: failureCode,
             errorMessage: remoteOutcome.failureMessage ?? "Remote worker failed",
           });
-          this.scheduleAutomaticRetry(buildId, taskId, failureCode);
+          const governed = await this.governBuild(buildId);
+          if (governed === undefined || governed.delegateRetry) this.scheduleAutomaticRetry(buildId, taskId, failureCode);
           return;
         }
         await this.validateCommitAndIntegrate(buildId, taskId, true, signal);
@@ -1062,7 +1126,8 @@ export class BuildCoordinator {
             errorMessage: outcome.failureMessage ?? "Worker execution failed",
           });
         }
-        this.scheduleAutomaticRetry(buildId, taskId, failureCode);
+        const governed = await this.governBuild(buildId);
+        if (governed === undefined || governed.delegateRetry) this.scheduleAutomaticRetry(buildId, taskId, failureCode);
         return;
       }
       await this.validateCommitAndIntegrate(
@@ -1126,7 +1191,8 @@ export class BuildCoordinator {
             completedAt: new Date().toISOString(),
           });
         }
-        this.scheduleAutomaticRetry(buildId, taskId, failureCode);
+        const governed = await this.governBuild(buildId);
+        if (governed === undefined || governed.delegateRetry) this.scheduleAutomaticRetry(buildId, taskId, failureCode);
       }
     }
   }
@@ -1348,6 +1414,8 @@ export class BuildCoordinator {
         errorCode: summary.errorCode,
         errorMessage: summary.errorMessage,
       });
+      const governed = await this.governBuild(buildId);
+      if (governed?.delegateRetry) this.scheduleAutomaticRetry(buildId, taskId, summary.errorCode ?? "VALIDATION_FAILED");
       return;
     }
     if (
@@ -1461,6 +1529,8 @@ export class BuildCoordinator {
         });
       }
     }
+    const governed = await this.governBuild(buildId);
+    if (governed !== undefined && !governed.continue) return;
     await this.integrateValidatedTask(buildId, taskId, signal);
   }
 
