@@ -24,6 +24,7 @@ const InitiativesScreen = lazy(async () => ({
 
 export function App(): React.JSX.Element {
   const [screen, setScreen] = useState<ScreenId>("overview");
+  const [preferredBuildId, setPreferredBuildId] = useState<string | null>(null);
   const [goalDraft, setGoalDraft] = useState<{
     repositoryId: string;
     objective: string;
@@ -52,13 +53,18 @@ export function App(): React.JSX.Element {
               onNavigateRepositories={() => {
                 setScreen("repositories");
               }}
-              onBuildStarted={() => {
+              onBuildStarted={(buildId) => {
+                // Carry the exact receipt forward; choosing the first active build
+                // can open an unrelated repository when several builds are active.
+                setPreferredBuildId(buildId);
                 setScreen("build");
               }}
               initialDraft={goalDraft}
             />
           ) : null}
-          {screen === "build" ? <BuildScreen /> : null}
+          {screen === "build" ? (
+            <BuildScreen preferredBuildId={preferredBuildId} />
+          ) : null}
           {screen === "results" ? <ResultsScreen /> : null}
         </Suspense>
       </main>

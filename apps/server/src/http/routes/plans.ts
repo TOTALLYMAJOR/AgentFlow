@@ -22,6 +22,7 @@ import {
   validateRepositoryAgainstPolicy,
   validateTaskOwnershipAgainstPolicy,
 } from "../../governance/organization-policy.js";
+import { backlogHandoffErrors, canonicalJsonSha256, handoffBinding, loadGovernedTaskHandoff, parseHandoffBinding, verifyGovernedHandoffForExecution, type GovernedTaskHandoff } from "../../integration/design-intelligence.js";
 
 const CreatePlanBody = z.object({
   repositoryId: z.string().min(1),
@@ -198,6 +199,22 @@ export function registerPlanRoutes(
       relativeBacklogPath,
     );
     const markdown = await readFile(backlogPath, "utf8");
+    const declaredBinding = parseHandoffBinding(markdown);
+    let governedHandoff: ReturnType<typeof handoffBinding> | undefined;
+    let governedTaskHandoff: GovernedTaskHandoff | undefined;
+    if (declaredBinding !== undefined) {
+      const handoffPath = await resolveRepositoryFile(repository.localPath, declaredBinding.path);
+      const handoff = await loadGovernedTaskHandoff(handoffPath);
+      const carrierPaths = [declaredBinding.path, relativeBacklogPath];
+      if (JSON.stringify(declaredBinding.carrierPaths) !== JSON.stringify(carrierPaths)) throw new AgentFlowError("GOVERNED_HANDOFF_CARRIER_DRIFT", "The committed backlog carrier paths do not match the requested handoff and backlog", 409);
+      const verification = await verifyGovernedHandoffForExecution(repository.localPath, handoff, carrierPaths);
+      if (verification.errors.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_NOT_EXECUTABLE", "The governed handoff is not executable at the current repository snapshot", 409, verification.errors);
+      governedTaskHandoff = handoff;
+      governedHandoff = handoffBinding(handoff, declaredBinding.path, carrierPaths, verification.currentHead);
+      if (governedHandoff.id !== declaredBinding.id || canonicalJsonSha256(handoff) !== declaredBinding.sha256) {
+        throw new AgentFlowError("GOVERNED_HANDOFF_DRIFT", "The committed backlog is not bound to the current governed handoff", 409);
+      }
+    }
     const planning = planBacklogMarkdown(markdown, {
       defaultValidation: config.validation.task_default,
       workerMaximum: config.workers.maximum,
@@ -216,6 +233,10 @@ export function registerPlanRoutes(
         422,
         planning.errors,
       );
+    }
+    if (governedTaskHandoff !== undefined) {
+      const drift = backlogHandoffErrors(planning.plan.tasks, governedTaskHandoff);
+      if (drift.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_SCOPE_DRIFT", "The backlog scope differs from its governed handoff", 409, drift);
     }
     const ownershipPolicyErrors = validateTaskOwnershipAgainstPolicy(
       planning.plan.tasks,
@@ -253,6 +274,7 @@ export function registerPlanRoutes(
         appliedMultiplier: calibration.appliedMultiplier,
         confidence: calibration.confidence,
       },
+      ...(governedHandoff === undefined ? {} : { governedHandoff }),
       createdAt,
     };
     const stored = context.store.plans.create({

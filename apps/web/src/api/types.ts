@@ -100,6 +100,28 @@ export interface RepositorySummary {
   updatedAt: string;
 }
 
+export interface RepositoryTarget {
+  repositoryId: string;
+  name: string;
+  path: string;
+  baseBranch: string;
+  currentBranch: string | null;
+  head: string | null;
+  clean: boolean;
+  upstream: { ahead: number; behind: number } | null;
+  backlog: { path: string | null; present: boolean; tracked: boolean };
+  designIntelligence: {
+    configured: boolean;
+    status: "available" | "not_configured";
+  };
+  activeBuild: { id: string; status: string } | null;
+  eligible: boolean;
+  blockers: Array<{ code: string; message: string; recovery: string }>;
+  warnings: Array<{ code: string; message: string; recovery: string }>;
+  stateFingerprint: string;
+  checkedAt: string;
+}
+
 export interface TaskSummary {
   id: string;
   buildId?: string;

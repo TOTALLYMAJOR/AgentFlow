@@ -1229,12 +1229,17 @@ td:first-child {
 
 .queue-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 20px;
 }
 
 .queue-panel {
   min-width: 0;
+}
+
+.queue-panel--attention {
+  border-color: var(--af-critical);
+  box-shadow: inset 0 3px 0 var(--af-critical);
 }
 
 .task-list--buttons li {
@@ -1946,61 +1951,30 @@ td:first-child {
 
 .start-screen {
   display: grid;
-  gap: 24px;
+  width: min(100%, 1120px);
+  gap: 20px;
 }
 
 .start-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(260px, 0.7fr);
-  gap: clamp(28px, 6vw, 80px);
-  align-items: end;
-  padding: 10px 0 14px;
-}
-
-.start-hero__label {
-  display: block;
-  margin-bottom: 10px;
-  color: var(--af-accent-strong);
-  font-size: 13px;
-  font-weight: 700;
+  padding: 14px 0 10px;
 }
 
 .start-hero h1 {
-  max-width: 780px;
+  max-width: 680px;
   margin: 0;
-  font-size: clamp(38px, 5vw, 64px);
-  line-height: 1.02;
-  letter-spacing: -0.045em;
+  font-size: clamp(34px, 4.2vw, 52px);
+  line-height: 1.06;
+  letter-spacing: -0.04em;
 }
 
 .start-hero p {
-  max-width: 690px;
-  margin: 18px 0 0;
+  max-width: 650px;
+  margin: 14px 0 0;
   color: var(--af-muted);
-  font-size: 18px;
-  line-height: 1.55;
+  font-size: 16px;
+  line-height: 1.5;
 }
 
-.start-hero__trust {
-  display: flex;
-  gap: 12px;
-  padding: 18px 0 4px 18px;
-  border-left: 2px solid var(--af-accent);
-}
-
-.start-hero__trust svg {
-  flex: 0 0 auto;
-  color: var(--af-accent);
-}
-
-.start-hero__trust div,
-.current-work-callout span span,
-.goal-starter span {
-  display: grid;
-  gap: 4px;
-}
-
-.start-hero__trust span,
 .current-work-callout small,
 .goal-starter small {
   color: var(--af-muted);
@@ -2021,6 +1995,10 @@ td:first-child {
   color: var(--af-text);
   cursor: pointer;
   text-align: left;
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    transform 140ms ease;
 }
 
 .current-work-callout > span {
@@ -2029,21 +2007,28 @@ td:first-child {
   gap: 14px;
 }
 
+.current-work-callout span span,
+.goal-starter span {
+  display: grid;
+  gap: 4px;
+}
+
 .current-work-callout:hover {
   border-color: var(--af-accent);
 }
 
 .goal-composer {
+  overflow: hidden;
   border: 1px solid var(--af-border);
   border-radius: var(--af-radius);
   background: var(--af-canvas);
 }
 
-.goal-composer__intro {
-  padding: 24px 26px 18px;
+.goal-composer__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.75fr);
 }
 
-.goal-composer__intro h2,
 .connection-wizard h2,
 .plain-plan-approval h3,
 .consumer-progress h2,
@@ -2052,7 +2037,6 @@ td:first-child {
   margin: 0;
 }
 
-.goal-composer__intro p,
 .connection-wizard p,
 .plain-plan-approval p,
 .consumer-progress p,
@@ -2065,30 +2049,51 @@ td:first-child {
 
 .goal-starters {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  border-block: 1px solid var(--af-border);
+  align-content: start;
+  padding: 22px;
+  border-left: 1px solid var(--af-border);
+  background: var(--af-subtle);
+}
+
+.goal-starters__heading {
+  display: grid;
+  gap: 4px;
+  padding: 0 2px 14px;
+}
+
+.goal-starters__heading span {
+  color: var(--af-muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .goal-starter {
   display: flex;
-  min-height: 112px;
+  min-height: 72px;
+  align-items: flex-start;
   gap: 12px;
-  padding: 18px;
-  border: 0;
-  border-right: 1px solid var(--af-border);
-  background: var(--af-canvas);
+  padding: 13px 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   color: var(--af-text);
   cursor: pointer;
   text-align: left;
-}
-
-.goal-starter:last-child {
-  border-right: 0;
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    transform 140ms ease;
 }
 
 .goal-starter:hover,
 .goal-starter:focus-visible {
-  background: var(--af-subtle);
+  border-color: var(--af-border);
+  background: var(--af-canvas);
+}
+
+.goal-starter.is-selected {
+  border-color: color-mix(in srgb, var(--af-accent) 55%, var(--af-border));
+  background: color-mix(in srgb, var(--af-accent) 7%, var(--af-canvas));
 }
 
 .goal-starter:active,
@@ -2108,13 +2113,59 @@ td:first-child {
 .goal-composer__form {
   display: grid;
   gap: 18px;
-  padding: 24px 26px 26px;
+  padding: clamp(24px, 3vw, 34px);
 }
 
 .goal-composer__actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.goal-composer__assurance {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--af-muted);
+  font-size: 12px;
+}
+
+.goal-composer__assurance svg {
+  flex: none;
+  color: var(--af-accent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .start-hero,
+  .current-work-callout,
+  .goal-composer,
+  .workspace-summary {
+    animation: start-screen-enter 480ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .current-work-callout {
+    animation-delay: 70ms;
+  }
+
+  .goal-composer {
+    animation-delay: 110ms;
+  }
+
+  .workspace-summary {
+    animation-delay: 150ms;
+  }
+
+  @keyframes start-screen-enter {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
 }
 
 .connection-wizard {
@@ -2550,6 +2601,7 @@ td:first-child {
   }
 
   .start-hero,
+  .goal-composer__layout,
   .connection-wizard,
   .completed-report-summary,
   .visual-evidence-report {
@@ -2558,14 +2610,12 @@ td:first-child {
 
   .goal-starters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-top: 1px solid var(--af-border);
+    border-left: 0;
   }
 
-  .goal-starter:nth-child(2) {
-    border-right: 0;
-  }
-
-  .goal-starter:nth-child(-n + 2) {
-    border-bottom: 1px solid var(--af-border);
+  .goal-starters__heading {
+    grid-column: 1 / -1;
   }
 }
 
@@ -2596,6 +2646,37 @@ td:first-child {
 
   .main-content {
     padding: 24px 16px 48px;
+  }
+
+  .start-screen {
+    gap: 16px;
+  }
+
+  .start-hero {
+    padding-top: 4px;
+  }
+
+  .start-hero h1 {
+    font-size: clamp(32px, 10vw, 42px);
+  }
+
+  .goal-starters {
+    grid-template-columns: 1fr;
+    padding: 18px;
+  }
+
+  .goal-composer__form {
+    padding: 22px 18px;
+  }
+
+  .goal-composer__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .goal-composer__actions > button {
+    width: 100%;
+    justify-content: center;
   }
 
   .page-title,

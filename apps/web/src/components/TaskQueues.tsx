@@ -12,28 +12,49 @@ interface QueueDefinition {
   title: string;
   description: string;
   states: Set<string>;
+  tone?: "attention";
 }
 
 const queues: QueueDefinition[] = [
   {
-    id: "ready",
-    title: "Ready queue",
-    description: "Runnable after dependencies and ownership checks",
-    states: new Set(["ready"]),
+    id: "working",
+    title: "Working",
+    description: "Assigned agents and checks currently in progress",
+    states: new Set(["assigned", "running", "validating"]),
   },
   {
-    id: "blocked",
-    title: "Blocked tasks",
-    description: "Waiting on work, artifacts, approval, or review",
-    states: new Set(["pending", "blocked", "blocked_failed", "awaiting_approval"]),
+    id: "attention",
+    title: "Needs you",
+    description: "Approval, recovery, or a decision is required",
+    states: new Set([
+      "awaiting_approval",
+      "failed",
+      "blocked_failed",
+      "interrupted",
+    ]),
+    tone: "attention",
   },
   {
-    id: "integration",
-    title: "Integration queue",
-    description: "Validated work waiting for serialized integration",
+    id: "queued",
+    title: "Queued",
+    description: "Waiting on dependencies or ready for governed dispatch",
+    states: new Set(["pending", "blocked", "ready"]),
+  },
+  {
+    id: "checking",
+    title: "Checking",
+    description: "Validated work moving through serialized integration",
     states: new Set(["validated", "integrating"]),
   },
+  {
+    id: "done",
+    title: "Done",
+    description: "Integrated or completed with durable evidence",
+    states: new Set(["integrated", "completed", "cancelled"]),
+  },
 ];
+
+const knownStates = new Set(queues.flatMap((queue) => [...queue.states]));
 
 export function TaskQueues({
   tasks,
@@ -41,14 +62,24 @@ export function TaskQueues({
   onSelectTask,
 }: TaskQueuesProps): React.JSX.Element {
   return (
-    <section className="queue-grid" aria-label="Build task queues">
-      {queues.map((queue) => {
+    <section className="queue-grid work-board" aria-label="Live work board">
+      {[...queues, unknownQueue(tasks)].map((queue) => {
         const queueTasks = tasks.filter((task) => queue.states.has(task.state));
+        if (queue.id === "unknown" && queueTasks.length === 0) {
+          return null;
+        }
+        const headingId = `work-board-${queue.id}`;
         return (
-          <article className="build-panel queue-panel" key={queue.id}>
+          <article
+            className={`build-panel queue-panel${
+              queue.tone === "attention" ? " queue-panel--attention" : ""
+            }`}
+            aria-labelledby={headingId}
+            key={queue.id}
+          >
             <header className="panel-heading">
               <div>
-                <h2>{queue.title}</h2>
+                <h2 id={headingId}>{queue.title}</h2>
                 <p>{queue.description}</p>
               </div>
               <span className="queue-count" aria-label={`${queueTasks.length} tasks`}>
@@ -88,4 +119,21 @@ export function TaskQueues({
       })}
     </section>
   );
+}
+
+/**
+ * Unknown server states stay visible instead of silently disappearing. This
+ * fail-visible fallback protects operators when the backend lifecycle evolves
+ * before the presentation mapping is updated.
+ */
+function unknownQueue(tasks: TaskSummary[]): QueueDefinition {
+  return {
+    id: "unknown",
+    title: "Unmapped state",
+    description: "AgentFlow reported a state this interface does not recognize",
+    states: new Set(
+      tasks.filter((task) => !knownStates.has(task.state)).map((task) => task.state),
+    ),
+    tone: "attention",
+  };
 }

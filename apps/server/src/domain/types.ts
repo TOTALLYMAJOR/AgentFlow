@@ -120,6 +120,15 @@ export interface PlanResult {
     appliedMultiplier: number;
     confidence: "insufficient" | "low" | "medium" | "high";
   };
+  governedHandoff?: {
+    id: string;
+    sha256: string;
+    path: string;
+    governedBaseCommit: string;
+    executionBaseCommit?: string;
+    carrierPaths: string[];
+    proofBoundary: string;
+  };
   createdAt: string;
 }
 

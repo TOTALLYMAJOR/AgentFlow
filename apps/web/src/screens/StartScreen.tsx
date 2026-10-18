@@ -22,6 +22,7 @@ import type {
   BuildSummary,
   HealthResponse,
   RepositorySummary,
+  RepositoryTarget,
 } from "../api/types.js";
 import { LoadingState } from "../components/LoadingState.js";
 import { StatusBadge } from "../components/StatusBadge.js";
@@ -65,9 +66,10 @@ export function StartScreen({
   const health = useSWR<HealthResponse>("/api/health", apiFetch, {
     refreshInterval: 5_000,
   });
-  const repositories = useSWR<RepositorySummary[]>(
-    "/api/repositories",
+  const repositories = useSWR<RepositoryTarget[]>(
+    "/api/repositories/targets",
     apiFetch,
+    { refreshInterval: 5_000 },
   );
   const builds = useSWR<BuildSummary[]>("/api/builds?scope=active", apiFetch, {
     refreshInterval: 3_000,
@@ -128,19 +130,11 @@ export function StartScreen({
     <div className="start-screen">
       <header className="start-hero">
         <div>
-          <span className="start-hero__label">AgentFlow</span>
           <h1>What would you like to improve?</h1>
           <p>
             Describe the outcome. AgentFlow will inspect the project, propose a
             safe plan, and wait for your approval before changing code.
           </p>
-        </div>
-        <div className="start-hero__trust">
-          <ShieldCheckIcon size={24} aria-hidden="true" />
-          <div>
-            <strong>Your project stays under your control</strong>
-            <span>Local only. Reviewed plan. Validated changes.</span>
-          </div>
         </div>
       </header>
 
@@ -165,93 +159,111 @@ export function StartScreen({
       )}
 
       <section className="goal-composer" aria-labelledby="goal-composer-title">
-        <div className="goal-composer__intro">
-          <h2 id="goal-composer-title">Start new work</h2>
-          <p>Choose a starting point or write the outcome in your own words.</p>
-        </div>
-
-        <div className="goal-starters">
-          {goalStarters.map((starter) => {
-            const StarterIcon = starter.icon;
-            return (
-              <button
-                type="button"
-                key={starter.label}
-                className="goal-starter"
-                onClick={() => {
-                  setObjective(starter.prompt);
+        <h2 id="goal-composer-title" className="visually-hidden">
+          Start new work
+        </h2>
+        <div className="goal-composer__layout">
+          <div className="goal-composer__form">
+            <FormControl required>
+              <FormControl.Label>Project</FormControl.Label>
+              <Select
+                block
+                value={repositoryId}
+                onChange={(event) => {
+                  setRepositoryId(event.target.value);
                 }}
               >
-                <StarterIcon size={22} aria-hidden="true" />
-                <span>
-                  <strong>{starter.label}</strong>
-                  <small>{starter.description}</small>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="goal-composer__form">
-          <FormControl required>
-            <FormControl.Label>Project</FormControl.Label>
-            <Select
-              block
-              value={repositoryId}
-              onChange={(event) => {
-                setRepositoryId(event.target.value);
-              }}
-            >
-              <Select.Option value="">Choose a project</Select.Option>
-              {repositories.data?.map((repository) => (
-                <Select.Option key={repository.id} value={repository.id}>
-                  {repository.name}
-                </Select.Option>
-              ))}
-            </Select>
-          </FormControl>
-          <FormControl required>
-            <FormControl.Label>Desired outcome</FormControl.Label>
-            <Textarea
-              block
-              rows={5}
-              value={objective}
-              placeholder="Example: Make onboarding easier for first-time customers and verify it on mobile."
-              onChange={(event) => {
-                setObjective(event.target.value);
-              }}
-            />
-            <FormControl.Caption>
-              Focus on what should be better for the user. Technical details are
-              optional.
-            </FormControl.Caption>
-          </FormControl>
-          <div className="goal-composer__actions">
-            <Button
-              variant="primary"
-              trailingVisual={ArrowRightIcon}
-              disabled={
-                repositoryId.length === 0 || objective.trim().length < 10
-              }
-              onClick={() => {
-                onStartGoal({
-                  repositoryId,
-                  objective: objective.trim(),
-                });
-              }}
-            >
-              Review a proposed plan
-            </Button>
-            <Button
-              leadingVisual={showConnection ? FolderOpenIcon : PlusIcon}
-              onClick={() => {
-                setShowConnection((current) => !current);
-                setConnectionError(null);
-              }}
-            >
-              {showConnection ? "Close project setup" : "Connect another project"}
-            </Button>
+                <Select.Option value="">Choose a project</Select.Option>
+                {repositories.data?.map((repository) => (
+                  <Select.Option
+                    key={repository.repositoryId}
+                    value={repository.repositoryId}
+                    disabled={!repository.eligible}
+                  >
+                    {repository.name}
+                    {repository.eligible
+                      ? repository.designIntelligence.configured
+                        ? " · Design Intelligence ready"
+                        : " · ready"
+                      : ` · ${repository.blockers[0]?.message ?? "unavailable"}`}
+                  </Select.Option>
+                ))}
+              </Select>
+            </FormControl>
+            <FormControl required>
+              <FormControl.Label>What should be better?</FormControl.Label>
+              <Textarea
+                block
+                rows={6}
+                value={objective}
+                placeholder="Describe the outcome you want for the user."
+                onChange={(event) => {
+                  setObjective(event.target.value);
+                }}
+              />
+              <FormControl.Caption>
+                Focus on the outcome. Technical details are optional.
+              </FormControl.Caption>
+            </FormControl>
+            <div className="goal-composer__actions">
+              <Button
+                variant="primary"
+                trailingVisual={ArrowRightIcon}
+                disabled={
+                  repositoryId.length === 0 || objective.trim().length < 10
+                }
+                onClick={() => {
+                  onStartGoal({
+                    repositoryId,
+                    objective: objective.trim(),
+                  });
+                }}
+              >
+                Review plan
+              </Button>
+              <Button
+                leadingVisual={showConnection ? FolderOpenIcon : PlusIcon}
+                onClick={() => {
+                  setShowConnection((current) => !current);
+                  setConnectionError(null);
+                }}
+              >
+                {showConnection ? "Close setup" : "Connect project"}
+              </Button>
+            </div>
+            <div className="goal-composer__assurance">
+              <ShieldCheckIcon size={18} aria-hidden="true" />
+              <span>Nothing changes until you approve the plan.</span>
+            </div>
           </div>
+
+          <aside className="goal-starters" aria-label="Outcome suggestions">
+            <div className="goal-starters__heading">
+              <strong>Need a starting point?</strong>
+              <span>Choose one to prefill the outcome.</span>
+            </div>
+            {goalStarters.map((starter) => {
+              const StarterIcon = starter.icon;
+              const selected = objective === starter.prompt;
+              return (
+                <button
+                  type="button"
+                  key={starter.label}
+                  className={selected ? "goal-starter is-selected" : "goal-starter"}
+                  aria-pressed={selected}
+                  onClick={() => {
+                    setObjective(starter.prompt);
+                  }}
+                >
+                  <StarterIcon size={20} aria-hidden="true" />
+                  <span>
+                    <strong>{starter.label}</strong>
+                    <small>{starter.description}</small>
+                  </span>
+                </button>
+              );
+            })}
+          </aside>
         </div>
       </section>
 

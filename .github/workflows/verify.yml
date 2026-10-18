@@ -1,0 +1,27 @@
+name: AgentFlow CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: AgentFlow native verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test -- --maxWorkers=1 --no-file-parallelism
+      - run: npm run test:integration -- --maxWorkers=1 --no-file-parallelism
+      - run: npm run build

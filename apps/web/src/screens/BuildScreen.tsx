@@ -38,7 +38,13 @@ const activeStatuses = new Set([
 
 type BuildAction = "start" | "pause" | "resume" | "cancel";
 
-export function BuildScreen(): React.JSX.Element {
+interface BuildScreenProps {
+  preferredBuildId?: string | null;
+}
+
+export function BuildScreen({
+  preferredBuildId = null,
+}: BuildScreenProps): React.JSX.Element {
   const builds = useSWR<BuildSummary[]>("/api/builds?scope=active", apiFetch, {
     refreshInterval: 2_000,
   });
@@ -47,6 +53,7 @@ export function BuildScreen(): React.JSX.Element {
   const [selectedBuildId, setSelectedBuildId] = useState<string | null>(null);
   const active =
     activeBuilds.find((build) => build.id === selectedBuildId) ??
+    activeBuilds.find((build) => build.id === preferredBuildId) ??
     activeBuilds[0] ??
     null;
   const approvals = useSWR<ApprovalSummary[]>(
@@ -80,10 +87,15 @@ export function BuildScreen(): React.JSX.Element {
       activeBuilds.length > 0 &&
       !activeBuilds.some((build) => build.id === selectedBuildId)
     ) {
-      setSelectedBuildId(activeBuilds[0]?.id ?? null);
+      const preferredIsActive = activeBuilds.some(
+        (build) => build.id === preferredBuildId,
+      );
+      setSelectedBuildId(
+        preferredIsActive ? preferredBuildId : (activeBuilds[0]?.id ?? null),
+      );
       setSelectedTaskId(null);
     }
-  }, [activeBuilds, selectedBuildId]);
+  }, [activeBuilds, preferredBuildId, selectedBuildId]);
 
   const tasks = active?.tasks ?? [];
   const effectiveSelectedTaskId =
@@ -442,44 +454,6 @@ export function BuildScreen(): React.JSX.Element {
         selectedTaskId={effectiveSelectedTaskId}
         onSelectTask={selectTask}
       />
-
-      <section className="build-panel all-tasks-panel" aria-labelledby="all-tasks-title">
-        <header className="panel-heading">
-          <div>
-            <h2 id="all-tasks-title">All tasks</h2>
-            <p>Select a task to inspect its durable execution evidence.</p>
-          </div>
-          <span className="queue-count">{tasks.length}</span>
-        </header>
-        {tasks.length === 0 ? (
-          <p className="panel-empty">No tasks were captured in this build.</p>
-        ) : (
-          <ul className="all-task-grid">
-            {tasks.map((task) => (
-              <li key={task.id}>
-                <button
-                  type="button"
-                  className={
-                    effectiveSelectedTaskId === task.id
-                      ? "all-task-button is-selected"
-                      : "all-task-button"
-                  }
-                  aria-pressed={effectiveSelectedTaskId === task.id}
-                  onClick={(event) => {
-                    selectTask(task.id, event.currentTarget);
-                  }}
-                >
-                  <span>
-                    <span className="mono">{task.backlogTaskId}</span>
-                    <strong>{task.title}</strong>
-                  </span>
-                  <StatusBadge status={task.state} />
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
 
       {effectiveSelectedTaskId === null ? null : (
         <TaskInspector
