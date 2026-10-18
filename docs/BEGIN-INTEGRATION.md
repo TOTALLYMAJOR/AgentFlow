@@ -1,8 +1,10 @@
 # Begin: native governed integration
 
-Status: PREPARED_AWAITING_BEGIN
+Status: HISTORICAL_PREPARATION. The governed handoff v2.1.0 importer, build receipt v1.1.0, and `governor.v1` bridge were later merged into AgentFlow `main`; see [the current integration guide](DESIGN-INTELLIGENCE-INTEGRATION.md). This record is not evidence of a live run, deployment, or human acceptance.
 Prepared: 2026-09-18.
 Scope: AgentFlow work-selection instructions. No worker is started by this update.
+
+The steps below preserve the original preparation context. Reconcile them against current source, native task records, and repository authority before any new execution. Do not treat completed implementation steps as open work.
 
 ## Read first
 
