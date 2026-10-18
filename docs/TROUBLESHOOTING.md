@@ -210,3 +210,26 @@ This is intentional. `agentflow uninstall` removes the executable and user
 service files but preserves `$AGENTFLOW_HOME`, including databases, worktrees,
 logs, patches, screenshots, and other audit evidence. Remove it manually only
 after confirming recovery and audit data are no longer needed.
+
+## Guided setup and CLI server connection
+
+Run `agentflow setup .` in the target repository. It works without a running
+server and reports configuration, backlog, Git, and base-branch issues. Use
+`--prepare` to create only missing configuration; existing invalid configuration
+must be repaired explicitly. A missing backlog can be prepared with
+`agentflow start . --objective "Your intended outcome"` after reviewing and
+committing configuration. A draft is never automatically executed.
+
+Operational commands now use the persistent server. If the CLI reports that it
+is unavailable, run `agentflow serve` in another terminal or start the user
+service. Match `AGENTFLOW_HOME` and `AGENTFLOW_PORT` in both terminals. A different
+home is rejected before mutation. A CLI status request does not launch recovery
+or shut down workers.
+
+If build creation succeeded but starting failed, use the build ID printed in
+the error: `agentflow inspect <id>`, then `agentflow launch <id>` for a ready
+build. Use `resume` for a paused or interrupted build and `retry` for a specific
+failed task. If a connection drops, inspect `status` before repeating the command.
+
+A stale or unrelated sibling checkout is rejected by the legacy repository
+helper. Select a fresh `--worktree` path instead of silently reusing stale code.
