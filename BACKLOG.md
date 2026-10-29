@@ -77,6 +77,10 @@ Passing proves local AgentFlow v2 admission, immutable binding, and receipt cons
 Preserve this task identity, dependencies and existing acceptance/refusal requirements. Implementation is limited to the exact path/hunk ceiling in the owner-approved G2 packet based on c5d25181a3e4f7665f38753cf374264bcc2cd69b. Scope declarations inherited from earlier work do not expand that ceiling. No task is completed by adoption.
 Bind exact experiment/run/snapshot/task/criteria through immutable native plan/build records. Defer recovered runtime verifier and its integration entirely; no public handoff/plan runtime extension or runtime activation. This preserves the recovered historical evidence rather than adding disconnected runtime capability. Own the exact shared public fixture file here before dependent tasks; AFI-003 no longer owns its parent fixture directory. Tasks requiring an unsupported runtime binding must stop for a separate exact contract/owner amendment. Authentication precedes body parsing; duplicate/unknown Start never creates an automatic second dispatch. Keep historical observation separate from current admission. Recovered runtime source is not runtime activation approval.
 
+### Owner-approved explicit native validation evidence amendment
+
+Adopt only the owner-approved single-task native validation evidence profile described in the evidence contract amendment. Bind exact required-evidence name to declared native profile artifact and this task complete ordered validation set. Unknown/unbound/version/topology mismatches refuse; do not reinterpret the old paused handoff.
+
 ## AFI-002 - Converge native observations and Governor interventions
 
 Classification: **MVP**
@@ -89,6 +93,7 @@ estimate_hours: 8
 depends_on:
   - AFI-001
 owns:
+  - apps/server/src/governor/build-control.ts
   - apps/server/src/integration/traffic-control.ts
   - apps/server/src/http/routes/traffic-control.ts
   - apps/server/src/http/app.ts
@@ -149,6 +154,10 @@ Passing proves local projections and acknowledged use of existing AgentFlow tran
 Preserve this task identity, dependencies and existing acceptance/refusal requirements. Implementation is limited to the exact path/hunk ceiling in the owner-approved G2 packet based on c5d25181a3e4f7665f38753cf374264bcc2cd69b. Scope declarations inherited from earlier work do not expand that ceiling. No task is completed by adoption.
 Keep current-main Traffic Control evaluation, guarded intervention and durable acknowledgement. Enforce the conservative text-churn ceiling without claiming eligible source LOC. Never suppress approvals or validation to satisfy interruption/size parameters. Only append migrations.
 
+### Owner-approved explicit native validation evidence amendment
+
+Project only actual current-attempt native validation/result/validated-manifest/log provenance into evidence satisfaction for the supported profile. Preserve protected Governor decision rules and unknown/missing-evidence refusal. Never auto-satisfy free labels, union stale proof or alter phase/dependencies to unblock integration.
+
 ## AFI-003 - Re-prove the return loop on the converged branch
 
 Classification: **MVP**
@@ -206,6 +215,10 @@ Passing proves one bounded local return loop. It does not prove deployment, remo
 
 Preserve this task identity, dependencies and existing acceptance/refusal requirements. Implementation is limited to the exact path/hunk ceiling in the owner-approved G2 packet based on c5d25181a3e4f7665f38753cf374264bcc2cd69b. Scope declarations inherited from earlier work do not expand that ceiling. No task is completed by adoption.
 Retain the existing full local return-loop obligation and add Run Lab/Orbit exact-ID interoperability, current admission, crash/replay/evidence refusal cases. Real provider execution and consuming-repository production mutation remain excluded. Fixture-only passes must not be called real-provider qualification.
+
+### Owner-approved explicit native validation evidence amendment
+
+Rebuild a fresh single-task fixture with the explicit artifact binding before its first unchanged native approval; retain the original undeclared-evidence pause as negative proof. General multi-task evidence lifecycle remains deferred. Complete required real local return-loop and frozen Orbit qualification before final implementation commit.
 
 ## HP-001 - Admit and immutably bind the Harness Profile
 
