@@ -10,6 +10,14 @@ The MVP is trusted-repository-only. Repository validation commands continue to e
 
 External Proofloom and Traffic Control prerequisites retain their source IDs and digests, but enter AgentFlow only through governed-task-handoff v2 and existing initiative/artifact gates. They are not copied into a parallel backlog.
 
+### Owner-directed full-portfolio branch closure slice
+
+The original G2 path/hunk ceiling based on c5d25181a3e4f7665f38753cf374264bcc2cd69b is preserved as the completed, separately qualified candidate 17c5249c6880c4a59727b0336bf093f2206e5297. For this separate owner-directed branch-reconciliation slice only, the additional exact write authority is the ten-path ADOPTION-SCOPE.proposed.json packet under wale-branch-closure-20261029, bound to base 17c5249c6880c4a59727b0336bf093f2206e5297 and isolated branch codex/wale-branch-closure-20261029. This explicit bounded amendment governs those named hunks instead of treating the prior G2 ceiling as blanket permission. Preserve every original task identity, dependency, acceptance/refusal criterion and human/native execution/final-acceptance gate.
+
+AFI-001 changes only .agentflow.yaml base_branch to bind native preparation to the isolated successor; existing worker, validation, provider and publication restrictions remain. AFI-002 adds only recovered-integration Governor gating, idempotent validated-state recovery and current-attempt failure attribution with their exact focused tests/ownership. Preserve full failure history and all G2 native source/event/certificate/receipt fences; protected Governor policy, control-service, runtime-adapter and governBuild body remain unchanged. AFI-003 requalifies the exact combined successor using existing strict 2.1/1.1 native and frozen-Orbit journeys; stronger multi-task/runtime/private-Task6/provider and production acceptance remain separately governed and unclaimed.
+
+Manual local adoption is authorized by the owner's branch-reconciliation continuation, not a fabricated native execution approval. Adopt this ownership/branch declaration before source implementation. No actual candidate build/dispatch, real provider run, runtime activation, publication, cleanup or task closure is authorized by it. Existing traffic-control-integration.test.ts is not present in this selected tree; do not describe that named historical file as executed. The newly named actual files and full native verification provide the bounded local proof while original semantic criteria remain intact.
+
 ## AFI-001 - Converge Wave 0 handoff admission and receipt integrity
 
 Classification: **MVP**
@@ -80,6 +88,10 @@ Bind exact experiment/run/snapshot/task/criteria through immutable native plan/b
 ### Owner-approved explicit native validation evidence amendment
 
 Adopt only the owner-approved single-task native validation evidence profile described in the evidence contract amendment. Bind exact required-evidence name to declared native profile artifact and this task complete ordered validation set. Unknown/unbound/version/topology mismatches refuse; do not reinterpret the old paused handoff.
+### Branch closure slice authority
+
+For the separate owner-directed full-portfolio reconciliation slice, the exact ten-path ADOPTION-SCOPE.proposed.json at base 17c5249c6880c4a59727b0336bf093f2206e5297 extends the earlier c5d25181 G2 ceiling only for its named hunks in isolated codex/wale-branch-closure-20261029. This task permits only its already-owned .agentflow.yaml base_branch rebinding; it does not reopen admission/schema/profile/runtime design. All original task criteria, dependencies and approval/final-acceptance gates remain unchanged. No candidate dispatch, providers, runtime activation, publication or task closure.
+
 
 ## AFI-002 - Converge native observations and Governor interventions
 
@@ -93,6 +105,11 @@ estimate_hours: 8
 depends_on:
   - AFI-001
 owns:
+  - apps/server/src/recovery/service.ts
+  - apps/server/test/coordinator-governed-recovery.test.ts
+  - apps/server/test/recovery.test.ts
+  - apps/server/test/traffic-control-observation.test.ts
+  - apps/server/test/governor-build-control.test.ts
   - apps/server/src/governor/build-control.ts
   - apps/server/src/integration/traffic-control.ts
   - apps/server/src/http/routes/traffic-control.ts
@@ -114,6 +131,7 @@ owns:
   - apps/server/test/integration-runtime.test.ts
   - apps/server/test/worker-runtime.test.ts
 validate:
+  - npm test -- --run apps/server/test/coordinator-governed-recovery.test.ts apps/server/test/recovery.test.ts apps/server/test/traffic-control-observation.test.ts apps/server/test/governor-build-control.test.ts
   - npm test -- --run apps/server/test/database.test.ts apps/server/test/delivery-size.test.ts apps/server/test/integration-runtime.test.ts apps/server/test/worker-runtime.test.ts apps/server/test/governor-control-service.test.ts apps/server/test/traffic-control-observation.test.ts
   - npm test -- --run apps/server/test/traffic-control-integration.test.ts apps/server/test/orchestration.test.ts
   - npm run typecheck
@@ -157,6 +175,10 @@ Keep current-main Traffic Control evaluation, guarded intervention and durable a
 ### Owner-approved explicit native validation evidence amendment
 
 Project only actual current-attempt native validation/result/validated-manifest/log provenance into evidence satisfaction for the supported profile. Preserve protected Governor decision rules and unknown/missing-evidence refusal. Never auto-satisfy free labels, union stale proof or alter phase/dependencies to unblock integration.
+### Branch closure slice authority
+
+For the separate owner-directed full-portfolio reconciliation slice, the exact ten-path ADOPTION-SCOPE.proposed.json at base 17c5249c6880c4a59727b0336bf093f2206e5297 extends the earlier c5d25181 G2 ceiling only for its named hunks in isolated codex/wale-branch-closure-20261029. This task owns the listed recovered-integration gate, validated-state replay guard and current-failure attribution changes and the five newly listed recovery/test paths. Do not replace protected Governor policy/control/runtime or discard existing G2 evidence/cursor fences. All original task criteria, dependencies and approval/final-acceptance gates remain unchanged. No candidate dispatch, providers, runtime activation, publication or task closure.
+
 
 ## AFI-003 - Re-prove the return loop on the converged branch
 
@@ -219,6 +241,10 @@ Retain the existing full local return-loop obligation and add Run Lab/Orbit exac
 ### Owner-approved explicit native validation evidence amendment
 
 Rebuild a fresh single-task fixture with the explicit artifact binding before its first unchanged native approval; retain the original undeclared-evidence pause as negative proof. General multi-task evidence lifecycle remains deferred. Complete required real local return-loop and frozen Orbit qualification before final implementation commit.
+### Branch closure slice authority
+
+For the separate owner-directed full-portfolio reconciliation slice, the exact ten-path ADOPTION-SCOPE.proposed.json at base 17c5249c6880c4a59727b0336bf093f2206e5297 extends the earlier c5d25181 G2 ceiling only for its named hunks in isolated codex/wale-branch-closure-20261029. Requalify the exact corrected successor and frozen Orbit with the existing native acceptance/refusal journey; no new task implementation, multi-task/profile expansion or extra native acceptance is implied. All original task criteria, dependencies and approval/final-acceptance gates remain unchanged. No candidate dispatch, providers, runtime activation, publication or task closure.
+
 
 ## HP-001 - Admit and immutably bind the Harness Profile
 

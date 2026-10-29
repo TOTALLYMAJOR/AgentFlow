@@ -1,7 +1,7 @@
 version: 1
 repository:
   name: agentflow-g2-local-candidate
-  base_branch: codex/wale-g2-integration-20261029
+  base_branch: codex/wale-branch-closure-20261029
 backlog:
   path: BACKLOG.md
 workers:
