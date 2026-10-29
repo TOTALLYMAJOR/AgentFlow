@@ -4,6 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { z } from "zod";
 
 const EnvironmentSchema = z.object({
+  AGENTFLOW_WALE_BRIDGE_TOKEN_SHA256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   AGENTFLOW_HOME: z.string().trim().min(1).optional(),
   AGENTFLOW_HOST: z.literal("127.0.0.1").default("127.0.0.1"),
   AGENTFLOW_PORT: z.coerce.number().int().min(1).max(65_535).default(4782),
@@ -56,6 +57,7 @@ const EnvironmentSchema = z.object({
 );
 
 export interface AgentFlowEnvironment {
+  waleBridgeTokenSha256: string | null;
   home: string;
   host: "127.0.0.1";
   port: number;
@@ -93,6 +95,7 @@ export function resolveEnvironment(
     parsed.AGENTFLOW_HOME ?? path.join(homedir(), ".agentflow"),
   );
   return {
+    waleBridgeTokenSha256: parsed.AGENTFLOW_WALE_BRIDGE_TOKEN_SHA256 ?? null,
     home,
     host: parsed.AGENTFLOW_HOST,
     port: parsed.AGENTFLOW_PORT,

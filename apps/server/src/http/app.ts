@@ -30,6 +30,7 @@ import {
 } from "../workers/index.js";
 import { registerErrorHandling } from "./errors.js";
 import type { AgentFlowContext } from "./context.js";
+import { registerWaleRunLabRoutes } from "./routes/wale-run-lab.js";
 import { registerBuildRoutes } from "./routes/builds.js";
 import { registerPlanRoutes } from "./routes/plans.js";
 import { registerRepositoryRoutes } from "./routes/repositories.js";
@@ -174,6 +175,7 @@ export async function buildApp(
   registerDesignIntelligenceRoutes(app, context);
   registerInitiativeRoutes(app, context);
   registerBuildRoutes(app, context);
+  registerWaleRunLabRoutes(app, context);
   registerErrorHandling(app);
 
   const staticRoot =

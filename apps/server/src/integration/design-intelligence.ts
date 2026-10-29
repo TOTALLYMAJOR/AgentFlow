@@ -171,10 +171,18 @@ const GovernedTaskHandoffBaseSchema = z.object({
         for (const field of ["repositoryRef", "issueRefs", "branch", "headCommit"] as const) if (resolved[field] === undefined) context.addIssue({ code: "custom", path: ["provenance", "github", "resolved", field], message: `Verified GitHub provenance requires ${field}` });
       }
     }
+    for (const error of nativeValidationEvidenceProfileErrors(handoff)) context.addIssue({ code: "custom", path: ["tasks"], message: error });
     for (const error of executionApprovalErrors(handoff)) context.addIssue({ code: "custom", path: ["authority", "approvalReceipt"], message: error });
   });
 
-export const GovernedTaskHandoffSchema = GovernedTaskHandoffBaseSchema;
+export const GovernedTaskHandoffSchema = z.unknown().superRefine((raw, context) => {
+  const parsed = GovernedTaskHandoffBaseSchema.safeParse(raw);
+  // This profile requires one canonical declared identity across the frozen raw
+  // consumer and native parser. Defaults must not silently change approved input.
+  if (parsed.success && usesNativeValidationEvidence(parsed.data) && canonicalJsonSha256(raw) !== canonicalJsonSha256(parsed.data)) {
+    context.addIssue({ code: "custom", message: "Native validation evidence requires explicit canonical handoff fields; parsing defaults must not change its digest" });
+  }
+}).pipe(GovernedTaskHandoffBaseSchema);
 
 export type GovernedTaskHandoff = z.infer<typeof GovernedTaskHandoffSchema>;
 
@@ -227,7 +235,7 @@ export async function verifyHandoffAuthoritySources(repositoryRoot: string, hand
     if (errors.length === 0) {
       const sources = [...handoff.authority.sources]
         .map((source) => ({ path: source.path, sha256: source.sha256 }))
-        .sort((left, right) => left.path.localeCompare(right.path));
+        .sort((left, right) => compareCanonicalStrings(left.path, right.path));
       const snapshotSha256 = canonicalJsonSha256({
         baseCommit: handoff.repository.baseCommit,
         worktreeState: "clean",
@@ -391,7 +399,11 @@ function executionApprovalErrors(handoff: z.infer<typeof GovernedTaskHandoffBase
 }
 
 function scopeCoversPath(scope: string, owned: string): boolean {
-  const normalizedScope = scope.replace(/\*$/, "").replace(/\/+$/, "");
+  const unsafe = (value: string): boolean => value.length === 0 || value.startsWith("/")
+    || /^[A-Za-z]:/.test(value) || value.includes("\\") || value.includes("\0")
+    || value.split("/").includes("..");
+  if (unsafe(scope) || unsafe(owned)) return false;
+  const normalizedScope = (scope.endsWith("/**") ? scope.slice(0, -3) : scope.replace(/\*$/, "")).replace(/\/+$/, "");
   const normalizedOwned = owned.replace(/\/+$/, "");
   return normalizedOwned === normalizedScope || normalizedOwned.startsWith(`${normalizedScope}/`);
 }
@@ -444,4 +456,32 @@ function sortJson(value: unknown): unknown {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([left], [right]) => compareCanonicalStrings(left, right)).map(([key, item]) => [key, sortJson(item)]));
   }
   return value;
+}
+
+export const NATIVE_VALIDATION_EVIDENCE_TYPE = "agentflow/native-task-validation-evidence" as const;
+export const NATIVE_VALIDATION_EVIDENCE_VERSION = "1.0.0" as const;
+type EvidenceHandoff = { tasks: Array<{ id: string; dependsOn: string[]; validate: string[]; produces: Array<{ name: string; type: string; version: string; path?: string | undefined }> }>; proof: { requiredEvidence: string[] } };
+
+export function nativeValidationEvidenceProfileErrors(handoff: EvidenceHandoff, requireProfile = false): string[] {
+  const declarations = handoff.tasks.flatMap((task) => task.produces);
+  const optedIn = declarations.some((artifact) => artifact.type === NATIVE_VALIDATION_EVIDENCE_TYPE);
+  if (!optedIn) return requireProfile ? ["Run Lab requires an explicit supported native validation evidence binding"] : [];
+  const errors: string[] = [];
+  const task = handoff.tasks[0];
+  if (handoff.tasks.length !== 1 || task === undefined || task.dependsOn.length !== 0) errors.push("Native validation evidence supports only one independent task");
+  if (task === undefined || task.validate.length === 0 || task.validate.some((command) => command.trim().length === 0)) errors.push("Native validation evidence requires a complete nonempty declared check list");
+  const labels = handoff.proof.requiredEvidence;
+  if (labels.length === 0 || new Set(labels).size !== labels.length) errors.push("Native validation evidence labels must be nonempty and unique");
+  for (const label of labels) {
+    const matches = declarations.filter((artifact) => artifact.name === label);
+    if (matches.length !== 1 || matches[0]?.type !== NATIVE_VALIDATION_EVIDENCE_TYPE || matches[0].version !== NATIVE_VALIDATION_EVIDENCE_VERSION || matches[0].path !== undefined) errors.push("Every required evidence label needs one exact supported pathless native validation declaration");
+  }
+  for (const artifact of declarations.filter((item) => item.type === NATIVE_VALIDATION_EVIDENCE_TYPE)) {
+    if (!labels.includes(artifact.name) || artifact.version !== NATIVE_VALIDATION_EVIDENCE_VERSION || artifact.path !== undefined) errors.push("Unsupported native validation evidence declaration");
+  }
+  return errors;
+}
+
+export function usesNativeValidationEvidence(handoff: EvidenceHandoff): boolean {
+  return handoff.tasks.some((task) => task.produces.some((artifact) => artifact.type === NATIVE_VALIDATION_EVIDENCE_TYPE));
 }

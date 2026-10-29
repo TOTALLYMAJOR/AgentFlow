@@ -12,6 +12,26 @@ import {
 } from "./helpers/database-fixture.js";
 
 describe("SQLite database foundation", () => {
+  it("append-only migration enforces build and experiment uniqueness even through raw event append", () => {
+    fixture = createDatabaseFixture();
+    const store = createDatabaseRepositories(fixture.database);
+    for (const id of ["one", "two"]) {
+      store.repositories.create({ id, name: id, localPath: `/tmp/${id}`, configPath: ".agentflow.yaml", baseBranch: "main" });
+      store.builds.create({ id, repositoryId: id, backlogPath: "BACKLOG.md", baseCommit: "a".repeat(40), integrationBranch: id, status: "ready" });
+    }
+    const payload = { experimentId: "exp_same" };
+    store.events.appendExperimentBinding("one", payload);
+    expect(store.events.appendExperimentBinding("one", payload).sequence).toBe(store.events.findByExperimentId("exp_same")?.sequence);
+    expect(() => store.events.append({ buildId: "two", type: "wale.experiment.bound", payload })).toThrow(/UNIQUE/);
+    expect(() => store.events.append({ buildId: "one", type: "wale.experiment.bound", payload: { experimentId: "exp_other" } })).toThrow(/UNIQUE/);
+    expect(() => store.transaction(() => {
+      store.events.append({ buildId: "two", type: "fixture.will_rollback", payload: {} });
+      store.events.append({ buildId: "two", type: "wale.experiment.bound", payload });
+    })).toThrow();
+    expect(store.events.listForBuild("two").map((event) => event.type)).toEqual(["build.created"]);
+    expect(MIGRATIONS.at(-1)?.version).toBe(18);
+    expect(runMigrations(fixture.database).applied).toEqual([]);
+  });
   let fixture: DatabaseFixture | undefined;
 
   afterEach(() => {

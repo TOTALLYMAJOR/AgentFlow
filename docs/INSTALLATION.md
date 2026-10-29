@@ -324,3 +324,27 @@ separately only after confirming no build needs it.
 If the user service cannot be stopped and disabled, uninstall fails closed:
 the service files and npm package remain installed so a running control plane
 is never silently orphaned.
+
+## Wale Run Lab bridge (local, opt-in)
+
+The router is disabled unless `AGENTFLOW_WALE_BRIDGE_TOKEN_SHA256` is a lowercase 64-character SHA-256 digest. Supply a separately retained random bearer token of 43–128 URL-safe characters; configure only its digest. Never put a raw token in configuration evidence. Router registration belongs to AFI-002.
+
+The bridge supports only governed handoff 2.1.0 and native receipt 1.1.0 on a trusted, clean, committed repository and an exact immutable governed plan. It cannot supply execution authority. Admission binds a new build without dispatch; Start is deliberate and does not retry or resume uncertain work. Historical runtime binding/verifier fields are unsupported and refuse under the strict public schema. Runtime activation and real provider execution require separate authority.
+
+## Explicit single-task native validation evidence
+
+New Run Lab execution requires an approved handoff declaring one independent task and a nonempty complete ordered `validate` list. For each `proof.requiredEvidence` label, declare exactly one matching pathless artifact in that task's `produces`:
+
+```json
+{"name":"focused tests","type":"agentflow/native-task-validation-evidence","version":"1.0.0"}
+```
+
+The name must exactly match the required label; omit `path`. Unknown versions, missing/ambiguous/conflicting mappings, a supplied repository path, empty checks and multi-task/future-task topology refuse before execution. This is a new semantic profile using existing handoff2.1/receipt1.1 fields. Ordinary native handoffs that do not opt in preserve their existing behavior outside Run Lab.
+
+After actual native readiness/ownership checks, result commit and validated manifest publication, AgentFlow retains an immutable current-attempt certificate. It covers the task's complete approved command list before integration. Governor evaluation rechecks native task/attempt/result, exact validated manifest, validation IDs/index/argv/status and actual private log/certificate bytes. A label, worker statement or historical passed attempt cannot substitute. Receipt evidence exports the certificate and byte hashes; private logs remain private.
+
+This evidence does not certify integration, all repository tests, the selected Run Lab verification profile, owner acceptance, production or outcomes. Active snapshots remain provisional. Retry requires a new current-attempt certificate; prior certificate and pathless artifact declaration history are retained.
+
+Receipt1.1 retains full native Governor decision/observation/acknowledgement records as a digest-verified `agentflow:governor-provenance` evidence artifact. Its public timeline uses existing supported transition events; decisions are not renamed or omitted from retained evidence. The artifact records original global event sequences and source watermark, and unchanged repeated exports reuse identical bytes.
+
+Native snapshot capabilities may include an optional40-hex `repositorySnapshot.gitTree`. AgentFlow retains this distinct Git tree identity and independently resolves the approved governed B0 commit tree during admission and Start. It is separate from the64-hex governed snapshot digest in `repositorySnapshot.tree`; an unverified or mismatched supplied Git tree refuses.

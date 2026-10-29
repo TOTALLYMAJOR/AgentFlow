@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   BuildEntity,
@@ -58,7 +58,10 @@ import {
   DEFAULT_RETRYABLE_FAILURE_CODES,
 } from "./retry-policy.js";
 import type { OrganizationPolicy } from "../governance/organization-policy.js";
-import { evaluateGovernedBuild } from "../governor/build-control.js";
+import { evaluateGovernedBuild, publishNativeValidationEvidence } from "../governor/build-control.js";
+
+import { canonicalJsonSha256, loadGovernedTaskHandoff, verifyGovernedHandoffForExecution } from "../integration/design-intelligence.js";
+import { loadBoundWaleExperiment, validateWaleExperimentAdmission, verifyWaleExperimentGitTree } from "../integration/wale-run-lab.js";
 
 interface ActiveWorker {
   buildId: string;
@@ -173,12 +176,35 @@ export class BuildCoordinator {
     if (build.status !== "ready") {
       throw new Error(`Build ${buildId} cannot start from ${build.status}`);
     }
+    await this.validateExecutionAuthority(build);
     await this.ensureRuntime(build);
     const running = this.store.builds.transition(buildId, "running", {
       eventType: "build.started",
     });
     this.requestTick(buildId);
     return running;
+  }
+
+  async validateExecutionAuthority(build: BuildEntity): Promise<void> {
+    const experiment = loadBoundWaleExperiment(this.store.events, build.id);
+    if (experiment === undefined) return;
+    const plan = build.planId === null ? undefined : this.store.plans.getById(build.planId);
+    const governed = plan?.normalizedPlan.governedHandoff;
+    if (governed === undefined) {
+      throw new AgentFlowError("WALE_EXPERIMENT_REQUIRES_GOVERNED_PLAN", "Experiment requires a governed immutable plan", 409);
+    }
+    const repository = await this.repositoryService.get(build.repositoryId);
+    const root = await realpath(repository.localPath);
+    const handoffPath = await realpath(path.resolve(root, governed.path));
+    const relative = path.relative(root, handoffPath);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new AgentFlowError("GOVERNED_HANDOFF_PATH_INVALID", "Governed handoff escapes the repository", 409);
+    const handoff = await loadGovernedTaskHandoff(handoffPath);
+    if (handoff.handoffId !== governed.id || canonicalJsonSha256(handoff) !== governed.sha256) throw new AgentFlowError("GOVERNED_HANDOFF_DRIFT", "Governed handoff differs from immutable plan", 409);
+    const verification = await verifyGovernedHandoffForExecution(root, handoff, governed.carrierPaths);
+    if (verification.errors.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_NOT_EXECUTABLE", "Governed authority is no longer executable", 409);
+    if (governed.executionBaseCommit === undefined || verification.currentHead !== governed.executionBaseCommit || build.baseCommit !== governed.executionBaseCommit) throw new AgentFlowError("GOVERNED_EXECUTION_SNAPSHOT_STALE", "Exact execution snapshot changed", 409);
+    const governedGitTree = await verifyWaleExperimentGitTree(experiment, root, handoff);
+    if (plan !== undefined) validateWaleExperimentAdmission(experiment, { plan, handoff, buildBaseCommit: build.baseCommit, governedGitTree });
   }
 
   pause(buildId: string): BuildEntity {
@@ -955,6 +981,7 @@ export class BuildCoordinator {
     try {
       const build = this.store.builds.getById(buildId);
       const task = this.store.tasks.getById(taskId);
+      await this.validateExecutionAuthority(build);
       const manager = await this.ensureRuntime(build);
       const integrationHead = (
         await new GitCommandRunner().run(manager.integrationPath(), [
@@ -1025,6 +1052,7 @@ export class BuildCoordinator {
         this.stopAndRecycleWorker(workerId, false);
         return;
       }
+      await this.validateExecutionAuthority(this.store.builds.getById(buildId));
       const provider = this.agentProviders.get(
         this.environment.defaultAgentProvider,
       );
@@ -1507,6 +1535,13 @@ export class BuildCoordinator {
       });
       return;
     }
+    const evidenceBinding = build.normalizedPlan.governedHandoff;
+    if (plannedTask.produces.some((artifact) => artifact.type === "agentflow/native-task-validation-evidence")) {
+      if (typeof evidenceBinding !== "object" || evidenceBinding === null || !("path" in evidenceBinding) || typeof evidenceBinding.path !== "string") throw new Error("NATIVE_VALIDATION_EVIDENCE_INVALID: missing immutable handoff");
+      const repository = await this.repositoryService.get(build.repositoryId);
+      const evidenceHandoff = await loadGovernedTaskHandoff(path.resolve(repository.localPath, evidenceBinding.path));
+      await publishNativeValidationEvidence({ store: this.store, environment: this.environment }, buildId, evidenceHandoff);
+    }
     if (config.git.push_task_branches) {
       try {
         await this.commitService.pushTaskBranch(
@@ -1768,6 +1803,7 @@ export class BuildCoordinator {
         : this.store.tasks.getAttempt(task.id, task.attempt - 1);
     const contractKinds = /contract|openapi|schema|generated|ui-state/iu;
     const exampleKinds = /example|fixture|mock/iu;
+    const waleExperiment = loadBoundWaleExperiment(this.store.events, build.id);
     return {
       buildId: build.id,
       attempt: task.attempt,
@@ -1781,6 +1817,7 @@ export class BuildCoordinator {
           .listValidationCommands(task.id)
           .map((command) => command.command),
       },
+      ...(waleExperiment === undefined ? {} : { waleExperiment }),
       repositoryInstructions: await readRepositoryInstructions(
         (await this.repositoryService.get(build.repositoryId)).localPath,
       ),

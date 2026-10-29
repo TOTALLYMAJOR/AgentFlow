@@ -1,3 +1,4 @@
+import type { WaleRunLabExperiment } from "../src/integration/wale-run-lab.js";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -468,5 +469,73 @@ describe("Codex worker runtime", () => {
     expect(outcome.status).toBe("failed");
     expect(outcome.failureCode).toBe("spawn_error");
     expect(outcome.pid).toBeNull();
+  });
+});
+
+function boundExperiment(): WaleRunLabExperiment {
+  return {
+    experimentId: `exp_${"2".repeat(64)}`,
+    runId: "run_A1",
+    repositorySnapshot: {
+      state: "VERIFIED",
+      commit: "a".repeat(40),
+      tree: "b".repeat(64),
+      reason: null,
+    },
+    frozenTask: {
+      state: "VERIFIED",
+      ids: ["sha256:" + "a".repeat(16)],
+      titleFingerprints: ["sha256:" + "b".repeat(16)],
+    },
+    frozenRequirements: {
+      state: "UNKNOWN",
+      items: [],
+      reason: "FROZEN_REQUIREMENTS_NOT_RETAINED_SEPARATELY",
+    },
+    acceptanceCriteria: {
+      state: "VERIFIED",
+      count: 1,
+      items: [{ id: "sha256:" + "a".repeat(16), fingerprint: "sha256:" + "b".repeat(16) }],
+    },
+    parameters: {
+      deliverySize: 100,
+      overflowBehavior: "SPLIT_OR_REPLAN",
+      humanInterruptionBudget: 0,
+      authorityEscalationRequired: true,
+      strategy: "MINIMUM_WORKING_STATE",
+      verificationProfile: "design-standard",
+      verificationProfileReference: "devctl-design-standard",
+      requiredCheckBindings: [{ id: "unit", retainedReference: "npm-test" }],
+      requiredChecksCannotBeBypassed: true,
+      agentModel: null,
+    },
+    authorityStateReference: "authority-" + "c".repeat(24),
+    strategy: "MINIMUM_WORKING_STATE",
+    executionResult: {
+      status: "UNKNOWN",
+      completionState: "UNKNOWN",
+      reason: "EXPERIMENT_NOT_EXECUTED",
+    },
+    verificationEvidence: { state: "UNKNOWN", reason: "EXPERIMENT_NOT_EXECUTED" },
+    comparisonEligibility: { state: "UNKNOWN", reason: "EXACT_CASE_COMPARISON_NOT_BOUND" },
+    candidateApplication: { authorized: false, reason: "SEPARATE_AUTHORITY_BOUND_STEP_REQUIRED" },
+    claimBoundary: "Result applies to this exact run.",
+  };
+}
+
+
+describe("bound Run Lab prompt overlay", () => {
+  it("retains mandatory checks and escalation at zero human interruption budget", () => {
+    const context = promptContext();
+    context.waleExperiment = boundExperiment();
+    const prompt = buildWorkerPrompt(context);
+    expect(prompt).toContain("MINIMUM_WORKING_STATE");
+    expect(prompt).toContain("design-standard");
+    expect(prompt).toContain("npm-test");
+    expect(prompt).toContain("never waives mandatory approval, validation, checks or authority escalation");
+    expect(prompt).toContain("not eligible source LOC");
+    expect(prompt).toContain("execution metrics remain unknown");
+    expect(prompt).toContain("npm run typecheck");
+    expect(prompt).toContain("Approve, reject, supersede");
   });
 });

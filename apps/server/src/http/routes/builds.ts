@@ -16,6 +16,8 @@ import {
 } from "../../repositories/index.js";
 import { GitCommandRunner, GitWorktreeManager, isPathInside } from "../../git/index.js";
 import { canonicalJsonSha256, loadGovernedTaskHandoff, verifyGovernedHandoffForExecution } from "../../integration/design-intelligence.js";
+import { validateWaleExperimentAdmission, verifyWaleExperimentGitTree, type WaleRunLabExperiment } from "../../integration/wale-run-lab.js";
+import type { GovernedTaskHandoff } from "../../integration/design-intelligence.js";
 import { createId } from "../../util/ids.js";
 import { AgentFlowError } from "../errors.js";
 import type { AgentFlowContext } from "../context.js";
@@ -360,6 +362,7 @@ export function registerBuildRoutes(
 export async function createBuildForPlan(
   context: AgentFlowContext,
   planId: string,
+  experiment?: WaleRunLabExperiment,
 ): Promise<BuildEntity> {
   const plan = context.store.plans.getById(planId);
   const activeBuild = context.store.builds.findActive(plan.repositoryId);
@@ -369,23 +372,32 @@ export async function createBuildForPlan(
   const repositoryConfig = AgentFlowRepositoryConfigSchema.parse(plan.repositoryConfig);
   const repository = await context.repositoryService.get(plan.repositoryId);
   const governed = plan.normalizedPlan.governedHandoff;
+  let admittedHandoff: GovernedTaskHandoff | undefined;
   if (governed !== undefined) {
     const canonicalRoot = await realpath(repository.localPath);
     const handoffPath = await realpath(path.resolve(canonicalRoot, governed.path));
     if (!isPathInside(canonicalRoot, handoffPath)) throw new AgentFlowError("GOVERNED_HANDOFF_PATH_INVALID", "The governed handoff path escapes the registered repository", 409);
     const handoff = await loadGovernedTaskHandoff(handoffPath);
+    admittedHandoff = handoff;
     if (handoff.handoffId !== governed.id || canonicalJsonSha256(handoff) !== governed.sha256) throw new AgentFlowError("GOVERNED_HANDOFF_DRIFT", "The immutable plan is not bound to the current governed handoff", 409);
     const verification = await verifyGovernedHandoffForExecution(repository.localPath, handoff, governed.carrierPaths);
     if (verification.errors.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_NOT_EXECUTABLE", "The governed handoff is not executable at the current repository snapshot", 409, verification.errors);
     if (governed.executionBaseCommit === undefined || verification.currentHead !== governed.executionBaseCommit) throw new AgentFlowError("GOVERNED_EXECUTION_SNAPSHOT_STALE", "The immutable plan no longer matches the exact execution snapshot", 409, { expected: governed.executionBaseCommit, actual: verification.currentHead });
   }
   const baseCommit = (await runGit(repository.localPath, ["rev-parse", `${repository.baseBranch}^{commit}`])).stdout.trim();
+  const governedGitTree = experiment === undefined || admittedHandoff === undefined ? undefined : await verifyWaleExperimentGitTree(experiment, repository.localPath, admittedHandoff);
+  const boundExperiment = experiment === undefined ? undefined : validateWaleExperimentAdmission(experiment, { governedGitTree, plan, ...(admittedHandoff === undefined ? {} : { handoff: admittedHandoff }), buildBaseCommit: baseCommit });
+  return context.store.transaction(() => {
+  if (context.store.builds.findActive(plan.repositoryId) !== undefined) throw new AgentFlowError("ACTIVE_BUILD_EXISTS", "Repository already has an active build", 409);
+  if (boundExperiment !== undefined && context.store.events.findByExperimentId(boundExperiment.experimentId) !== undefined) throw new AgentFlowError("WALE_EXPERIMENT_ID_CONFLICT", "Experiment already bound", 409);
   const buildId = createId("build");
   const taskIds = new Map(plan.normalizedPlan.tasks.map((task) => [task.id, createId(`task_${safeId(task.id)}`)]));
   const build = context.store.builds.create({ id: buildId, repositoryId: repository.id, planId, backlogPath: plan.backlogPath, baseCommit, integrationBranch: `agent-integration/${buildId}`, status: "ready", workerLimit: repositoryConfig.workers.maximum, tasks: plan.normalizedPlan.tasks.map((task) => createTaskInput(task, taskIds)) });
   for (let slot = 1; slot <= build.workerLimit; slot += 1) context.store.workers.create({ id: `${buildId}:worker:${slot}`, buildId, providerId: context.environment.defaultAgentProvider, status: "idle" });
   for (const task of context.store.tasks.listForBuild(build.id)) if (task.requiresApproval) context.store.approvals.create({ id: createId("approval"), buildId: build.id, taskId: task.id, approvalType: "manual", reason: `Task ${task.backlogTaskId} requires approval before dispatch` });
+  if (boundExperiment !== undefined) context.store.events.appendExperimentBinding(build.id, boundExperiment);
   return build;
+  });
 }
 
 function createTaskInput(

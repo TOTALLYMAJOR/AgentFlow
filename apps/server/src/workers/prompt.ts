@@ -100,6 +100,13 @@ DECLARED VALIDATION COMMANDS
 These are immutable plan data and will be run independently by AgentFlow. You may run useful non-Docker checks while implementing.
 ${renderList(context.task.validationCommands)}
 
+${context.waleExperiment === undefined ? "" : `BOUND RUN LAB OVERLAY
+${JSON.stringify(context.waleExperiment.parameters, null, 2)}
+Experiment: ${context.waleExperiment.experimentId}
+Strategy is advisory within the approved task. Delivery size is a conservative cumulative all-text churn proxy, not eligible source LOC.
+Profile/check references are retained references only; execution metrics remain unknown without native evidence.
+The human interruption budget never waives mandatory approval, validation, checks or authority escalation. If the size cannot fit, SPLIT_OR_REPLAN requires separate authority; do not expand scope or bypass controls.
+`}
 REPOSITORY INSTRUCTIONS
 ${context.repositoryInstructions.trim() || "No additional repository instructions supplied."}
 

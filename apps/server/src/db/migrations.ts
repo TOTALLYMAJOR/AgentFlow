@@ -756,6 +756,12 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 15, name: "multi_repository_initiative_runtime", sql: INITIATIVE_RUNTIME_SCHEMA },
   { version: 16, name: "durable_git_cleanup_receipts", sql: CLEANUP_RECEIPT_SCHEMA },
   { version: 17, name: "immutable_initiative_replanning", sql: INITIATIVE_REPLAN_SCHEMA },
+  { version: 18, name: "immutable_wale_experiment_binding", sql: `
+CREATE UNIQUE INDEX wale_experiment_per_build ON build_events(build_id)
+WHERE event_type = 'wale.experiment.bound';
+CREATE UNIQUE INDEX wale_experiment_identity ON build_events(json_extract(payload_json, '$.experimentId'))
+WHERE event_type = 'wale.experiment.bound';
+` },
 ]);
 
 interface MigrationRow {
