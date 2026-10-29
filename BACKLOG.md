@@ -27,28 +27,40 @@ owns:
   - apps/server/src/domain/types.ts
   - apps/server/test/design-intelligence-integration.test.ts
   - apps/server/test/planning.test.ts
+  - tests/fixtures/proofloom-agentflow-traffic-control/wale-run-lab-contract.json
+  - apps/server/src/config/environment.ts
+  - apps/server/src/db/event-repository.ts
+  - apps/server/src/http/routes/builds.ts
+  - apps/server/src/http/routes/wale-run-lab.ts
+  - apps/server/src/integration/design-intelligence-receipt.ts
+  - apps/server/src/integration/wale-run-lab.ts
+  - apps/server/src/integration/wale-run-lab-receipt-bundle.ts
+  - apps/server/test/wale-run-lab.test.ts
+  - docs/INSTALLATION.md
+  - docs/SECURITY.md
 validate:
+  - npm test -- --run apps/server/test/wale-run-lab.test.ts
   - npm test -- --run apps/server/test/design-intelligence-integration.test.ts apps/server/test/planning.test.ts
   - npm run typecheck
 produces:
   - name: design-intelligence-governed-task-handoff
     type: design-intelligence/governed-task-handoff
-    version: 2.0.0
+    version: 2.1.0
     path: apps/server/src/integration/design-intelligence.ts
   - name: agentflow-build-receipt
     type: agentflow/build-receipt
-    version: 1.0.0
+    version: 1.1.0
     path: apps/server/src/http/routes/design-intelligence.ts
 ```
 
-Converge the existing `codex/traffic-control-integration` implementation with current `main`, retaining the additive importer and immutable-plan binding for `design-intelligence/governed-task-handoff@2.0.0` and the emitted `agentflow/build-receipt@1.0.0`. Preserve the exact repository/authority snapshot, canonical digest, source task IDs, dependency DAG, ownership, acceptance criteria, validations, and produces/consumes semantics. Keep v1 behavior available only where explicitly supported outside v2 execution; never downgrade a v2 request. Resolve integration conflicts through current AgentFlow authorities rather than reimplementing the Wave 0 contracts.
+Converge the existing `codex/traffic-control-integration` implementation with current `main`, retaining the additive importer and immutable-plan binding for `design-intelligence/governed-task-handoff@2.1.0` and the emitted `agentflow/build-receipt@1.1.0`. Preserve the exact repository/authority snapshot, canonical digest, source task IDs, dependency DAG, ownership, acceptance criteria, validations, and produces/consumes semantics. Keep v1 behavior available only where explicitly supported outside v2 execution; never downgrade a v2 request. Resolve integration conflicts through current AgentFlow authorities rather than reimplementing the Wave 0 contracts.
 
 ### Acceptance Criteria
 
 - Admission independently verifies approval authority, repository identity, exact commit and clean state, complete authority-source hashes, governance currency, canonical payload digest, and base ancestry before plan creation.
 - The immutable plan stores the exact v2 handoff digest and authority snapshot; later source, task, dependency, ownership, acceptance, validation, or artifact drift invalidates execution.
 - The governed build receipt is derived from native AgentFlow task, validation, changed-path, commit, integration, approval, event, and artifact records rather than a worker claim or HandoffManifest alone.
-- The converged implementation preserves the accepted `2.0.0` handoff and `1.0.0` receipt behavior; proposed `2.1.0` or `1.1.0` extensions remain unratified until canonical JSON, digest rules, required fields, compatibility fixtures, and refusal behavior are frozen.
+- The candidate retains strict handoff `2.1.0` and receipt `1.1.0` as a bounded amendment to the earlier 2.0.0/1.0.0 task declaration. Owner adoption binds G2 contract requirements and pinned source inputs; canonical JSON, digest rules, required fields, compatibility fixtures and refusal behavior must pass on the exact combined revision before qualification. No downgrade, receipt 2.0.0, private-probe or unrelated Harness Profile extension is authorized.
 
 ### Refusal and negative tests
 
@@ -58,6 +70,11 @@ Converge the existing `codex/traffic-control-integration` implementation with cu
 ### Proof boundary
 
 Passing proves local AgentFlow v2 admission, immutable binding, and receipt construction only. It does not prove Traffic Control parity, runtime dispatch, deployment, provider behavior, production readiness, human acceptance, or outcomes.
+
+### G2 bounded adoption amendment
+
+Preserve this task identity, dependencies and existing acceptance/refusal requirements. Implementation is limited to the exact path/hunk ceiling in the owner-approved G2 packet based on c5d25181a3e4f7665f38753cf374264bcc2cd69b. Scope declarations inherited from earlier work do not expand that ceiling. No task is completed by adoption.
+Bind exact experiment/run/snapshot/task/criteria through immutable native plan/build records. Defer recovered runtime verifier and its integration entirely; no public handoff/plan runtime extension or runtime activation. This preserves the recovered historical evidence rather than adding disconnected runtime capability. Own the exact shared public fixture file here before dependent tasks; AFI-003 no longer owns its parent fixture directory. Tasks requiring an unsupported runtime binding must stop for a separate exact contract/owner amendment. Authentication precedes body parsing; duplicate/unknown Start never creates an automatic second dispatch. Keep historical observation separate from current admission. Recovered runtime source is not runtime activation approval.
 
 ## AFI-002 - Converge native observations and Governor interventions
 
@@ -81,13 +98,23 @@ owns:
   - apps/server/src/db/types.ts
   - apps/server/src/db/repositories.ts
   - apps/server/test/traffic-control-integration.test.ts
+  - apps/server/src/workers/types.ts
+  - apps/server/src/workers/prompt.ts
+  - apps/server/src/integration/delivery-size.ts
+  - apps/server/src/integration/manager.ts
+  - apps/server/src/integration/types.ts
+  - apps/server/test/database.test.ts
+  - apps/server/test/delivery-size.test.ts
+  - apps/server/test/integration-runtime.test.ts
+  - apps/server/test/worker-runtime.test.ts
 validate:
+  - npm test -- --run apps/server/test/database.test.ts apps/server/test/delivery-size.test.ts apps/server/test/integration-runtime.test.ts apps/server/test/worker-runtime.test.ts apps/server/test/governor-control-service.test.ts apps/server/test/traffic-control-observation.test.ts
   - npm test -- --run apps/server/test/traffic-control-integration.test.ts apps/server/test/orchestration.test.ts
   - npm run typecheck
 consumes:
   - task: AFI-001
     artifact: design-intelligence-governed-task-handoff
-    version: 2.0.0
+    version: 2.1.0
 produces:
   - name: traffic-control-execution-observation
     type: traffic-control/execution-observation
@@ -116,6 +143,11 @@ Converge the existing Wave 0 TCP-002 observations as immutable projections from 
 
 Passing proves local projections and acknowledged use of existing AgentFlow transitions. It does not make Traffic Control authoritative, prove remote transport, or authorize production intervention.
 
+### G2 bounded adoption amendment
+
+Preserve this task identity, dependencies and existing acceptance/refusal requirements. Implementation is limited to the exact path/hunk ceiling in the owner-approved G2 packet based on c5d25181a3e4f7665f38753cf374264bcc2cd69b. Scope declarations inherited from earlier work do not expand that ceiling. No task is completed by adoption.
+Keep current-main Traffic Control evaluation, guarded intervention and durable acknowledgement. Enforce the conservative text-churn ceiling without claiming eligible source LOC. Never suppress approvals or validation to satisfy interruption/size parameters. Only append migrations.
+
 ## AFI-003 - Re-prove the return loop on the converged branch
 
 Classification: **MVP**
@@ -130,14 +162,16 @@ depends_on:
   - AFI-002
 owns:
   - tests/proofloom-agentflow-traffic-control.acceptance.integration.test.ts
-  - tests/fixtures/proofloom-agentflow-traffic-control/
+  - apps/server/test/wale-run-lab-bridge.test.ts
 validate:
+  - npm test -- --run apps/server/test/wale-run-lab-bridge.test.ts
+  - npm run verify
   - npm run test:integration -- tests/proofloom-agentflow-traffic-control.acceptance.integration.test.ts
   - npm run typecheck
 consumes:
   - task: AFI-001
     artifact: agentflow-build-receipt
-    version: 1.0.0
+    version: 1.1.0
   - task: AFI-002
     artifact: traffic-control-execution-observation
     version: 1.0.0
@@ -166,6 +200,11 @@ Re-run the real local service path from the converged AgentFlow branch with boun
 ### Proof boundary
 
 Passing proves one bounded local return loop. It does not prove deployment, remote/provider operation, a consuming-repository pilot, production use, or human outcome acceptance.
+
+### G2 bounded adoption amendment
+
+Preserve this task identity, dependencies and existing acceptance/refusal requirements. Implementation is limited to the exact path/hunk ceiling in the owner-approved G2 packet based on c5d25181a3e4f7665f38753cf374264bcc2cd69b. Scope declarations inherited from earlier work do not expand that ceiling. No task is completed by adoption.
+Retain the existing full local return-loop obligation and add Run Lab/Orbit exact-ID interoperability, current admission, crash/replay/evidence refusal cases. Real provider execution and consuming-repository production mutation remain excluded. Fixture-only passes must not be called real-provider qualification.
 
 ## HP-001 - Admit and immutably bind the Harness Profile
 
