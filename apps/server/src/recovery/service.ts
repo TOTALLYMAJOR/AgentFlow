@@ -124,6 +124,13 @@ export class RecoveryService {
           "recorded result commit or task worktree cannot be verified",
         );
       }
+      if (task.state === "integrating") {
+        return this.pauseForReview(
+          build,
+          task,
+          "unfinished integration has no recorded integration commit; native review is required",
+        );
+      }
       const validations = this.store.validations
         .listForBuild(build.id)
         .filter(
@@ -255,6 +262,10 @@ export class RecoveryService {
   }
 
   private advanceToValidated(taskId: string): void {
+    const existing = this.store.tasks.getById(taskId);
+    if (["validated", "integrating", "integrated"].includes(existing.state)) {
+      return;
+    }
     this.advanceToValidating(taskId);
     const task = this.store.tasks.getById(taskId);
     if (task.state === "validating") {

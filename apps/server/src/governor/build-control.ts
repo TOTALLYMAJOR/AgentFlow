@@ -60,13 +60,14 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
   const evidence = usesNativeValidationEvidence(handoff)
     ? { items: certificates.map((item) => item.id), satisfied: certificates.map((item) => item.body.artifact.name), contradictory: legacyEvidence.contradictory }
     : legacyEvidence;
+  let currentFailure: TrafficControlFailure | null = null;
   const failures: TrafficControlFailure[] = tasks.flatMap((task) =>
     dependencies.store.tasks.listAttempts(task.id)
       .filter((attempt) => attempt.errorCode !== null)
       .map((attempt) => {
         const code = attempt.errorCode ?? "UNKNOWN";
         const retryable = DEFAULT_RETRYABLE_FAILURE_CODES.has(code);
-        return {
+        const failure: TrafficControlFailure = {
           code,
           classification: retryable ? "transient" as const : "deterministic" as const,
           retryable,
@@ -74,6 +75,8 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
           files: dependencies.store.tasks.listChangedFiles(task.id, attempt.attempt).map((file) => file.path),
           fingerprint: "",
         };
+        if (task.state === "failed" && attempt.attempt === task.attempt && attempt.status === "failed") currentFailure = failure;
+        return failure;
       }),
   );
   const changedOwners = new Map<string, Set<string>>();
@@ -106,6 +109,7 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     activeTaskCollisions: [...changedOwners.entries()].filter(([, owners]) => owners.size > 1).map(([changedPath]) => changedPath),
     evidence,
     failures,
+    currentFailure,
   });
   const prior = events.filter((event) => event.type === "governor.decision").at(-1)?.payload.recordHash;
   return new GovernorControlService(dependencies.store.events).evaluate({

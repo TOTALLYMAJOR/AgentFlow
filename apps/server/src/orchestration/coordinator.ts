@@ -395,9 +395,16 @@ export class BuildCoordinator {
 
   async queueIntegration(build: BuildEntity, task: TaskEntity): Promise<void> {
     await this.ensureRuntime(build);
-    this.startRecoveredTaskOperation(build.id, task.id, (signal) =>
-      this.integrateValidatedTask(build.id, task.id, signal),
-    );
+    this.startRecoveredTaskOperation(build.id, task.id, async (signal) => {
+      const currentBuild = this.store.builds.getById(build.id);
+      const currentTask = this.store.tasks.getById(task.id);
+      if (currentBuild.status !== "running" || currentTask.buildId !== currentBuild.id || currentTask.state !== "validated") return;
+      const governed = await this.governBuild(currentBuild.id);
+      if (governed !== undefined && !governed.continue) return;
+      const latestTask = this.store.tasks.getById(task.id);
+      if (this.store.builds.getById(build.id).status !== "running" || latestTask.state !== "validated" || latestTask.attempt !== currentTask.attempt || latestTask.resultCommit !== currentTask.resultCommit) return;
+      await this.integrateValidatedTask(build.id, task.id, signal);
+    });
   }
 
   private startRecoveredTaskOperation(

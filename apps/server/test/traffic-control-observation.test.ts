@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { canonicalJsonSha256 } from "../src/integration/design-intelligence.js";
-import { bindTrafficControlContract, projectAgentFlowObservation } from "../src/integration/traffic-control.js";
+import { bindTrafficControlContract, projectAgentFlowObservation, type AgentFlowObservationInput, type TrafficControlFailure } from "../src/integration/traffic-control.js";
 import { approvedGovernedHandoff } from "./helpers/governed-handoff.js";
 
 const handoff = approvedGovernedHandoff({
@@ -87,5 +87,36 @@ describe("AgentFlow Traffic Control observation adapter", () => {
       taskChanges: [], impactedPaths: [], activeTaskCollisions: [],
       evidence: { items: [], satisfied: [], contradictory: [] }, failures: [],
     })).toThrow("authoritative handoff digest");
+  });
+
+  const failure: TrafficControlFailure = { code: "TEST_FAILED", classification: "deterministic", retryable: false, signature: "same", fingerprint: "" };
+  function failureInput(): AgentFlowObservationInput {
+    return { contract: bindTrafficControlContract(handoff), buildId: "build", phase: "RUNNING", attempt: 2, maxAttempts: 3, authority, taskChanges: [], impactedPaths: [], activeTaskCollisions: [], evidence: { items: [], satisfied: [], contradictory: [] }, failures: [failure, failure] };
+  }
+
+  it("explicit null means no active failure while preserving full normalized history", () => {
+    const observation = projectAgentFlowObservation({ ...failureInput(), currentFailure: null });
+    expect(observation.failure).toBeNull();
+    expect(observation.failureRepeatCount).toBe(0);
+    expect(observation.failureHistory).toHaveLength(2);
+    expect(observation.failureHistory[0]?.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("omitted and undefined current failure preserve legacy fallback", () => {
+    for (const input of [failureInput(), { ...failureInput(), currentFailure: undefined }]) {
+      const observation = projectAgentFlowObservation(input);
+      expect(observation.failure?.code).toBe("TEST_FAILED");
+      expect(observation.failureRepeatCount).toBe(2);
+    }
+  });
+
+  it("normalizes explicit current failure and counts matching history without replacing it", () => {
+    const observation = projectAgentFlowObservation({ ...failureInput(), currentFailure: { ...failure, code: "OTHER", signature: "new" } });
+    expect(observation.failure?.code).toBe("OTHER");
+    expect(observation.failure?.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(observation.failureRepeatCount).toBe(0);
+    expect(observation.failureHistory.map((item) => item.code)).toEqual(["TEST_FAILED", "TEST_FAILED"]);
+    const repeated = projectAgentFlowObservation({ ...failureInput(), currentFailure: failure });
+    expect(repeated.failureRepeatCount).toBe(2);
   });
 });

@@ -2,6 +2,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDatabaseRepositories } from "../src/db/index.js";
 import { RecoveryService } from "../src/recovery/index.js";
+import { HandoffManifestService } from "../src/artifacts/index.js";
 import {
   createDatabaseFixture,
   type DatabaseFixture,
@@ -165,6 +166,76 @@ describe("startup recovery", () => {
     expect(store.approvals.listPending("build_1", "task_validate")).toEqual([
       expect.objectContaining({ approvalType: "manual" }),
     ]);
+  });
+
+  async function durableStageFixture() {
+    fixture = createDatabaseFixture();
+    const directory = fixture.directory;
+    const store = createDatabaseRepositories(fixture.database);
+    store.repositories.create({ id: "repo", name: "recovery", localPath: fixture.directory, configPath: ".agentflow.yaml", baseBranch: "main" });
+    store.builds.create({ id: "build", repositoryId: "repo", backlogPath: "BACKLOG.md", baseCommit: "base", integrationBranch: "integration", integrationWorktree: fixture.directory, status: "running", tasks: [{ id: "task", backlogTaskId: "AF-001", title: "task", description: "task", acceptanceCriteria: ["durable"], state: "running", attempt: 1, resultCommit: "result", baseCommit: "base", branchName: "task-branch", worktreePath: fixture.directory }] });
+    store.tasks.createAttempt({ id: "attempt", taskId: "task", buildId: "build", attempt: 1, status: "succeeded", resultCommit: "result" });
+    store.tasks.transition("task", "validating");
+    store.tasks.transition("task", "validated", { resultCommit: "result" });
+    store.validations.create({ id: "validation", buildId: "build", taskId: "task", validationType: "task", command: "npm test", status: "passed" });
+    const manifests = new HandoffManifestService(store, path.join(fixture.directory, "artifacts"));
+    const publication = { buildId: "build", taskId: "task", backlogTaskId: "AF-001", attempt: 1, baseCommit: "base", resultCommit: "result", branch: "task-branch", worktreePath: fixture.directory, changedFiles: [], consumes: [], produces: [] };
+    await manifests.publish({ ...publication, status: "validated" });
+    const queueIntegration = vi.fn();
+    const recoveredIntegration = vi.fn(async () => { await manifests.publish({ ...publication, status: "integrated", integrationCommit: "integration-result" }); });
+    const recovery = new RecoveryService({ store, resolveRepositoryPath: async () => directory, pathExists: async () => true, commitExists: async () => true, queueIntegration, recoveredIntegration });
+    return { store, recovery, queueIntegration, recoveredIntegration, directory };
+  }
+
+  it("reconciles already validated records repeatedly without downgrading or losing durable proof", async () => {
+    const { store, recovery, queueIntegration } = await durableStageFixture();
+    const taskBefore = store.tasks.getById("task");
+    const manifestBefore = store.manifests.findForTask("task", "validated", 1);
+    await recovery.reconcileActiveBuilds();
+    await recovery.reconcileActiveBuilds();
+    expect(store.tasks.getById("task")).toEqual(taskBefore);
+    expect(store.manifests.findForTask("task", "validated", 1)).toEqual(manifestBefore);
+    expect(queueIntegration).toHaveBeenCalledTimes(2);
+    expect(store.events.listForBuild("build").filter((event) => event.type === "recovery.validation_confirmed")).toHaveLength(0);
+  });
+
+  it("pauses unfinished integrating recovery for review without downgrade or silent deadlock", async () => {
+    const { store, recovery, queueIntegration } = await durableStageFixture();
+    store.tasks.transition("task", "integrating");
+    const taskBefore = store.tasks.getById("task");
+    const manifestBefore = store.manifests.findForTask("task", "validated", 1);
+    for (let index = 0; index < 2; index += 1) {
+      expect(await recovery.reconcileActiveBuilds()).toContainEqual(expect.objectContaining({ taskId: "task", action: "pause_for_review" }));
+    }
+    expect(store.builds.getById("build").status).toBe("paused");
+    expect(store.approvals.listPending("build", "task")).toHaveLength(1);
+    expect(store.tasks.getById("task")).toEqual(taskBefore);
+    expect(store.manifests.findForTask("task", "validated", 1)).toEqual(manifestBefore);
+    expect(queueIntegration).not.toHaveBeenCalled();
+  });
+
+  it("recovers verified recorded integration through existing native hooks once, retaining current manifests", async () => {
+    const { store, recovery, queueIntegration, recoveredIntegration } = await durableStageFixture();
+    store.tasks.transition("task", "integrating", { integrationCommit: "integration-result" });
+    expect(await recovery.reconcileActiveBuilds()).toContainEqual(expect.objectContaining({ action: "recover_integrated_manifest" }));
+    const integrated = store.tasks.getById("task");
+    const manifest = store.manifests.findForTask("task", "integrated", 1);
+    expect(integrated).toMatchObject({ state: "integrated", resultCommit: "result", integrationCommit: "integration-result" });
+    expect(manifest).toBeDefined();
+    await recovery.reconcileActiveBuilds();
+    expect(store.tasks.getById("task")).toEqual(integrated);
+    expect(store.manifests.findForTask("task", "integrated", 1)).toEqual(manifest);
+    expect(queueIntegration).not.toHaveBeenCalled();
+    expect(recoveredIntegration).toHaveBeenCalledOnce();
+  });
+
+  it("keeps missing result-commit proof fail-closed for an already validated task", async () => {
+    const { store, queueIntegration, directory } = await durableStageFixture();
+    const recovery = new RecoveryService({ store, resolveRepositoryPath: async () => directory, pathExists: async () => true, commitExists: async () => false, queueIntegration });
+    expect(await recovery.reconcileActiveBuilds()).toContainEqual(expect.objectContaining({ action: "pause_for_review" }));
+    expect(store.builds.getById("build").status).toBe("paused");
+    expect(queueIntegration).not.toHaveBeenCalled();
+    expect(store.tasks.getById("task").state).toBe("validated");
   });
 });
 

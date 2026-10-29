@@ -68,6 +68,7 @@ export interface AgentFlowObservationInput {
   activeTaskCollisions: string[];
   evidence: TrafficControlObservation["evidence"];
   failures: TrafficControlFailure[];
+  currentFailure?: TrafficControlFailure | null | undefined;
   previousEvidence?: TrafficControlObservation["evidence"];
   structuralConcern?: { reason: string; source?: string } | null;
 }
@@ -109,7 +110,11 @@ export function projectAgentFlowObservation(input: AgentFlowObservationInput): T
   const evidence = normalizeEvidence(input.evidence);
   const delta = evidenceDelta(normalizeEvidence(input.previousEvidence ?? { items: [], satisfied: [], contradictory: [] }), evidence);
   const failureHistory = input.failures.map((failure) => ({ ...failure, fingerprint: failure.fingerprint || fingerprintFailure(failure) }));
-  const failure = failureHistory.at(-1) ?? null;
+  const failure = input.currentFailure === undefined
+    ? failureHistory.at(-1) ?? null
+    : input.currentFailure === null
+      ? null
+      : { ...input.currentFailure, fingerprint: input.currentFailure.fingerprint || fingerprintFailure(input.currentFailure) };
   const repeatCount = failure === null ? 0 : failureHistory.filter((candidate) => candidate.fingerprint === failure.fingerprint).length;
   return {
     schema: "traffic-control/execution-observation@1",
