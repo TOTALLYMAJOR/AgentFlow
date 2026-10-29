@@ -1,0 +1,24 @@
+version: 1
+repository:
+  name: agentflow-g2-local-candidate
+  base_branch: codex/wale-g2-integration-20261029
+backlog:
+  path: BACKLOG.md
+workers:
+  maximum: 1
+contracts:
+  roots:
+    - apps/server/src/integration
+validation:
+  task_default:
+    - npm run typecheck
+  integration:
+    - npm run verify
+docker:
+  enabled: false
+  compose_file: docker-compose.yml
+git:
+  remote: origin
+  push_task_branches: false
+  push_integration_branch: false
+  open_integration_pull_request: false

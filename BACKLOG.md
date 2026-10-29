@@ -21,6 +21,7 @@ epic_outcome: AgentFlow admits only an exact approved v2 authority snapshot and 
 estimate_hours: 8
 depends_on: []
 owns:
+  - .agentflow.yaml
   - apps/server/src/integration/design-intelligence.ts
   - apps/server/src/http/routes/design-intelligence.ts
   - apps/server/src/http/routes/plans.ts
