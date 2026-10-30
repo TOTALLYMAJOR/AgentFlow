@@ -32,7 +32,7 @@ describe("AFI-003 genuine local native return loop", () => {
     const provider = path.join(control, "fixture-provider.mjs");
     const sentinel = path.join(control, "fixture-provider-calls.jsonl");
     // Explicit executable I/O double. It has no child-process/network calls or real provider fallback.
-    await writeFile(provider, `#!/usr/bin/env node\nimport {readFileSync,appendFileSync,mkdirSync,writeFileSync} from 'node:fs';\nreadFileSync(0,'utf8');\nappendFileSync(${JSON.stringify(sentinel)}, JSON.stringify({executable:process.argv[1],cwd:process.cwd()})+'\\n');\nlet mode; do { try { mode=JSON.parse(readFileSync(${JSON.stringify(path.join(control, 'provider-mode.json'))},'utf8')).mode; } catch { mode='complete'; } if(mode==='hold') await new Promise(r=>setTimeout(r,100)); } while(mode==='hold');\nif(mode==='fail')process.exit(23);\nmkdirSync('src/contracts',{recursive:true});writeFileSync('src/contracts/result.txt',mode==='overflow'?'qualified\\n'+'extra\\n'.repeat(32):'qualified\\n');\nprocess.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify({status:'completed',summary:'Explicit fixture-only worker',validation_notes:['Native validator must run npm test'],handoff_notes:['No provider API invoked']})}})+'\\n');\n`);
+    await writeFile(provider, `#!/usr/bin/env node\nimport {readFileSync,appendFileSync,mkdirSync,writeFileSync} from 'node:fs';\nreadFileSync(0,'utf8');\nappendFileSync(${JSON.stringify(sentinel)}, JSON.stringify({executable:process.argv[1],cwd:process.cwd()})+'\\n');\nlet mode; do { try { mode=JSON.parse(readFileSync(${JSON.stringify(path.join(control, 'provider-mode.json'))},'utf8')).mode; } catch { mode='complete'; } if(mode==='hold') await new Promise(r=>setTimeout(r,100)); } while(mode==='hold');\nif(mode==='fail')process.exit(23);\nmkdirSync('src/contracts',{recursive:true});writeFileSync('src/contracts/result.txt',mode==='invalid-check'?'invalid\\n':mode==='overflow'?'qualified\\n'+'extra\\n'.repeat(32):'qualified\\n');\nprocess.stdout.write(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify({status:'completed',summary:'Explicit fixture-only worker',validation_notes:['Native validator must run npm test'],handoff_notes:['No provider API invoked']})}})+'\\n');\n`);
     await chmod(provider, 0o700);
     expect(path.isAbsolute(provider)).toBe(true); await access(provider);
     const host = spawn("python3", [hostScript, control], { env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" }, stdio: ["ignore", "pipe", "pipe"] });
@@ -180,6 +180,18 @@ describe("AFI-003 genuine local native return loop", () => {
       await writeFile(path.join(control,"overflow-native-records.json"),JSON.stringify({build:context.store.builds.getById(overflowBuild),tasks:overflowTasks,validations:context.store.validations.listForBuild(overflowBuild),events:overflowEvents},null,2));
       if(context.store.builds.getById(overflowBuild).status==="paused"){const cancelled=await http(`/api/builds/${overflowBuild}/cancel`,{});expect(cancelled.status).toBe(200);}
       expect(context.store.builds.listActive()).toHaveLength(0);
+      // The I/O double reports completion but emits invalid output. The unchanged
+      // declared native check must refuse it before integration/certification.
+      await writeFile(path.join(control,"provider-mode.json"),JSON.stringify({mode:"invalid-check"}));
+      const failedCheckPrepared=await overflowHttp("/api/run-lab/experiments",{parameters:{deliverySize:999,humanInterruptionBudget:1,strategy:"NORMAL_EXECUTION",verificationProfile:"design-standard"}});expect(failedCheckPrepared.status).toBe(200);const failedCheckExperiment=String(failedCheckPrepared.body.experimentId);
+      const failedCheckStart=await overflowHttp(`/api/run-lab/experiments/${failedCheckExperiment}/start`,{});expect(failedCheckStart.status,JSON.stringify(failedCheckStart.body)).toBe(200);
+      const failedCheckBinding=await until(async()=>context.store.events.findByExperimentId(failedCheckExperiment),"failed-check native binding");const failedCheckBuild=failedCheckBinding.buildId;
+      await until(async()=>{const build=context.store.builds.getById(failedCheckBuild);return ["failed","cancelled","paused"].includes(build.status)?build:undefined;},"actual declared native check refusal");
+      const failedCheckTasks=context.store.tasks.listForBuild(failedCheckBuild);const failedCheckValidations=context.store.validations.listForBuild(failedCheckBuild);const failedCheckEvents=context.store.events.listForBuild(failedCheckBuild,{limit:10000});
+      expect(failedCheckValidations.some(item=>item.validationType==="task"&&item.status==="failed"&&item.exitCode!==0)).toBe(true);expect(failedCheckTasks.some(task=>task.state==="integrated")).toBe(false);expect(failedCheckEvents.some(event=>event.type==="integration.completed"||event.type==="evidence.native_validation_certified")).toBe(false);
+      await writeFile(path.join(control,"failed-check-native-records.json"),JSON.stringify({build:context.store.builds.getById(failedCheckBuild),tasks:failedCheckTasks,validations:failedCheckValidations,events:failedCheckEvents},null,2));
+      if(context.store.builds.getById(failedCheckBuild).status==="paused"){expect((await http(`/api/builds/${failedCheckBuild}/cancel`,{})).status).toBe(200);}
+      expect(context.store.builds.listActive()).toHaveLength(0);
       await writeFile(path.join(control,"provider-mode.json"),JSON.stringify({mode:"complete"}));
       const restored=await nativeHttp("/api/run-lab/experiments",{parameters:{deliverySize:1000,humanInterruptionBudget:1,strategy:"NORMAL_EXECUTION",verificationProfile:"design-standard"}});expect(restored.status).toBe(200);expect(restored.body.experimentId).toBe(mainExperiment);const restoredCurrent=await nativeHttp("/api/run-lab/experiments/current");expect(restoredCurrent.status).toBe(200);expect(restoredCurrent.body).toMatchObject({prepared:{experimentId:mainExperiment},observation:{auditState:"PASS",lastKnown:{status:"completed"}}});
       await writeFile(path.join(output,"active-fixture.json"),JSON.stringify({control,...browser,orbitBase:browser.orbitUrl,agentflowUrl:address,sourceBuild,mainBuild,mainExperiment,overflowBuild,overflowExperiment,b0:fixture.b0,b1,fixtureProvider:provider,claimBoundary:"Temporary native fixture; explicit worker I/O double; zero real provider executable calls"},null,2));
@@ -201,4 +213,19 @@ describe("AFI-003 genuine local native return loop", () => {
       await writeFile(path.join(control,"fixture-host.log"),hostLog);
     }
   }, 1_900_000);
+});
+
+describe("AFI-003 capability receipt audit", () => {
+  it.skipIf(process.env.AFI003_CAPABILITY_EXPORT === undefined)("independently audits actual native record-derived export and refuses tampered plan bytes", async () => {
+    // Explicit descriptor from the real native-producer fixture. It carries no
+    // caller observation PASS and is never an execution approval or provider claim.
+    const descriptor=required("AFI003_CAPABILITY_EXPORT");const nativeRoot=required("AFI003_NATIVE_ROOT");
+    const input=await jsonFile<{classification:string;receipt:unknown;handoff:unknown;binding:unknown;evidenceRoot:string}>(descriptor);if(input===undefined)throw new Error("Missing explicit native capability fixture");
+    expect(input.classification).toBe("ACTUAL_NATIVE_PRODUCER_UNIT_FIXTURE_NOT_HTTP_OR_PROVIDER");
+    const audit=async()=>{const result=await execute("python3",["-B","-c","import json,sys;from design_intelligence.agentflow_contracts import audit_capability_plan_receipt;d=json.load(open(sys.argv[1]));print(json.dumps(audit_capability_plan_receipt(d['binding'],d['receipt'],handoff=d['handoff'],evidence_root=d['evidenceRoot'])))",descriptor],{cwd:nativeRoot,env:{...process.env,PYTHONDONTWRITEBYTECODE:"1"}});return JSON.parse(result.stdout) as {status:string;capabilityVerified:boolean};};
+    expect(await audit()).toMatchObject({status:"PASS",capabilityVerified:true});
+    const receipt=input.receipt as {evidence:{artifacts:Array<{class:string;path:string}>}};const plan=receipt.evidence.artifacts.find(item=>item.class==="capability-plan");if(plan===undefined)throw new Error("Actual export is missing plan");
+    const planPath=path.join(input.evidenceRoot,plan.path);const bytes=await readFile(planPath);
+    try{await writeFile(planPath,"tampered");expect(await audit()).toMatchObject({status:"FAIL",capabilityVerified:false});}finally{await writeFile(planPath,bytes);}
+  });
 });

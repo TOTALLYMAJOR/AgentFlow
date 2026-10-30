@@ -14,8 +14,8 @@ import { makeDesignIntelligenceReceipt } from "../src/integration/design-intelli
 import { DEFAULT_ORGANIZATION_POLICY } from "../src/governance/organization-policy.js";
 import type { AgentFlowContext } from "../src/http/context.js";
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -429,7 +429,7 @@ describe("Design Intelligence integration", () => {
 
 // This fixture executes native validation/commit/manifest producers, then exercises
 // the evidence seam. It does not claim HTTP admission or a provider journey.
-async function nativeEvidenceFixture() {
+async function nativeEvidenceFixture(capability = false, defect?: "wrong-task" | "unknown-check") {
   const database = createDatabaseFixture();
   const root = path.join(database.directory, "repository");
   const environment = resolveEnvironment({ AGENTFLOW_HOME: path.join(database.directory, "runtime") });
@@ -443,10 +443,17 @@ async function nativeEvidenceFixture() {
     const authorityBytes = "# Synthetic native evidence test authority\n";
     await writeFile(path.join(root, "AGENTS.md"), authorityBytes);
     await writeFile(path.join(root, "package.json"), JSON.stringify({ private: true, scripts: { test: "node --check src/index.js" } }));
+    const semanticCheck = capability && defect === undefined && process.env.AFI003_NATIVE_ROOT !== undefined;
+    if (semanticCheck) await writeFile(path.join(root, "src", "capability-check.mjs"), `import {spawnSync} from 'node:child_process';
+const result=spawnSync('python3',['-B','-c',${JSON.stringify("import json,sys;sys.path.insert(0,sys.argv[1]);from design_intelligence.agentflow_contracts import bind_capability_plan_to_handoff;h=json.load(open('handoff.json'));p=json.load(open('src/capability-plan.json'));b=json.load(open('src/capability-binding.json'));h['authority']['status']='PROPOSED';[h['authority'].pop(k,None) for k in ('approvedBy','approvedAt','approvalReceipt')];actual=bind_capability_plan_to_handoff(h,p,repository_id=p['context']['repositoryId'],composition_sha256=p['bindings']['compositionSha256'],law_decision_sha256=p['bindings']['lawDecisionSha256']);assert actual['binding']==b,'exact binding mismatch';print('unchanged Proofloom plan/binding semantic validation PASS')")},${JSON.stringify(process.env.AFI003_NATIVE_ROOT)}],{encoding:'utf8'});process.stdout.write(result.stdout??'');process.stderr.write(result.stderr??'');process.exit(result.status??1);\n`);
     await execFileAsync("git", ["-C", root, "add", "."]);
     await execFileAsync("git", ["-C", root, "commit", "-m", "fixture base"]);
     const baseCommit = (await execFileAsync("git", ["-C", root, "rev-parse", "HEAD"])).stdout.trim();
-    const handoff = GovernedTaskHandoffSchema.parse(approvedHandoff(baseCommit, createHash("sha256").update(authorityBytes).digest("hex"), undefined, undefined, { produces: [{ name: "focused tests", type: "agentflow/native-task-validation-evidence", version: "1.0.0" }] }));
+    const commands = capability ? ["npm test", "node --check src/index.js", ...(semanticCheck ? ["node src/capability-check.mjs"] : [])] : ["npm test"];
+    const labels = capability ? ["focused tests", "capability-plan", "capability-observation"] : ["focused tests"];
+    const produces: Array<{ name: string; type: string; version: string; path?: string }> = labels.map((name) => ({ name, type: "agentflow/native-task-validation-evidence", version: "1.0.0" }));
+    if (capability) produces.push({ name: "plan-document", type: "design-intelligence/capability-activation-plan", version: "1.0.0", path: "src/capability-plan.json" }, { name: "binding-document", type: "design-intelligence/capability-handoff-binding", version: "1.0.0", path: "src/capability-binding.json" });
+    const handoff = GovernedTaskHandoffSchema.parse(approvedHandoff(baseCommit, createHash("sha256").update(authorityBytes).digest("hex"), undefined, undefined, { produces, requiredEvidence: labels, validate: commands }));
     await writeFile(path.join(root, "handoff.json"), JSON.stringify(handoff));
     await execFileAsync("git", ["-C", root, "add", "handoff.json"]);
     await execFileAsync("git", ["-C", root, "commit", "-m", "fixture approved carrier"]);
@@ -454,20 +461,25 @@ async function nativeEvidenceFixture() {
     const plan = planBacklogMarkdown(renderBacklog(handoff, "handoff.json", "BACKLOG.md")).plan;
     if (plan === undefined) throw new Error("Expected native fixture plan");
     store.repositories.create({ id: "evidence-repo", name: "evidence fixture", localPath: root, configPath: ".agentflow.yaml", baseBranch: "main" });
-    store.builds.create({ id: "evidence-build", repositoryId: "evidence-repo", backlogPath: "BACKLOG.md", baseCommit: executionBase, integrationBranch: "fixture-integration", status: "running", normalizedPlan: { ...plan, createdAt: new Date().toISOString(), governedHandoff: { id: handoff.handoffId, sha256: canonicalJsonSha256(handoff), path: "handoff.json", governedBaseCommit: baseCommit, executionBaseCommit: executionBase, carrierPaths: ["handoff.json", "BACKLOG.md"], proofBoundary: handoff.proof.claimBoundary } }, tasks: [{ id: "evidence-task", backlogTaskId: "AF-001", title: "Implement", description: "Synthetic native validation fixture", acceptanceCriteria: ["Tests pass"], state: "ready", attempt: 1, branchName: "main", worktreePath: root, baseCommit: executionBase, ownedPaths: ["src/"], validationCommands: ["npm test"] }] });
+    store.builds.create({ id: "evidence-build", repositoryId: "evidence-repo", backlogPath: "BACKLOG.md", baseCommit: executionBase, integrationBranch: "fixture-integration", status: "running", normalizedPlan: { ...plan, createdAt: new Date().toISOString(), governedHandoff: { id: handoff.handoffId, programId: handoff.programId, sha256: canonicalJsonSha256(handoff), path: "handoff.json", governedBaseCommit: baseCommit, executionBaseCommit: executionBase, carrierPaths: ["handoff.json", "BACKLOG.md"], proofBoundary: handoff.proof.claimBoundary } }, tasks: [{ id: "evidence-task", backlogTaskId: "AF-001", title: "Implement", description: "Synthetic native validation fixture", acceptanceCriteria: ["Tests pass"], state: "ready", attempt: 1, branchName: "main", worktreePath: root, baseCommit: executionBase, ownedPaths: ["src/"], validationCommands: commands }] });
     const taskId = "evidence-task"; const buildId = "evidence-build";
     const attemptStartedAt = new Date().toISOString();
     store.tasks.createAttempt({ id: "evidence-attempt", taskId, buildId, attempt: 1, status: "running", startedAt: attemptStartedAt });
     store.tasks.transition(taskId, "running");
     await writeFile(path.join(root, "src", "index.js"), "export const ready = true;\n");
+    const capabilityDocuments = capability ? fixtureCapabilityDocuments(handoff, commands, defect) : undefined;
+    if (capabilityDocuments !== undefined) {
+      await writeFile(path.join(root, "src", "capability-plan.json"), `${JSON.stringify(capabilityDocuments.plan, null, 2)}\n`);
+      await writeFile(path.join(root, "src", "capability-binding.json"), `${JSON.stringify(capabilityDocuments.binding, null, 2)}\n`);
+    }
     store.tasks.transition(taskId, "validating");
-    const validation = await validateTask({ buildId, taskId, attempt: 1, worktreePath: root, baseCommit: executionBase, ownedPaths: ["src/"], commands: ["npm test"], workerCompletedSuccessfully: true });
-    expect(validation.readyForCommit).toBe(true);
+    const validation = await validateTask({ buildId, taskId, attempt: 1, worktreePath: root, baseCommit: executionBase, ownedPaths: ["src/"], commands, workerCompletedSuccessfully: true });
+    expect(validation.readyForCommit, JSON.stringify(validation)).toBe(true);
     const directory = path.join(environment.runsPath, buildId, taskId, "attempt-1");
     await mkdir(directory, { recursive: true });
     const logs = [];
     for (const [index, outcome] of validation.commands.entries()) {
-      const id = `validation-${index}`; const logPath = path.join(directory, `${id}.json`);
+      const id = capability ? `validation-${randomUUID()}` : `validation-${index}`; const logPath = path.join(directory, `${id}.json`);
       await writeFile(logPath, `${JSON.stringify(outcome, null, 2)}\n`);
       store.validations.create({ id, buildId, taskId, validationType: "task", command: outcome.command, status: "passed", exitCode: outcome.exitCode, startedAt: outcome.startedAt, completedAt: outcome.completedAt, logPath });
       logs.push(logPath);
@@ -475,14 +487,188 @@ async function nativeEvidenceFixture() {
     const committed = await new TaskCommitService().commit({ worktreePath: root, baseCommit: executionBase, branchName: "main", backlogTaskId: "AF-001", title: "Implement", changedFiles: validation.ownership.changedFiles, allowNoChanges: false });
     store.tasks.recordChangedFiles(taskId, 1, committed.changedFiles);
     const manifests = new HandoffManifestService(store, environment.artifactsPath);
-    const publication = await manifests.publish({ buildId, taskId, backlogTaskId: "AF-001", attempt: 1, status: "validated", baseCommit: executionBase, resultCommit: committed.resultCommit, branch: "main", worktreePath: root, changedFiles: committed.changedFiles.map((item) => item.path), consumes: [], produces: handoff.tasks[0]?.produces.map(({ name, type, version }) => ({ name, type, version })) ?? [] });
+    const publication = await manifests.publish({ buildId, taskId, backlogTaskId: "AF-001", attempt: 1, status: "validated", baseCommit: executionBase, resultCommit: committed.resultCommit, branch: "main", worktreePath: root, changedFiles: committed.changedFiles.map((item) => item.path), consumes: [], produces: handoff.tasks[0]?.produces.map(({ name, type, version, path: artifactPath }) => ({ name, type, version, ...(artifactPath === undefined ? {} : { path: artifactPath }) })) ?? [] });
     store.tasks.transition(taskId, "validated", { resultCommit: committed.resultCommit });
     store.tasks.updateAttempt(taskId, 1, { status: "succeeded", resultCommit: committed.resultCommit, completedAt: new Date().toISOString() });
     const dependencies = { store, environment };
     const context = { ...dependencies, repositoryService: { get: async () => store.repositories.getById("evidence-repo") }, organizationPolicy: DEFAULT_ORGANIZATION_POLICY } as unknown as AgentFlowContext;
-    return { ...dependencies, context, root, handoff, taskId, buildId, logs, publication, manifests, committed, executionBase, cleanup: database.cleanup };
+    return { ...dependencies, context, root, handoff, taskId, buildId, logs, publication, manifests, committed, executionBase, capabilityDocuments, cleanup: database.cleanup };
   } catch (error) { database.cleanup(); throw error; }
 }
+
+// Synthetic authority/law inputs exercise the existing contract shapes; this is
+// not a real skill/law activation, native execution approval or lesson promotion.
+function fixtureCapabilityDocuments(handoff: ReturnType<typeof GovernedTaskHandoffSchema.parse>, commands: string[], defect?: "wrong-task" | "unknown-check") {
+  const context = { taskId: defect === "wrong-task" ? "other-task" : "AF-001", repositoryId: "evidence-repo", revision: handoff.repository.baseCommit, authorityStateSha256: handoff.authority.stateSha256 };
+  const bindings = { lawProfileSha256: "1".repeat(64), lawCatalogSha256: "2".repeat(64), skillCatalogSha256: "3".repeat(64), skillRegistrySha256: "4".repeat(64), workflowSha256: "5".repeat(64), compositionSha256: "6".repeat(64), lawDecisionSha256: "" };
+  const lawBody = { schemaVersion: 1, kind: "design-intelligence/no-applicable-domain-laws", status: "READY", decision: "NO_APPLICABLE_LAWS", ...context, profileSha256: bindings.lawProfileSha256, catalogSha256: bindings.lawCatalogSha256, evaluatedLawIds: ["PY-001"], evidence: [{ lawId: "PY-001", applicability: "NOT_APPLICABLE", exclusionReason: "CONTEXT_SCOPE_MISMATCH", evidenceSha256: "7".repeat(64) }], rationale: "Synthetic contract fixture only." };
+  const lawEvidence = { ...lawBody, decisionSha256: canonicalJsonSha256(lawBody) }; bindings.lawDecisionSha256 = lawEvidence.decisionSha256;
+  const subject = "member:fixture-checker"; const individual = defect === "unknown-check" ? "not a native command" : commands[0] ?? "missing"; const combined = commands.slice(1);
+  const memberBody = { id: "fixture-checker", kind: "SKILL", sourceSha256: "8".repeat(64), inputs: [], outputs: [], dependsOn: [], requiredCapabilities: [], availableCapabilities: [], requiredPermissions: [], grantedPermissions: [], effects: [], availability: { status: "AVAILABLE", evidenceSha256: "9".repeat(64) }, checks: [{ id: individual, covers: [subject] }] };
+  const approvalBody = { status: "APPROVED", ...context, memberSha256: canonicalJsonSha256(memberBody) };
+  const planBody = { schemaVersion: 1, kind: "design-intelligence/capability-activation-plan", origin: "WALE_PROPOSED", status: "READY_FOR_HANDOFF", context, bindings,
+    bindingSemantics: { lawProfileSha256: "EXACT_UPSTREAM_DIGEST", lawCatalogSha256: "EXACT_UPSTREAM_DIGEST", lawDecisionSha256: "EXACT_AUTHORITY_BOUND_DIGEST", skillCatalogSha256: "EXACT_UPSTREAM_DIGEST", skillRegistrySha256: "EXACT_UPSTREAM_DIGEST", workflowSha256: "EXACT_UPSTREAM_DIGEST", compositionSha256: "OPAQUE_UPSTREAM_ARTIFACT_DIGEST" }, lawEvidence,
+    lawBinding: { kind: lawEvidence.kind, decisionSha256: lawEvidence.decisionSha256, status: "READY", profileSha256: bindings.lawProfileSha256, catalogSha256: bindings.lawCatalogSha256, includedLawIds: [], excludedLawIds: ["PY-001"], conflicts: [] },
+    selectedMembers: [{ ...memberBody, approval: { ...approvalBody, approvalSha256: canonicalJsonSha256(approvalBody) } }],
+    obligations: { laws: [], members: [{ id: subject, memberId: "fixture-checker", kind: "SKILL", individualCheckIds: [individual], combinedCheckIds: combined }], outputsAndEffects: [], combinedChecks: combined.map((id) => ({ id, covers: [subject] })) }, issues: [], activationPerformed: false, executionAuthorized: false, executable: false, claimBoundary: "This WALE_PROPOSED plan is detached and inspectable. READY_FOR_HANDOFF means only that it may be adapted to a separately governed AgentFlow handoff. Capability availability or installation is not activation or verified use; this plan performs no activation, execution, repository mutation, delivery, or acceptance. Law profile, catalog, and no-applicable evidence digests remain upstream provenance claims; this planner does not reconstruct their complete source inventories." };
+  const plan = { ...planBody, planSha256: canonicalJsonSha256(planBody) };
+  const proposedScope = { ...handoff, authority: { status: "PROPOSED", stateSha256: handoff.authority.stateSha256, governanceReportSha256: handoff.authority.governanceReportSha256, sources: handoff.authority.sources } };
+  const bindingBody = { schemaVersion: "1.0.0", kind: "design-intelligence/capability-handoff-binding", planSha256: plan.planSha256, repositoryId: context.repositoryId, compositionSha256: bindings.compositionSha256, lawDecisionSha256: bindings.lawDecisionSha256, context, contextSha256: canonicalJsonSha256(context), obligationsSha256: canonicalJsonSha256(plan.obligations), handoff: { id: handoff.handoffId, revision: handoff.repository.baseCommit, scopeSha256: canonicalJsonSha256(proposedScope) }, activationPerformed: false, executionAuthorized: false, executable: false };
+  return { plan, binding: { ...bindingBody, bindingSha256: canonicalJsonSha256(bindingBody) } };
+}
+
+async function retryCapabilityFixture(f: Awaited<ReturnType<typeof nativeEvidenceFixture>>, change: "none" | "format" | "malformed" = "none") {
+  f.store.tasks.transition(f.taskId, "failed", { eventType: "unit.fixture_retry_requested", errorCode: "UNIT_RETRY" });
+  f.store.tasks.retry(f.taskId); const attempt = f.store.tasks.getById(f.taskId).attempt;
+  f.store.tasks.updateAttempt(f.taskId, attempt, { status: "running", startedAt: new Date().toISOString() }); f.store.tasks.transition(f.taskId, "running");
+  await writeFile(path.join(f.root, "src/index.js"), "export const ready = true; // retry\n");
+  if (change !== "none") {
+    if (f.capabilityDocuments === undefined) throw new Error("Missing retry capability documents");
+    const plan = structuredClone(f.capabilityDocuments.plan);
+    if (change === "malformed") {
+      // Preserve JSON and digest validity while removing the member's approval.
+      // The unchanged semantic validator must refuse READY_FOR_HANDOFF, rather
+      // than treating transport digests or a worker completion as activation.
+      const member = plan.selectedMembers[0]; if (member === undefined) throw new Error("Missing fixture member");
+      const { approvalSha256: oldApproval, ...approvalBody } = member.approval; void oldApproval;
+      const pendingApproval = { ...approvalBody, status: "PENDING" }; member.approval = { ...pendingApproval, approvalSha256: canonicalJsonSha256(pendingApproval) };
+      const { planSha256: oldPlan, ...planBody } = plan; void oldPlan; plan.planSha256 = canonicalJsonSha256(planBody);
+      const { bindingSha256: oldBinding, ...bindingBody } = f.capabilityDocuments.binding; void oldBinding;
+      const updatedBinding = { ...bindingBody, planSha256: plan.planSha256 };
+      await writeFile(path.join(f.root, "src/capability-binding.json"), JSON.stringify({ ...updatedBinding, bindingSha256: canonicalJsonSha256(updatedBinding) }, null, 4));
+    }
+    await writeFile(path.join(f.root, "src/capability-plan.json"), JSON.stringify(plan, null, 4));
+  }
+  f.store.tasks.transition(f.taskId, "validating");
+  const commands = f.handoff.tasks[0]?.validate ?? [];
+  const summary = await validateTask({ buildId: f.buildId, taskId: f.taskId, attempt, worktreePath: f.root, baseCommit: f.executionBase, ownedPaths: ["src/"], commands, workerCompletedSuccessfully: true });
+  const directory = path.join(f.environment.runsPath, f.buildId, f.taskId, `attempt-${attempt}`); await mkdir(directory, { recursive: true });
+  for (const outcome of summary.commands) {
+    const id = `validation-${randomUUID()}`; const logPath = path.join(directory, `${id}.json`); await writeFile(logPath, `${JSON.stringify(outcome, null, 2)}\n`);
+    f.store.validations.create({ id, buildId: f.buildId, taskId: f.taskId, validationType: "task", command: outcome.command, status: outcome.status === "spawn_error" ? "failed" : outcome.status, exitCode: outcome.exitCode, startedAt: outcome.startedAt, completedAt: outcome.completedAt, logPath });
+  }
+  if (!summary.readyForCommit) {
+    f.store.tasks.updateAttempt(f.taskId, attempt, { status: "failed", errorCode: summary.errorCode, errorMessage: summary.errorMessage, completedAt: summary.completedAt });
+    f.store.tasks.transition(f.taskId, "failed", { errorCode: summary.errorCode, errorMessage: summary.errorMessage }); return summary;
+  }
+  const committed = await new TaskCommitService().commit({ worktreePath: f.root, baseCommit: f.executionBase, branchName: "main", backlogTaskId: "AF-001", title: "Retry fixture", changedFiles: summary.ownership.changedFiles, allowNoChanges: false });
+  f.store.tasks.recordChangedFiles(f.taskId, attempt, committed.changedFiles);
+  await f.manifests.publish({ buildId: f.buildId, taskId: f.taskId, backlogTaskId: "AF-001", attempt, status: "validated", baseCommit: f.executionBase, resultCommit: committed.resultCommit, branch: "main", worktreePath: f.root, changedFiles: committed.changedFiles.map((item) => item.path), consumes: [], produces: f.handoff.tasks[0]?.produces.map(({ name, type, version, path: artifactPath }) => ({ name, type, version, ...(artifactPath === undefined ? {} : { path: artifactPath }) })) ?? [] });
+  f.store.tasks.transition(f.taskId, "validated", { resultCommit: committed.resultCommit }); f.store.tasks.updateAttempt(f.taskId, attempt, { status: "succeeded", resultCommit: committed.resultCommit, completedAt: new Date().toISOString(), errorCode: null, errorMessage: null });
+  return summary;
+}
+
+describe("Record-derived native capability export", () => {
+  it("accepts genuine retry reuse of unchanged declared artifacts with historical registration metadata", async () => {
+    const f = await nativeEvidenceFixture(true);
+    try {
+      const before = f.store.artifacts.listForBuild(f.buildId).find((item) => item.artifactType === "design-intelligence/capability-activation-plan");
+      expect((await retryCapabilityFixture(f)).readyForCommit).toBe(true);
+      expect(f.store.tasks.getById(f.taskId).attempt).toBe(2);
+      expect(f.store.artifacts.listForBuild(f.buildId).find((item) => item.id === before?.id)).toEqual(before);
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      const exported = await makeDesignIntelligenceReceipt(f.context, f.buildId);
+      expect(exported.receipt.evidence.artifacts.some((item) => item.class === "capability-plan")).toBe(true);
+      const currentRows = f.store.validations.listForBuild(f.buildId).filter((item) => item.logPath?.includes("attempt-2"));
+      expect(exported.receipt.tasks[0]?.validation.map((item) => item.evidenceId).sort()).toEqual(currentRows.map((item) => item.id).sort());
+    } finally { f.cleanup(); }
+  });
+
+  it("rejects stale registration payload when the genuine current manifest and result bytes changed", async () => {
+    const f = await nativeEvidenceFixture(true);
+    try {
+      const old = f.store.artifacts.listForBuild(f.buildId).find((item) => item.artifactType === "design-intelligence/capability-activation-plan"); if (old === undefined) throw new Error("Missing old plan registration");
+      expect((await retryCapabilityFixture(f, "format")).readyForCommit).toBe(true);
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      const current = f.store.artifacts.listForBuild(f.buildId); expect(current.find((item) => item.id === old.id)?.sha256).not.toBe(old.sha256);
+      const spy = vi.spyOn(f.store.artifacts, "listForBuild").mockReturnValue(current.map((item) => item.id === old.id ? old : item));
+      try { await expect(makeDesignIntelligenceReceipt(f.context, f.buildId)).rejects.toMatchObject({ code: "RECEIPT_EVIDENCE_CHANGED" }); } finally { spy.mockRestore(); }
+    } finally { f.cleanup(); }
+  });
+
+  it.skipIf(process.env.AFI003_NATIVE_ROOT === undefined)("refuses malformed actual capability bytes through the predeclared unchanged Proofloom semantic command before certification", async () => {
+    const f = await nativeEvidenceFixture(true);
+    try {
+      expect(f.handoff.tasks[0]?.validate).toContain("node src/capability-check.mjs");
+      const summary = await retryCapabilityFixture(f, "malformed");
+      expect(summary.readyForCommit).toBe(false);
+      expect(summary.commands.find((item) => item.command === "node src/capability-check.mjs")).toMatchObject({ status: "failed", exitCode: 1 });
+      await expect(publishNativeValidationEvidence(f, f.buildId, f.handoff)).rejects.toThrow("NATIVE_VALIDATION_EVIDENCE_INVALID");
+      const decision = await evaluateGovernedBuild(f.context, f.buildId); expect(decision?.decision.action).toBe("REQUEST_REPAIR");
+      expect(f.store.tasks.getById(f.taskId)).toMatchObject({ state: "failed", resultCommit: null, integrationCommit: null });
+      expect(f.store.events.listForBuild(f.buildId).some((event) => event.type === "evidence.native_validation_certified" || event.type === "integration.completed")).toBe(false);
+      if (process.env.AFI003_CAPABILITY_OUTPUT_ROOT !== undefined) {
+        await mkdir(process.env.AFI003_CAPABILITY_OUTPUT_ROOT, { recursive: true });
+        await writeFile(path.join(process.env.AFI003_CAPABILITY_OUTPUT_ROOT, "preintegration-semantic-refusal.json"), JSON.stringify({ classification: "ACTUAL_DECLARED_PF_SEMANTIC_CHECK_REFUSAL_UNIT_FIXTURE", summary, decision, task: f.store.tasks.getById(f.taskId), validations: f.store.validations.listForBuild(f.buildId), events: f.store.events.listForBuild(f.buildId) }, null, 2));
+      }
+    } finally { f.cleanup(); }
+  });
+  it("exports immutable plan/binding bytes and detached observations linked to dynamic actual native logs", async () => {
+    const f = await nativeEvidenceFixture(true);
+    try {
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      expect((await evaluateGovernedBuild(f.context, f.buildId))?.decision.action).toBe("CONTINUE");
+      // Explicit disposable integration lifecycle; no coordinator/provider claim.
+      await execFileAsync("git", ["-C", f.root, "commit", "--allow-empty", "-m", "fixture integration lifecycle"]);
+      const integrationCommit = (await execFileAsync("git", ["-C", f.root, "rev-parse", "HEAD"])).stdout.trim();
+      f.store.tasks.transition(f.taskId, "integrating"); f.store.recordIntegrationSuccess(f.taskId, { integrationCommit }); f.store.builds.transition(f.buildId, "completed");
+      const exported = await makeDesignIntelligenceReceipt(f.context, f.buildId);
+      const read = async (kind: string) => { const source = exported.sources.find((item) => exported.receipt.evidence.artifacts.some((artifact) => artifact.path === item.relativePath && artifact.class === kind)); if (source === undefined) throw new Error(`Missing ${kind}`); return { source, document: JSON.parse(await readFile(source.sourcePath, "utf8")) as Record<string, unknown> }; };
+      const plan = await read("capability-plan"); const binding = await read("capability-binding"); const observation = await read("capability-observation");
+      expect(plan.document).toEqual(f.capabilityDocuments?.plan); expect(binding.document).toEqual(f.capabilityDocuments?.binding);
+      const rows = f.store.validations.listForBuild(f.buildId);
+      expect(observation.document).toMatchObject({ kind: "design-intelligence/capability-observation", handoff: { id: f.handoff.handoffId, sha256: canonicalJsonSha256(f.handoff) } });
+      expect(observation.document.observations).toEqual(expect.arrayContaining(rows.map((row) => ({ subject: "member:fixture-checker", checkId: row.command, evidenceId: row.id }))));
+      for (const row of rows) {
+        expect(exported.receipt.tasks[0]?.validation.find((item) => item.command === row.command)?.evidenceId).toBe(row.id);
+        expect(exported.receipt.evidence.artifacts.find((item) => item.id === row.id)?.class).toBe("agentflow:native-task-validation-log");
+      }
+      const outputRoot = process.env.AFI003_CAPABILITY_OUTPUT_ROOT ?? path.join(f.root, "capability-export-test");
+      await mkdir(outputRoot, { recursive: true });
+      for (const source of exported.sources) { const target = path.join(outputRoot, source.relativePath); await mkdir(path.dirname(target), { recursive: true }); await copyFile(source.sourcePath, target); }
+      await writeFile(path.join(outputRoot, "capability-native-export.json"), JSON.stringify({ classification: "ACTUAL_NATIVE_PRODUCER_UNIT_FIXTURE_NOT_HTTP_OR_PROVIDER", receipt: exported.receipt, handoff: f.handoff, binding: f.capabilityDocuments?.binding, evidenceRoot: outputRoot, validations: rows }, null, 2));
+      const nativeRoot = process.env.AFI003_NATIVE_ROOT;
+      if (nativeRoot !== undefined) {
+        const audit = await execFileAsync("python3", ["-B", "-c", "import json,sys;from design_intelligence.agentflow_contracts import audit_capability_plan_receipt;d=json.load(open(sys.argv[1]));print(json.dumps(audit_capability_plan_receipt(d['binding'],d['receipt'],handoff=d['handoff'],evidence_root=d['evidenceRoot'])))", path.join(outputRoot, "capability-native-export.json")], { cwd: nativeRoot, env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } });
+        await writeFile(path.join(outputRoot, "proofloom-capability-audit.json"), audit.stdout);
+        expect(JSON.parse(audit.stdout)).toMatchObject({ status: "PASS", capabilityVerified: true, obligationsVerified: true });
+      }
+      const watermark = f.store.events.getLatestSequence(f.buildId);
+      await writeFile(path.join(f.root, "src/capability-plan.json"), "mutable worktree bytes must not be exported");
+      expect(await makeDesignIntelligenceReceipt(f.context, f.buildId)).toEqual(exported);
+      expect(f.store.events.getLatestSequence(f.buildId)).toBe(watermark);
+    } finally { f.cleanup(); }
+  });
+
+  it("refuses tampered retained document bytes rather than repairing or replacing them", async () => {
+    const f = await nativeEvidenceFixture(true);
+    try {
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      const exported = await makeDesignIntelligenceReceipt(f.context, f.buildId);
+      const artifact = exported.receipt.evidence.artifacts.find((item) => item.class === "capability-plan");
+      const source = exported.sources.find((item) => item.relativePath === artifact?.path); if (source === undefined) throw new Error("Missing retained plan");
+      await writeFile(source.sourcePath, "tampered");
+      await expect(makeDesignIntelligenceReceipt(f.context, f.buildId)).rejects.toMatchObject({ code: "RECEIPT_EVIDENCE_CHANGED" });
+      expect(await readFile(source.sourcePath, "utf8")).toBe("tampered");
+    } finally { f.cleanup(); }
+  });
+
+  it.each(["wrong-task", "unknown-check"] as const)("refuses a digest-valid declared %s document", async (defect) => {
+    const f = await nativeEvidenceFixture(true, defect);
+    try { await publishNativeValidationEvidence(f, f.buildId, f.handoff); await expect(makeDesignIntelligenceReceipt(f.context, f.buildId)).rejects.toMatchObject({ code: "RECEIPT_EVIDENCE_CHANGED" }); } finally { f.cleanup(); }
+  });
+
+  it.each(["missing", "duplicate", "wrong-attempt", "tampered-digest"] as const)("refuses %s registry linkage", async (defect) => {
+    const f = await nativeEvidenceFixture(true);
+    try {
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      const rows = f.store.artifacts.listForBuild(f.buildId); const document = rows.find((item) => item.artifactType === "design-intelligence/capability-activation-plan"); if (document === undefined) throw new Error("Missing fixture plan record");
+      const altered = defect === "missing" ? rows.filter((item) => item.id !== document.id) : defect === "duplicate" ? [...rows, { ...document, id: "duplicate" }] : rows.map((item) => item.id !== document.id ? item : { ...item, ...(defect === "wrong-attempt" ? { metadata: { ...item.metadata, attempt: 2 } } : { sha256: "0".repeat(64) }) });
+      const spy = vi.spyOn(f.store.artifacts, "listForBuild").mockReturnValue(altered);
+      try { await expect(makeDesignIntelligenceReceipt(f.context, f.buildId)).rejects.toMatchObject({ code: "RECEIPT_EVIDENCE_CHANGED" }); } finally { spy.mockRestore(); }
+    } finally { f.cleanup(); }
+  });
+});
 
 describe("Native validation certificate current-record verification", () => {
   it("publishes one genuine certificate idempotently, preserves current proof through integration, and exports actual bytes", async () => {
@@ -581,7 +767,7 @@ describe("Native validation certificate current-record verification", () => {
       await writeFile(path.join(fixture.root, "src", "index.js"), "export const ready = 2;\n");
       fixture.store.tasks.transition(fixture.taskId, "validating");
       const validation = await validateTask({ buildId: fixture.buildId, taskId: fixture.taskId, attempt: 2, worktreePath: fixture.root, baseCommit: fixture.executionBase, ownedPaths: ["src/"], commands: ["npm test"], workerCompletedSuccessfully: true });
-      expect(validation.readyForCommit).toBe(true);
+      expect(validation.readyForCommit, JSON.stringify(validation)).toBe(true);
       const directory = path.join(fixture.environment.runsPath, fixture.buildId, fixture.taskId, "attempt-2");
       await mkdir(directory, { recursive: true });
       for (const [index, outcome] of validation.commands.entries()) {
