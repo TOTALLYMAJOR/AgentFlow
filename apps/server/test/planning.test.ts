@@ -21,6 +21,41 @@ const acceptance = (text: string): string => `
 `;
 
 describe("Markdown backlog planning", () => {
+  it.each(["TASK-WALE-SKILLS-INTEGRATION", "TASK.PHASE_A", "9_PHASE"])(
+    "plans governed handoff task identity %s without renaming it",
+    (id) => {
+      const markdown = `
+# Governed execution packet
+
+## Notes: This heading is not a task identity
+
+The handoff owns the task identity; planning must preserve it.
+
+## ${id}: Verify delivered source
+
+\`\`\`yaml
+estimate_hours: 1
+depends_on: []
+owns:
+  - artifacts/qualification/
+validate:
+  - python3 -m unittest tests.test_qualification -q
+\`\`\`
+
+Inspect the declared source and retain genuine command results.
+${acceptance("The actual behavioral checks pass.")}
+`;
+      const result = planBacklogMarkdown(markdown, {
+        defaultValidation: ["git diff --check"],
+        workerMaximum: 1,
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+      expect(result.plan?.tasks.map((task) => task.id)).toEqual([id]);
+      expect(result.plan?.tasks[0]?.title).toBe("Verify delivered source");
+    },
+  );
+
   it("parses, normalizes, validates, and plans a valid artifact graph", () => {
     const markdown = `
 # Checkout backlog
