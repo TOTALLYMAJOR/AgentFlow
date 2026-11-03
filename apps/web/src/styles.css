@@ -348,6 +348,10 @@ select {
   background: var(--af-canvas);
 }
 
+.table-shell[aria-label="Repositories"] {
+  position: relative;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -732,6 +736,75 @@ td:first-child {
   font-size: 12px;
 }
 
+.event-window-note {
+  margin: 0;
+  padding: 10px 18px;
+  color: var(--af-muted);
+  font-size: 12px;
+  border-bottom: 1px solid var(--af-border);
+}
+
+.governor-record {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.governor-record > summary {
+  padding: 10px 12px;
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius);
+  background: var(--af-subtle);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.governor-record > summary:focus-visible {
+  outline: 2px solid var(--af-accent);
+  outline-offset: 2px;
+}
+
+.governor-content {
+  min-width: 0;
+  padding-top: 12px;
+}
+
+.metadata-grid.governor-facts {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+}
+
+.event-list:has(.governor-record[open]) {
+  max-height: none;
+  overflow: visible;
+}
+
+.event-grid > .event-panel {
+  align-self: start;
+}
+
+.governor-result {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--af-border);
+}
+
+.governor-record code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.governor-signals {
+  margin: 0;
+}
+
+.governor-signals > div {
+  min-width: 0;
+  padding: 6px 0;
+}
+
+.governor-signals dd {
+  margin: 4px 0 0;
+}
+
 .result-list {
   display: grid;
   gap: 18px;
@@ -1007,6 +1080,25 @@ td:first-child {
 .visual-proof__result dd {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.impact-analysis[aria-labelledby="governance-title"] form > *,
+.visual-proof form > :not(button) {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.impact-analysis[aria-labelledby="governance-title"] select,
+.visual-proof select {
+  max-width: 100%;
+  min-width: 0;
+  width: 100%;
+}
+
+@media (max-width: 1200px) {
+  .visual-proof form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 960px) {

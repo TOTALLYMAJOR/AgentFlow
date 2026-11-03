@@ -358,7 +358,7 @@ export function BuildScreen({
             <p>
               {completedTasks.length} of {tasks.length} planned steps complete
               {blockedTasks.length === 0
-                ? ". No blockers need your attention."
+                  ? ". No task is marked failed or awaiting approval."
                 : blockedTasks.length === 1
                   ? ". 1 item needs attention."
                   : `. ${blockedTasks.length} items need attention.`}
@@ -494,7 +494,7 @@ export function BuildScreen({
           events={recoveryEvents}
           connected={stream.connected}
           title="Recovery and reconciliation"
-          emptyMessage="No recovery actions have been recorded for this build."
+            emptyMessage="No recovery events are present in this recent window."
         />
       </div>
         </div>
@@ -507,7 +507,7 @@ function plainBuildStatus(status: string): string {
   const labels: Record<string, string> = {
     ready: "Ready for your approval",
     running: "Work is moving forward",
-    paused: "Work is paused",
+    paused: "Paused",
     interrupted: "Work is waiting to resume",
     recovering: "AgentFlow is recovering safely",
   };
@@ -515,11 +515,11 @@ function plainBuildStatus(status: string): string {
 }
 
 function nextProgressMessage(status: string, taskCount: number): string {
+    if (status === "paused") {
+      return "Work is paused";
+    }
   if (taskCount === 0) {
     return "Preparing the first steps";
-  }
-  if (status === "paused") {
-    return "Ready when you are";
   }
   if (status === "ready") {
     return "The plan is ready to begin";
@@ -528,11 +528,11 @@ function nextProgressMessage(status: string, taskCount: number): string {
 }
 
 function nextActionMessage(status: string, blockedCount: number): string {
+    if (status === "paused") {
+      return "Review recorded decisions, evidence and native controls before continuing.";
+    }
   if (blockedCount > 0) {
     return "Review the approval or failed step below.";
-  }
-  if (status === "paused") {
-    return "Resume when you want AgentFlow to continue.";
   }
   if (status === "ready") {
     return "Start the approved work when you are ready.";
