@@ -1,5 +1,13 @@
-import type { FastifyError, FastifyInstance } from "fastify";
+import { errorCodes, type FastifyError, type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
+
+const REQUEST_PARSER_ERRORS = [
+  [errorCodes.FST_ERR_CTP_EMPTY_JSON_BODY, 400, "FST_ERR_CTP_EMPTY_JSON_BODY", "JSON request body cannot be empty."],
+  [errorCodes.FST_ERR_CTP_INVALID_JSON_BODY, 400, "FST_ERR_CTP_INVALID_JSON_BODY", "Request body is not valid JSON."],
+  [errorCodes.FST_ERR_CTP_INVALID_CONTENT_LENGTH, 400, "FST_ERR_CTP_INVALID_CONTENT_LENGTH", "Request body does not match Content-Length."],
+  [errorCodes.FST_ERR_CTP_BODY_TOO_LARGE, 413, "FST_ERR_CTP_BODY_TOO_LARGE", "Request body exceeds the size limit."],
+  [errorCodes.FST_ERR_CTP_INVALID_MEDIA_TYPE, 415, "FST_ERR_CTP_INVALID_MEDIA_TYPE", "Request content type is not supported."],
+] as const;
 
 export class AgentFlowError extends Error {
   public constructor(
@@ -75,6 +83,14 @@ export function registerErrorHandling(app: FastifyInstance): void {
           details: error.issues,
         },
       });
+      return;
+    }
+
+    const parserError = REQUEST_PARSER_ERRORS.find(([ErrorType]) => error instanceof ErrorType);
+    if (parserError !== undefined) {
+      const [, statusCode, code, message] = parserError;
+      request.log.warn({ code }, "Request parsing failed");
+      await reply.status(statusCode).send({ error: { code, message } });
       return;
     }
 

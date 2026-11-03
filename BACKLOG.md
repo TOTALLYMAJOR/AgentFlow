@@ -611,6 +611,7 @@ owns:
   - apps/server/src/repositories/config.ts
   - apps/server/src/repositories/git.ts
   - apps/server/src/http/routes/repositories.ts
+  - apps/server/src/http/errors.ts
   - apps/server/src/repositories/backlog-approval.ts
   - apps/server/src/repositories/index.ts
   - apps/server/src/repositories/service.ts
@@ -618,8 +619,10 @@ owns:
   - apps/server/test/consumer-workflow.test.ts
   - apps/server/test/repository-review-inputs.test.ts
   - apps/server/test/repository-review-http.test.ts
+  - apps/server/test/http-errors.test.ts
 validate:
   - npx vitest run --config vitest.config.ts apps/server/test/consumer-workflow.test.ts
+  - npm test -- apps/server/test/http-errors.test.ts
   - npm run typecheck
 produces:
   - name: guided-consumer-api
