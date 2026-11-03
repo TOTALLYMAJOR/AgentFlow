@@ -656,6 +656,8 @@ Implementation qualification: a private native Git index binds the validated con
 
 Read-only review returns the actual configuration/backlog bytes and SHA-256 digests. Guided callers bind their save to those digests and the configured backlog path. A distinct setup-only review/save permits the first configuration commit before clean-tree backlog generation, without reading, creating or validating a nonexistent backlog. Both explicit saves refuse active builds at the HTTP boundary. UTF-8 input reads are capped before YAML parsing using the existing native 10 MiB validation budget. No generation or build starts as a side effect.
 
+Technical completion (2026-11-03): all five original criteria are satisfied in candidate `a733e183db81f57360ffb06eefbf660fa6cfcc24`. Full canonical local qualification passes 504 unit tests and eight integration checks, with one existing optional export audit skipped; lint, types, builds, deterministic packaging, checksums and isolated installation also pass. Retained native API/browser setup proof at `dd6ff6ab` covers explicit setup and both reviewed commit modes; focused native tests cover safe refusals. Its seven relevant consumer source files are unchanged in this candidate. Independent criterion review found no remaining technical requirement. This records technical engineering completion of the guided consumer API task only; it does not transition a persisted AgentFlow task/build or change planning eligibility. It makes no runtime-adoption, provider, publication, deployment or human-outcome claim. The criteria, dependencies, ownership and validations below remain unchanged.
+
 ### Acceptance Criteria
 
 - The first connection check performs no write to the target repository.
