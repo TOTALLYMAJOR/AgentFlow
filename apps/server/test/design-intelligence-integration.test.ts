@@ -9,6 +9,7 @@ import { createDatabaseFixture } from "./helpers/database-fixture.js";
 import { HandoffManifestService } from "../src/artifacts/index.js";
 import { TaskCommitService } from "../src/orchestration/task-commit.js";
 import { BuildCoordinator } from "../src/orchestration/coordinator.js";
+import { IntegrationManager } from "../src/integration/manager.js";
 import { validateTask } from "../src/validation/index.js";
 import { publishNativeValidationEvidence, readVerifiedNativeValidationEvidence, evaluateGovernedBuild } from "../src/governor/build-control.js";
 import { makeDesignIntelligenceReceipt } from "../src/integration/design-intelligence-receipt.js";
@@ -575,7 +576,7 @@ async function admissionGit(root: string, arguments_: string[]): Promise<string>
 
 // This fixture executes native validation/commit/manifest producers, then exercises
 // the evidence seam. It does not claim HTTP admission or a provider journey.
-async function nativeEvidenceFixture(capability = false, defect?: "wrong-task" | "unknown-check") {
+async function nativeEvidenceFixture(capability = false, defect?: "wrong-task" | "unknown-check", integration = false) {
   const database = createDatabaseFixture();
   const root = path.join(database.directory, "repository");
   const environment = resolveEnvironment({ AGENTFLOW_HOME: path.join(database.directory, "runtime") });
@@ -607,7 +608,7 @@ const result=spawnSync('python3',['-B','-c',${JSON.stringify("import json,sys;sy
     const plan = planBacklogMarkdown(renderBacklog(handoff, "handoff.json", "BACKLOG.md")).plan;
     if (plan === undefined) throw new Error("Expected native fixture plan");
     store.repositories.create({ id: "evidence-repo", name: "evidence fixture", localPath: root, configPath: ".agentflow.yaml", baseBranch: "main" });
-    store.builds.create({ id: "evidence-build", repositoryId: "evidence-repo", backlogPath: "BACKLOG.md", baseCommit: executionBase, integrationBranch: "fixture-integration", status: "running", normalizedPlan: { ...plan, createdAt: new Date().toISOString(), governedHandoff: { id: handoff.handoffId, programId: handoff.programId, sha256: canonicalJsonSha256(handoff), path: "handoff.json", governedBaseCommit: baseCommit, executionBaseCommit: executionBase, carrierPaths: ["handoff.json", "BACKLOG.md"], proofBoundary: handoff.proof.claimBoundary } }, tasks: [{ id: "evidence-task", backlogTaskId: "AF-001", title: "Implement", description: "Synthetic native validation fixture", acceptanceCriteria: ["Tests pass"], state: "ready", attempt: 1, branchName: "main", worktreePath: root, baseCommit: executionBase, ownedPaths: ["src/"], validationCommands: commands }] });
+    store.builds.create({ id: "evidence-build", repositoryId: "evidence-repo", backlogPath: "BACKLOG.md", baseCommit: executionBase, integrationBranch: "fixture-integration", status: "running", ...(integration ? { integrationWorktree: root, repositoryConfig: { version: 1, repository: { name: "evidence fixture", base_branch: "main" }, backlog: { path: "BACKLOG.md" }, workers: { maximum: 1 }, contracts: { roots: [] }, validation: { task_default: ["npm test"], integration: ["npm test"] }, docker: { enabled: false, compose_file: "compose.yaml" }, git: { remote: "origin", push_task_branches: false, push_integration_branch: false } } } : {}), normalizedPlan: { ...plan, createdAt: new Date().toISOString(), governedHandoff: { id: handoff.handoffId, programId: handoff.programId, sha256: canonicalJsonSha256(handoff), path: "handoff.json", governedBaseCommit: baseCommit, executionBaseCommit: executionBase, carrierPaths: ["handoff.json", "BACKLOG.md"], proofBoundary: handoff.proof.claimBoundary } }, tasks: [{ id: "evidence-task", backlogTaskId: "AF-001", title: "Implement", description: "Synthetic native validation fixture", acceptanceCriteria: ["Tests pass"], state: "ready", attempt: 1, branchName: "main", worktreePath: root, baseCommit: executionBase, ownedPaths: ["src/"], validationCommands: commands }] });
     const taskId = "evidence-task"; const buildId = "evidence-build";
     const attemptStartedAt = new Date().toISOString();
     store.tasks.createAttempt({ id: "evidence-attempt", taskId, buildId, attempt: 1, status: "running", startedAt: attemptStartedAt });
@@ -712,6 +713,229 @@ async function retryCapabilityFixture(f: Awaited<ReturnType<typeof nativeEvidenc
   f.store.tasks.transition(f.taskId, "validated", { resultCommit: committed.resultCommit }); f.store.tasks.updateAttempt(f.taskId, attempt, { status: "succeeded", resultCommit: committed.resultCommit, completedAt: new Date().toISOString(), errorCode: null, errorMessage: null });
   return summary;
 }
+
+// Actual coordinator and integration failure producers; only Git/validation
+// execution ports are inert. Native task validation, manifests and certificates
+// above use real disposable Git/SQLite/files. No worker/provider is started.
+async function failNativeIntegrationFixture(f: Awaited<ReturnType<typeof nativeEvidenceFixture>>, crash = false) {
+  const task = f.store.tasks.getById(f.taskId);
+  const build = f.store.builds.getById(f.buildId);
+  if (task.resultCommit === null || task.branchName === null) throw new Error("Missing actual validated task result");
+  const resultCommit = task.resultCommit;
+  const worktrees = { buildId: f.buildId, integrationBranch: () => build.integrationBranch, taskBranch: () => task.branchName, taskPath: () => f.root } as unknown as GitWorktreeManager;
+  const push = vi.fn(async () => { throw new Error("Historical context fixture must not push"); });
+  const manager = new IntegrationManager({ store: f.store, worktrees, git: { integrationPath: f.root, verifyReady: async () => f.executionBase, merge: async () => ({ previousHead: f.executionBase, integrationCommit: resultCommit }), abortMerge: async () => {}, resetAndClean: async () => {}, push }, validationRunner: { run: async () => ({ status: "failed", commands: [], errorMessage: "inert integration check failed", startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), durationMs: 0 }) } });
+  const getProvider = vi.fn(() => { throw new Error("Historical context fixture must not dispatch a worker"); });
+  const coordinator = new BuildCoordinator({ ...f.context, handoffService: f.manifests, agentProviders: { get: getProvider } } as unknown as ConstructorParameters<typeof BuildCoordinator>[0]);
+  const native = coordinator as unknown as { integrations: Map<string, IntegrationManager>; integrateValidatedTask(buildId: string, taskId: string): Promise<void> };
+  native.integrations.set(f.buildId, manager);
+  const update = crash ? vi.spyOn(f.store.tasks, "updateAttempt").mockImplementationOnce(() => { throw new Error("inert crash after manager failure"); }) : undefined;
+  try {
+    if (crash) await expect(native.integrateValidatedTask(f.buildId, f.taskId)).rejects.toThrow("inert crash after manager failure");
+    else await native.integrateValidatedTask(f.buildId, f.taskId);
+    expect(getProvider).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+  } finally { update?.mockRestore(); await coordinator.shutdown(); }
+}
+
+describe("historical native publication context", () => {
+  it("uses retained native publication context after actual integration failure without reviving current evidence", async () => {
+    const f = await nativeEvidenceFixture(false, undefined, true);
+    const observed = vi.spyOn(GovernorControlService.prototype, "evaluate");
+    try {
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      expect(await readVerifiedNativeValidationEvidence(f, f.buildId, f.handoff)).toHaveLength(1);
+      await failNativeIntegrationFixture(f);
+      expect(f.store.tasks.getById(f.taskId)).toMatchObject({ state: "failed", errorCode: "INTEGRATION_VALIDATION_FAILED" });
+      expect(f.store.tasks.getAttempt(f.taskId, 1)).toMatchObject({ status: "failed", errorCode: "INTEGRATION_VALIDATION_FAILED" });
+      expect(await readVerifiedNativeValidationEvidence(f, f.buildId, f.handoff)).toEqual([]);
+      const before = f.store.events.listForBuild(f.buildId);
+      const publication = before.find((event) => event.type === "evidence.native_validation_certified");
+      const failure = before.find((event) => event.type === "integration.failed");
+      expect(publication?.sequence).toBeLessThan(failure?.sequence ?? 0);
+      if (process.env.TCP002_HISTORICAL_OUTPUT_ROOT !== undefined) {
+        await mkdir(process.env.TCP002_HISTORICAL_OUTPUT_ROOT, { recursive: true });
+        await writeFile(path.join(process.env.TCP002_HISTORICAL_OUTPUT_ROOT, "actual-integration-failure.json"), JSON.stringify({ classification: "NATIVE_PRODUCERS_INERT_GIT_VALIDATION_PORTS", task: f.store.tasks.getById(f.taskId), attempt: f.store.tasks.getAttempt(f.taskId, 1), events: before }, null, 2));
+      }
+      const result = await evaluateGovernedBuild(f.context, f.buildId);
+      expect(result?.decision.action).toBe("REQUEST_REPAIR");
+      expect(observed.mock.calls.at(-1)?.[0].observation.evidence).toEqual({ items: [], satisfied: [], contradictory: [] });
+      expect(observed.mock.calls.at(-1)?.[0].observation.evidenceDelta).toMatchObject({ score: 0, direction: "ZERO" });
+      expect(failure?.payload.governorFailure).toMatchObject({ attempt: 1, attemptId: "evidence-attempt" });
+      expect(f.store.events.listForBuild(f.buildId).some((event) => event.type === "integration.completed")).toBe(false);
+    } finally { observed.mockRestore(); f.cleanup(); }
+  });
+
+  it("refuses the actual integration crash window before the coordinator persists attempt failure", async () => {
+    const f = await nativeEvidenceFixture(false, undefined, true);
+    try {
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      await failNativeIntegrationFixture(f, true);
+      expect(f.store.tasks.getById(f.taskId).state).toBe("failed");
+      expect(f.store.tasks.getAttempt(f.taskId, 1).status).toBe("succeeded");
+      expect(f.store.events.listForBuild(f.buildId).some((event) => event.type === "integration.failed")).toBe(true);
+      expect(await readVerifiedNativeValidationEvidence(f, f.buildId, f.handoff)).toEqual([]);
+      await expect(evaluateGovernedBuild(f.context, f.buildId)).rejects.toThrow("GOVERNED_FAILURE_HISTORY_UNAVAILABLE");
+      expect(f.store.events.listForBuild(f.buildId).some((event) => event.type === "governor.decision")).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it.each([
+    "missing-certificate", "tampered-certificate", "missing-manifest", "tampered-manifest", "missing-log", "tampered-log",
+    "missing-certificate-event", "missing-manifest-event", "certificate-after-failure", "manifest-after-certificate", "duplicate-certificate-event",
+    "duplicate-failure-frame", "unsupported-failure-type", "artifact-republished", "artifact-status-changed",
+    "cross-build", "cross-task", "cross-attempt", "cross-manifest", "cross-handoff", "wrong-base", "wrong-result", "wrong-log-argv", "wrong-log-index", "frame-base", "frame-result", "frame-branch", "missing-frame-context",
+  ])("refuses retained historical publication context with %s", async (defect) => {
+    const f = await nativeEvidenceFixture(false, undefined, true);
+    try {
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      const certificate = (await readVerifiedNativeValidationEvidence(f, f.buildId, f.handoff))[0];
+      if (certificate === undefined) throw new Error("Missing actually published fixture certificate");
+      const publication = f.store.events.listForBuild(f.buildId).find((event) => event.type === "evidence.native_validation_certified");
+      const manifestPublication = f.store.events.listForBuild(f.buildId).find((event) => event.type === "manifest.published");
+      const manifest = f.store.manifests.findForTask(f.taskId, "validated", 1);
+      const artifact = f.store.artifacts.listForBuild(f.buildId)[0];
+      const validation = certificate.body.validations[0];
+      if (publication === undefined || manifestPublication === undefined || manifest === undefined || artifact === undefined || validation === undefined) throw new Error("Missing actual native publication sources");
+      // Deliberate corruption is confined to this disposable negative fixture.
+      // Positive context always comes from the unchanged native producers.
+      if (defect === "manifest-after-certificate") {
+        f.store.database.prepare("DELETE FROM build_events WHERE sequence = ?").run(manifestPublication.sequence);
+        f.store.events.append({ buildId: f.buildId, taskId: f.taskId, type: manifestPublication.type, payload: manifestPublication.payload });
+      }
+      if (defect === "artifact-republished") f.store.artifacts.replaceValidated(artifact.id, { artifactType: "unit/changed-type", repositoryPath: null, storagePath: null, sha256: null, metadata: {} });
+      if (defect === "artifact-status-changed") f.store.artifacts.setStatus(artifact.id, "integrated");
+      await failNativeIntegrationFixture(f);
+      const failure = f.store.events.listForBuild(f.buildId).find((event) => event.type === "integration.failed");
+      if (failure === undefined) throw new Error("Missing actual manager failure event");
+      const logPath = path.join(path.dirname(certificate.sourcePath), `${validation.id}.json`);
+      if (defect === "missing-certificate") await rm(certificate.sourcePath);
+      if (defect === "tampered-certificate") await writeFile(certificate.sourcePath, (await readFile(certificate.sourcePath, "utf8")) + " ");
+      if (defect === "missing-manifest") await rm(manifest.manifestPath);
+      if (defect === "tampered-manifest") await writeFile(manifest.manifestPath, (await readFile(manifest.manifestPath, "utf8")) + " ");
+      if (defect === "missing-log") await rm(logPath);
+      if (defect === "tampered-log") await writeFile(logPath, (await readFile(logPath, "utf8")) + " ");
+      if (["missing-certificate-event", "certificate-after-failure"].includes(defect)) f.store.database.prepare("DELETE FROM build_events WHERE sequence = ?").run(publication.sequence);
+      if (defect === "missing-manifest-event") f.store.database.prepare("DELETE FROM build_events WHERE sequence = ?").run(manifestPublication.sequence);
+      if (["certificate-after-failure", "duplicate-certificate-event"].includes(defect)) f.store.events.append({ buildId: f.buildId, taskId: f.taskId, type: publication.type, payload: publication.payload });
+      if (defect === "duplicate-failure-frame") f.store.events.append({ buildId: f.buildId, taskId: f.taskId, type: failure.type, payload: failure.payload });
+      if (defect === "unsupported-failure-type") f.store.database.prepare("UPDATE build_events SET event_type = 'evidence.recorded' WHERE sequence = ?").run(failure.sequence);
+      if (["frame-base", "frame-result", "frame-branch", "missing-frame-context"].includes(defect)) {
+        const payload = structuredClone(failure.payload);
+        const frame = payload.governorFailure as Record<string, unknown>;
+        if (defect === "frame-base") frame.baseCommit = "f".repeat(40);
+        if (defect === "frame-result") frame.resultCommit = "f".repeat(40);
+        if (defect === "frame-branch") frame.branch = "other-branch";
+        if (defect === "missing-frame-context") { delete frame.baseCommit; delete frame.resultCommit; delete frame.branch; }
+        f.store.database.prepare("UPDATE build_events SET payload_json = ? WHERE sequence = ?").run(JSON.stringify(payload), failure.sequence);
+      }
+      if (["cross-build", "cross-task", "cross-attempt", "cross-manifest", "cross-handoff", "wrong-base", "wrong-result", "wrong-log-argv", "wrong-log-index"].includes(defect)) {
+        const body = structuredClone(certificate.body);
+        if (defect === "cross-build") body.producer.buildId = "other-build";
+        if (defect === "cross-task") body.producer.taskId = "other-task";
+        if (defect === "cross-attempt") body.producer.attempt = 2;
+        if (defect === "cross-manifest") body.manifest.id = "other-manifest";
+        if (defect === "cross-handoff") body.handoffSha256 = "f".repeat(64);
+        if (defect === "wrong-base") body.producer.baseCommit = "f".repeat(40);
+        if (defect === "wrong-result") body.producer.resultCommit = "f".repeat(40);
+        if (defect === "wrong-log-argv" || defect === "wrong-log-index") {
+          const log = JSON.parse(await readFile(logPath, "utf8")) as { argv: string[]; index: number };
+          if (defect === "wrong-log-argv") log.argv = ["node", "wrong-command"];
+          else log.index = 1;
+          const bytes = `${JSON.stringify(log, null, 2)}\n`;
+          await writeFile(logPath, bytes);
+          const entry = body.validations[0]; if (entry === undefined) throw new Error("Missing native log binding");
+          entry.logSha256 = createHash("sha256").update(bytes).digest("hex");
+        }
+        const id = canonicalJsonSha256(body);
+        await writeFile(path.join(path.dirname(certificate.sourcePath), `native-validation-${id}.json`), `${JSON.stringify({ id, ...body }, null, 2)}\n`);
+        f.store.database.prepare("UPDATE build_events SET payload_json = ? WHERE sequence = ?").run(JSON.stringify({ ...publication.payload, certificateId: id }), publication.sequence);
+      }
+      await expect(evaluateGovernedBuild(f.context, f.buildId)).rejects.toThrow("GOVERNED_FAILURE_HISTORY_UNAVAILABLE");
+      expect(await readVerifiedNativeValidationEvidence(f, f.buildId, f.handoff)).toEqual([]);
+      expect(f.store.events.listForBuild(f.buildId).some((event) => event.type === "governor.decision" || event.type === "integration.completed")).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it("keeps later mutable validation and artifact state separate from verified past publication bytes", async () => {
+    const f = await nativeEvidenceFixture(false, undefined, true);
+    const observed = vi.spyOn(GovernorControlService.prototype, "evaluate");
+    try {
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      await failNativeIntegrationFixture(f);
+      const row = f.store.validations.listForBuild(f.buildId)[0];
+      const artifact = f.store.artifacts.listForBuild(f.buildId)[0];
+      if (row === undefined || artifact === undefined) throw new Error("Missing native source identities");
+      f.store.validations.setStatus(row.id, "failed", { exitCode: 1, logPath: null });
+      f.store.artifacts.setStatus(artifact.id, "integrated");
+      expect((await evaluateGovernedBuild(f.context, f.buildId))?.decision.action).toBe("REQUEST_REPAIR");
+      expect(await readVerifiedNativeValidationEvidence(f, f.buildId, f.handoff)).toEqual([]);
+      expect(observed.mock.calls.at(-1)?.[0].observation.evidence).toEqual({ items: [], satisfied: [], contradictory: [] });
+      expect(observed.mock.calls.at(-1)?.[0].observation.evidenceDelta).toMatchObject({ score: 0, direction: "ZERO" });
+    } finally { observed.mockRestore(); f.cleanup(); }
+  });
+
+  it.each(["validation-row", "changed-file"])("refuses %s changed during asynchronous historical verification", async (mutation) => {
+    const f = await nativeEvidenceFixture(false, undefined, true);
+    let restore = () => {};
+    try {
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      await failNativeIntegrationFixture(f);
+      const row = f.store.validations.listForBuild(f.buildId)[0];
+      if (row === undefined) throw new Error("Missing native validation row");
+      const find = f.store.manifests.findForTask.bind(f.store.manifests);
+      const lookup = vi.spyOn(f.store.manifests, "findForTask").mockImplementationOnce((...args) => {
+        const result = find(...args);
+        if (mutation === "validation-row") f.store.validations.setStatus(row.id, "failed", { exitCode: 1 });
+        else f.store.tasks.recordChangedFiles(f.taskId, 1, [{ path: "outside-ownership/new.ts", changeType: "modified", withinOwnership: false }]);
+        return result;
+      });
+      restore = () => lookup.mockRestore();
+      await expect(evaluateGovernedBuild(f.context, f.buildId)).rejects.toThrow("GOVERNED_FAILURE_HISTORY_UNAVAILABLE");
+      expect(lookup).toHaveBeenCalled();
+      expect(f.store.events.listForBuild(f.buildId).some((event) => event.type === "governor.decision")).toBe(false);
+    } finally { restore(); f.cleanup(); }
+  });
+
+  it("uses the failed attempt's own publication context after a later native worker retry", async () => {
+    const f = await nativeEvidenceFixture(false, undefined, true);
+    const observed = vi.spyOn(GovernorControlService.prototype, "evaluate");
+    let coordinator: BuildCoordinator | undefined;
+    try {
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      await failNativeIntegrationFixture(f);
+      f.store.tasks.retry(f.taskId);
+      f.store.tasks.transition(f.taskId, "running");
+      f.store.tasks.updateAttempt(f.taskId, 2, { status: "failed", errorCode: "WORKER_FAILED", errorMessage: "inert retry failed" });
+      const getProvider = vi.fn(() => { throw new Error("Retry context must not dispatch a provider"); });
+      coordinator = new BuildCoordinator({ ...f.context, handoffService: f.manifests, agentProviders: { get: getProvider } } as unknown as ConstructorParameters<typeof BuildCoordinator>[0]);
+      const native = coordinator as unknown as { failTask(taskId: string, eventType: string, code: string, message: string): unknown };
+      native.failTask(f.taskId, "task.worker_failed", "WORKER_FAILED", "inert retry failed");
+      expect((await evaluateGovernedBuild(f.context, f.buildId))?.decision.action).toBe("REQUEST_REPAIR");
+      expect(observed.mock.calls.at(-1)?.[0].observation.evidence).toEqual({ items: [], satisfied: [], contradictory: [] });
+      expect(observed.mock.calls.at(-1)?.[0].observation.evidenceDelta).toMatchObject({ score: 0, direction: "ZERO" });
+      expect(getProvider).not.toHaveBeenCalled();
+    } finally { await coordinator?.shutdown(); observed.mockRestore(); f.cleanup(); }
+  });
+
+  it("preserves native sequence across a complete multi-page journal with unrelated global gaps", async () => {
+    const f = await nativeEvidenceFixture(false, undefined, true);
+    try {
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      f.store.repositories.create({ id: "other-repo", name: "inert other repository", localPath: path.join(f.root, "other-repository"), configPath: ".agentflow.yaml", baseBranch: "main" });
+      f.store.builds.create({ id: "other-build", repositoryId: "other-repo", backlogPath: "BACKLOG.md", baseCommit: f.executionBase, integrationBranch: "other-integration", tasks: [] });
+      f.store.transaction(() => {
+        for (let index = 0; index < 10010; index += 1) {
+          f.store.events.append({ buildId: f.buildId, type: "unit.inert-journal-padding", payload: { index } });
+          if (index % 1000 === 0) f.store.events.append({ buildId: "other-build", type: "unit.unrelated", payload: {} });
+        }
+      });
+      await failNativeIntegrationFixture(f);
+      expect((await evaluateGovernedBuild(f.context, f.buildId))?.decision.action).toBe("REQUEST_REPAIR");
+      expect(f.store.events.listForBuild(f.buildId, { limit: 10000 })).toHaveLength(10000);
+    } finally { f.cleanup(); }
+  });
+});
 
 describe("Record-derived native capability export", () => {
   it("accepts genuine retry reuse of unchanged declared artifacts with historical registration metadata", async () => {

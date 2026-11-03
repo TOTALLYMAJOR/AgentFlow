@@ -1,5 +1,7 @@
 import { ConservativeTextChurnEvaluator } from "./delivery-size.js";
 import { loadBoundWaleExperiment } from "./wale-run-lab.js";
+import { fingerprintFailure } from "./traffic-control.js";
+import { DEFAULT_RETRYABLE_FAILURE_CODES } from "../orchestration/retry-policy.js";
 import { performance } from "node:perf_hooks";
 
 import {
@@ -568,11 +570,18 @@ export class IntegrationManager {
         errorCode,
         errorMessage,
       });
+      const build = store.builds.getById(task.buildId);
+      const attempt = store.tasks.listAttempts(taskId).find((item) => item.attempt === task.attempt);
+      const governed = build.normalizedPlan.governedHandoff;
+      const retryable = DEFAULT_RETRYABLE_FAILURE_CODES.has(errorCode);
+      const source = typeof governed === "object" && governed !== null && attempt !== undefined && attempt.buildId === task.buildId
+        ? { to: task.state, governorFailure: { attempt: attempt.attempt, attemptId: attempt.id, baseCommit: task.baseCommit, resultCommit: task.resultCommit, branch: task.branchName, fingerprint: fingerprintFailure({ code: errorCode, classification: retryable ? "transient" : "deterministic", retryable, signature: errorMessage, files: store.tasks.listChangedFiles(taskId, attempt.attempt).map((file) => file.path) }) } }
+        : {};
       store.events.append({
         buildId: task.buildId,
         taskId,
         type: "integration.failed",
-        payload: { errorCode, errorMessage, ...payload },
+        payload: { errorCode, errorMessage, ...payload, ...source },
       });
     });
   }

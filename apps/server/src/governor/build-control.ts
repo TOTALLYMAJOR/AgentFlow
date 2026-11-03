@@ -17,7 +17,9 @@ import { normalizeValidationCommand } from "../validation/index.js";
 type GovernorDependencies = Pick<AgentFlowContext, "store" | "repositoryService" | "environment" | "organizationPolicy">;
 type Evidence = { items: string[]; satisfied: string[]; contradictory: string[] };
 interface FailureSource { buildId: string; taskId: string; attemptId: string; attempt: number; failure: TrafficControlFailure; }
-const NATIVE_FAILURE_EVENT_TYPES = new Set(["task.remote_worker_failed", "task.worker_failed", "task.execution_pipeline_failed", "task.validation_failed"]);
+interface FailureBoundary { sequence: number; fingerprint: string; source: FailureSource; }
+interface FailureEvidenceContext { baseline: Evidence; boundary: FailureBoundary; frames: FailureBoundary[]; }
+const NATIVE_FAILURE_EVENT_TYPES = new Set(["task.remote_worker_failed", "task.worker_failed", "task.execution_pipeline_failed", "task.validation_failed", "integration.failed"]);
 
 export async function evaluateGovernedBuild(dependencies: GovernorDependencies, buildId: string) {
   const build = dependencies.store.builds.getById(buildId);
@@ -44,6 +46,9 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     taskId: task.backlogTaskId,
     paths: dependencies.store.tasks.listAttempts(task.id).flatMap((attempt) => dependencies.store.tasks.listChangedFiles(task.id, attempt.attempt).map((file) => file.path)),
   }));
+  // Bind historical projection inputs before the first current-verifier await,
+  // including facts without an event producer such as changed-file records.
+  const historyInputs = usesNativeValidationEvidence(handoff) && tasks.some((task) => task.state === "failed") ? historicalProjectionInputs(dependencies, buildId) : undefined;
   const certificates = usesNativeValidationEvidence(handoff) ? await readVerifiedNativeValidationEvidence(dependencies, buildId, handoff) : [];
   if (usesNativeValidationEvidence(handoff)) {
     const currentBuild = dependencies.store.builds.getById(buildId);
@@ -81,7 +86,17 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
         return failure;
       }),
   );
-  const previousEvidence = failureEvidenceBaseline(events, buildId, failureSources, currentFailure, usesNativeValidationEvidence(handoff));
+  const context = failureEvidenceBaseline(events, buildId, failureSources, currentFailure, usesNativeValidationEvidence(handoff));
+  let previousEvidence = context?.baseline;
+  if (usesNativeValidationEvidence(handoff) && context !== undefined) {
+    requireHistoricalContext(historyInputs !== undefined);
+    const historical = await readHistoricalNativePublicationContext(dependencies, buildId, handoff, events, context);
+    // Historical reads do not relax the current verifier or its async fence.
+    const current = await readVerifiedNativeValidationEvidence(dependencies, buildId, handoff);
+    requireHistoricalContext(equalNativeEvidence(current.map((item) => item.id), certificates.map((item) => item.id)) && equalNativeEvidence(historyInputs, historicalProjectionInputs(dependencies, buildId)));
+    previousEvidence = { ...historical, contradictory: context.baseline.contradictory };
+    // No await after this full native record/event fence before projection.
+  }
   const changedOwners = new Map<string, Set<string>>();
   for (const change of changes) for (const changedPath of change.paths) {
     const owners = changedOwners.get(changedPath) ?? new Set<string>();
@@ -131,7 +146,7 @@ function evidenceBefore(events: BuildEventEntity[], sequence: number): Evidence 
   );
 }
 
-function failureEvidenceBaseline(events: BuildEventEntity[], buildId: string, sources: FailureSource[], current: TrafficControlFailure | null, strictNative: boolean): Evidence | undefined {
+function failureEvidenceBaseline(events: BuildEventEntity[], buildId: string, sources: FailureSource[], current: TrafficControlFailure | null, strictNative: boolean): FailureEvidenceContext | undefined {
   if (current === null) return undefined;
   const unavailable = (): undefined => {
     if (strictNative) throw new Error("GOVERNED_FAILURE_HISTORY_UNAVAILABLE: native failure-relative evidence is not sourced");
@@ -139,7 +154,7 @@ function failureEvidenceBaseline(events: BuildEventEntity[], buildId: string, so
     // qualified native/history parity and must not be reported as such.
     return undefined;
   };
-  const frames: Array<{ sequence: number; fingerprint: string; source: FailureSource }> = [];
+  const frames: FailureBoundary[] = [];
   for (const source of sources) {
     const matching = events.filter((event) => {
       const frame = event.payload.governorFailure;
@@ -158,12 +173,95 @@ function failureEvidenceBaseline(events: BuildEventEntity[], buildId: string, so
   if (active === undefined) return unavailable();
   const prior = frames.filter((frame) => frame.sequence < active.sequence && frame.fingerprint === active.fingerprint).at(-1) ?? active;
   const baseline = evidenceBefore(events, prior.sequence);
-  if (!strictNative) return baseline;
-  // Historical certificate event IDs alone cannot be promoted into a verified
-  // past snapshot. Keep that unsupported case protective, never union stale
-  // certificates into current satisfaction or guess their past validity.
-  if (events.some((event) => event.sequence < prior.sequence && event.type === CERTIFICATE_EVENT)) throw new Error("GOVERNED_FAILURE_HISTORY_UNAVAILABLE: historical native certificate snapshot is not qualified");
-  return { items: [], satisfied: [], contradictory: baseline.contradictory };
+  return { baseline: strictNative ? { items: [], satisfied: [], contradictory: baseline.contradictory } : baseline, boundary: prior, frames };
+}
+
+function requireHistoricalContext(condition: boolean): asserts condition {
+  if (!condition) throw new Error("GOVERNED_FAILURE_HISTORY_UNAVAILABLE: historical native certificate snapshot is not qualified");
+}
+
+function historicalProjectionInputs(dependencies: GovernorDependencies, buildId: string) {
+  const build = dependencies.store.builds.getById(buildId);
+  const tasks = dependencies.store.tasks.listForBuild(buildId);
+  return { build, repository: dependencies.store.repositories.getById(build.repositoryId), tasks, attempts: tasks.map((task) => dependencies.store.tasks.listAttempts(task.id).map((attempt) => ({ attempt, changedFiles: dependencies.store.tasks.listChangedFiles(task.id, attempt.attempt) }))), validationCommands: tasks.map((task) => dependencies.store.tasks.listValidationCommands(task.id)), artifacts: dependencies.store.artifacts.listForBuild(buildId), validations: dependencies.store.validations.listForBuild(buildId), manifests: dependencies.store.manifests.listForBuild(buildId), events: nativeEvidenceEvents(dependencies, buildId) };
+}
+
+const historicalCertificateSchema = z.object({
+  id: z.string().regex(/^[0-9a-f]{64}$/), kind: z.literal(NATIVE_VALIDATION_EVIDENCE_TYPE), schemaVersion: z.literal(NATIVE_VALIDATION_EVIDENCE_VERSION), handoffSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  producer: z.object({ buildId: z.string(), taskId: z.string(), backlogTaskId: z.string(), attempt: z.number().int().positive(), baseCommit: z.string().regex(/^[0-9a-f]{40}$/), resultCommit: z.string().regex(/^[0-9a-f]{40}$/) }).strict(),
+  artifact: z.object({ name: z.string(), type: z.literal(NATIVE_VALIDATION_EVIDENCE_TYPE), version: z.literal(NATIVE_VALIDATION_EVIDENCE_VERSION) }).strict(),
+  manifest: z.object({ id: z.string(), kind: z.literal("validated"), sha256: z.string().regex(/^[0-9a-f]{64}$/) }).strict(),
+  validations: z.array(z.object({ id: z.string(), index: z.number().int().nonnegative(), argv: z.array(z.string()), required: z.literal(true), status: z.literal("passed"), exitCode: z.literal(0), logSha256: z.string().regex(/^[0-9a-f]{64}$/) }).strict()),
+}).strict();
+
+// Verify publication context from retained exact bytes and native sequence.
+// This is ONLY a previous-evidence comparison baseline, never current proof or
+// a reconstruction of omitted historical artifact fields or complete state.
+async function readHistoricalNativePublicationContext(dependencies: GovernorDependencies, buildId: string, handoff: GovernedTaskHandoff, events: BuildEventEntity[], context: FailureEvidenceContext): Promise<Evidence> {
+  try {
+    requireHistoricalContext(usesNativeValidationEvidence(handoff) && nativeValidationEvidenceProfileErrors(handoff).length === 0);
+    const cutoff = context.boundary.sequence;
+    const prefix = events.filter((event) => event.sequence < cutoff);
+    const publications = prefix.filter((event) => event.type === CERTIFICATE_EVENT);
+    requireHistoricalContext(!events.some((event) => event.type === CERTIFICATE_EVENT && event.sequence >= cutoff && event.taskId === context.boundary.source.taskId && event.payload.attempt === context.boundary.source.attempt));
+    const seen = new Set<string>();
+    const selected: Array<{ id: string; name: string }> = [];
+    for (const publication of publications) {
+      const certificateId = z.string().regex(/^[0-9a-f]{64}$/).parse(publication.payload.certificateId);
+      const attemptNumber = z.number().int().positive().parse(publication.payload.attempt);
+      const taskId = nativeEvidenceSegment(publication.taskId ?? "");
+      const directory = path.join(dependencies.environment.runsPath, nativeEvidenceSegment(buildId), taskId, `attempt-${attemptNumber}`);
+      const bytes = await readManagedNativeEvidenceBytes(dependencies.environment.runsPath, path.join(directory, `native-validation-${certificateId}.json`));
+      const certificate = historicalCertificateSchema.parse(JSON.parse(bytes.toString("utf8")));
+      const { id, ...body } = certificate;
+      const producer = body.producer;
+      const declared = handoff.tasks.find((task) => task.id === producer.backlogTaskId);
+      const task = dependencies.store.tasks.getById(taskId);
+      const attempt = dependencies.store.tasks.getAttempt(taskId, attemptNumber);
+      const source = context.frames.find((frame) => frame.source.taskId === taskId && frame.source.attempt === attemptNumber);
+      requireHistoricalContext(id === certificateId && canonicalJsonSha256(body) === id && bytes.equals(Buffer.from(`${JSON.stringify(certificate, null, 2)}\n`, "utf8")) && body.handoffSha256 === canonicalJsonSha256(handoff) && publication.buildId === buildId && publication.payload.handoffSha256 === body.handoffSha256 && publication.payload.artifactName === body.artifact.name && producer.buildId === buildId && producer.taskId === taskId && producer.attempt === attemptNumber && task.buildId === buildId && task.backlogTaskId === producer.backlogTaskId && attempt.buildId === buildId && attempt.taskId === taskId && attempt.attempt === attemptNumber && source !== undefined && source.source.attemptId === attempt.id && publication.sequence < source.sequence && declared !== undefined && handoff.proof.requiredEvidence.includes(body.artifact.name));
+      const key = JSON.stringify([taskId, attemptNumber, body.artifact.name]);
+      requireHistoricalContext(!seen.has(key)); seen.add(key);
+      const declaration = declared.produces.filter((item) => item.name === body.artifact.name);
+      requireHistoricalContext(declaration.length === 1 && declaration[0]?.type === body.artifact.type && declaration[0].version === body.artifact.version && declaration[0].path === undefined);
+      const manifest = dependencies.store.manifests.findForTask(taskId, "validated", attemptNumber);
+      requireHistoricalContext(manifest !== undefined && manifest.id === body.manifest.id && manifest.sha256 === body.manifest.sha256 && manifest.buildId === buildId && manifest.taskId === taskId && manifest.attempt === attemptNumber && manifest.status === "validated" && manifest.schemaVersion === HANDOFF_MANIFEST_SCHEMA_VERSION);
+      const manifestPath = path.join(dependencies.environment.artifactsPath, nativeEvidenceSegment(buildId), taskId, `attempt-${attemptNumber}.validated.manifest.json`);
+      requireHistoricalContext(path.resolve(manifest.manifestPath) === path.resolve(manifestPath));
+      const manifestBytes = await readManagedNativeEvidenceBytes(dependencies.environment.artifactsPath, manifestPath);
+      const parsed = JSON.parse(manifestBytes.toString("utf8")) as Record<string, unknown>;
+      requireHistoricalContext(byteSha256(manifestBytes) === body.manifest.sha256 && equalNativeEvidence(parsed, manifest.manifest) && parsed.buildId === buildId && parsed.taskId === taskId && parsed.backlogTaskId === producer.backlogTaskId && parsed.attempt === attemptNumber && parsed.status === "validated" && parsed.schemaVersion === HANDOFF_MANIFEST_SCHEMA_VERSION && parsed.baseCommit === producer.baseCommit && parsed.resultCommit === producer.resultCommit && parsed.integrationCommit === null && equalNativeEvidence(parsed.validation, { task: "passed", integration: "pending" }));
+      // Failure-time native context is a separate source join. Older/other
+      // producers without this retained context remain unavailable; current
+      // task state cannot reconstruct their past base/result/branch values.
+      const failureEvent = events.find((event) => event.sequence === source.sequence);
+      const nativeContext = z.object({ baseCommit: z.string().regex(/^[0-9a-f]{40}$/), resultCommit: z.string().regex(/^[0-9a-f]{40}$/), branch: z.string().min(1) }).loose().parse(failureEvent?.payload.governorFailure);
+      requireHistoricalContext(failureEvent?.type === "integration.failed" && nativeContext.baseCommit === producer.baseCommit && nativeContext.resultCommit === producer.resultCommit && nativeContext.branch === parsed.branch);
+      const manifestEvents = prefix.filter((event) => event.type === "manifest.published" && event.payload.manifestId === manifest.id);
+      requireHistoricalContext(manifestEvents.length === 1 && manifestEvents[0]?.buildId === buildId && manifestEvents[0].taskId === taskId && manifestEvents[0].payload.attempt === attemptNumber && manifestEvents[0].payload.status === "validated" && manifestEvents[0].payload.sha256 === manifest.sha256 && manifestEvents[0].sequence < publication.sequence);
+      const references = z.array(z.object({ name: z.string(), type: z.string(), version: z.string(), path: z.string().optional() }).loose()).parse(parsed.produces).filter((item) => item.name === body.artifact.name);
+      requireHistoricalContext(references.length === 1 && references[0]?.type === body.artifact.type && references[0].version === body.artifact.version && references[0].path === undefined);
+      // Publication events support identity/ambiguity checks only: omitted
+      // historical type/path/metadata never come from mutable current rows.
+      const artifacts = prefix.filter((event) => event.type === "artifact.published" && event.taskId === taskId && event.payload.name === body.artifact.name && event.payload.version === body.artifact.version);
+      const artifact = artifacts[0];
+      requireHistoricalContext(artifacts.length === 1 && artifact !== undefined && artifact.buildId === buildId && typeof artifact.payload.artifactId === "string" && artifact.payload.status === "validated" && artifact.sequence < publication.sequence && !prefix.some((event) => ["artifact.republished", "artifact.status_changed"].includes(event.type) && event.payload.artifactId === artifact.payload.artifactId));
+      requireHistoricalContext(body.validations.length === declared.validate.length && body.validations.length > 0 && new Set(body.validations.map((item) => item.id)).size === body.validations.length);
+      const rows = dependencies.store.validations.listForBuild(buildId);
+      for (const [index, validation] of body.validations.entries()) {
+        const command = declared.validate[index];
+        const row = rows.find((item) => item.id === validation.id);
+        requireHistoricalContext(command !== undefined && validation.index === index && equalNativeEvidence(validation.argv, normalizeValidationCommand(command).argv) && row !== undefined && row.buildId === buildId && row.taskId === taskId && row.validationType === "task");
+        const logBytes = await readManagedNativeEvidenceBytes(dependencies.environment.runsPath, path.join(directory, `${nativeEvidenceSegment(validation.id)}.json`));
+        const outcome = z.object({ index: z.number().int().nonnegative(), argv: z.array(z.string()), command: z.string(), required: z.literal(true), status: z.literal("passed"), exitCode: z.literal(0) }).loose().parse(JSON.parse(logBytes.toString("utf8")));
+        requireHistoricalContext(byteSha256(logBytes) === validation.logSha256 && outcome.index === index && outcome.command === command && equalNativeEvidence(outcome.argv, validation.argv));
+      }
+      if (taskId === context.boundary.source.taskId && attemptNumber === context.boundary.source.attempt) selected.push({ id, name: body.artifact.name });
+    }
+    const integrationFailure = events.some((event) => event.sequence === cutoff && event.type === "integration.failed");
+    requireHistoricalContext((!integrationFailure && selected.length === 0) || equalNativeEvidence(selected.map((item) => item.name).sort(), [...handoff.proof.requiredEvidence].sort()));
+    return { items: selected.map((item) => item.id), satisfied: selected.map((item) => item.name), contradictory: [] };
+  } catch { throw new Error("GOVERNED_FAILURE_HISTORY_UNAVAILABLE: historical native certificate snapshot is not qualified"); }
 }
 
 async function safeExistingPath(root: string, relative: string): Promise<string> {
