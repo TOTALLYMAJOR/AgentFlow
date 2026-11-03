@@ -1,7 +1,8 @@
 /** Local trusted fixture qualification. Never registers or dispatches this checkout. */
 import { spawn, execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile, chmod, access, copyFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile, chmod, access, copyFile, mkdtemp, open, readdir, rename, rm, type FileHandle } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -18,6 +19,53 @@ async function until<T>(read: () => Promise<T | undefined>, label: string, timeo
 }
 async function jsonFile<T>(file: string): Promise<T | undefined> { try { return JSON.parse(await readFile(file, "utf8")) as T; } catch { return undefined; } }
 function required(name: string): string { const value = process.env[name]; if (!value) throw new Error(`Explicit fixture configuration required: ${name}`); return path.resolve(value); }
+type BridgeMarkerWriter = (file: FileHandle, contents: string) => Promise<void>;
+async function publishSourceReady(file: string, contents: string, write: BridgeMarkerWriter = async (handle, payload) => { await handle.writeFile(payload); }): Promise<void> {
+  const pending = path.join(path.dirname(file), `.${path.basename(file)}.${randomUUID()}.pending`);
+  const handle = await open(pending, "wx", 0o600);
+  try {
+    try { await write(handle, contents); } finally { await handle.close(); }
+    await rename(pending, file);
+  } finally { await rm(pending, { force: true }); }
+}
+
+describe("AFI-003 source-ready publication", () => {
+  it("keeps the receiver-ready path absent until the complete payload can be read", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "afi003-ready-publication-"));
+    const ready = path.join(directory, "source-ready.json");
+    const contents = JSON.stringify({ url: "http://127.0.0.1:47821", token: "inert-marker-test" });
+    let started = () => {}; let release = () => {};
+    const writing = new Promise<void>((resolve) => { started = resolve; });
+    const proceed = new Promise<void>((resolve) => { release = resolve; });
+    const publication = publishSourceReady(ready, contents, async (handle, payload) => {
+      started(); await proceed; await handle.writeFile(payload);
+    });
+    try {
+      await writing;
+      await expect(access(ready)).rejects.toMatchObject({ code: "ENOENT" });
+      release(); await publication;
+      expect(await readFile(ready, "utf8")).toBe(contents);
+      const received = await execute("python3", ["-c", "import json,pathlib,sys;print(json.dumps(json.loads(pathlib.Path(sys.argv[1]).read_text())))", ready]);
+      expect(JSON.parse(received.stdout)).toEqual(JSON.parse(contents));
+      expect(await readdir(directory)).toEqual(["source-ready.json"]);
+    } finally { release(); await publication.catch(() => {}); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("does not expose a partial payload after a failed write and preserves unrelated files", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "afi003-ready-write-failure-"));
+    const ready = path.join(directory, "source-ready.json");
+    const unrelated = path.join(directory, "unrelated.txt"); await writeFile(unrelated, "retained");
+    try {
+      await expect(publishSourceReady(ready, JSON.stringify({ url: "inert", token: "inert" }), async (handle, payload) => {
+        await handle.writeFile(payload.slice(0, 4));
+        throw new Error("inert write failure after partial bytes");
+      })).rejects.toThrow("inert write failure after partial bytes");
+      await expect(access(ready)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readFile(unrelated, "utf8")).toBe("retained");
+      expect(await readdir(directory)).toEqual(["unrelated.txt"]);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+});
 
 describe("AFI-003 genuine local native return loop", () => {
   it("refuses missing fixture provider configuration rather than inheriting ambient Codex", () => {
@@ -116,7 +164,7 @@ describe("AFI-003 genuine local native return loop", () => {
       const audit=await execute("python3",["-c",auditScript,fixture.receiptPath,fixture.handoffPath,fixture.consumerRoot,fixture.evidenceRoot],{cwd:nativeRoot,env:{...process.env,PYTHONDONTWRITEBYTECODE:"1"}});
       await writeFile(path.join(control,"source-proofloom-audit.json"),audit.stdout);expect(JSON.parse(audit.stdout)).toMatchObject({status:"PASS",executionComplete:true,currentAdmission:{currencyVerified:true}});
       expect(await git("status","--porcelain")).toBe("");
-      await writeFile(path.join(control,"source-ready.json"),JSON.stringify({url:address,token}));
+      await publishSourceReady(path.join(control,"source-ready.json"),JSON.stringify({url:address,token}));
       const browser=await until(()=>{if(host.exitCode!==null)throw new Error(`Native/Orbit fixture host exited: ${hostLog}`);return jsonFile<{nativeUrl:string;orbitUrl:string}>(path.join(control,"browser-ready.json"));},"frozen native and Orbit HTTP hosts");
       const cookies=new Map<string,string>();let csrf="";
       const nativeHttp=async(route:string,payload?:unknown)=>{
