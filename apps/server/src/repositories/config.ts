@@ -1,9 +1,9 @@
+import { Buffer } from "node:buffer";
 import { constants as fsConstants } from "node:fs";
 import {
   access,
   lstat,
   open,
-  readFile,
   realpath,
   rename,
   unlink,
@@ -15,6 +15,7 @@ import { parse, stringify } from "yaml";
 import { z } from "zod";
 
 import { RepositoryServiceError } from "./errors.js";
+import { MAX_GIT_OUTPUT_BYTES } from "./git.js";
 
 export const REPOSITORY_CONFIG_FILENAME = ".agentflow.yaml";
 
@@ -162,7 +163,7 @@ export async function loadRepositoryConfig(
       );
     }
     await access(configPath, fsConstants.R_OK);
-    source = await readFile(configPath, "utf8");
+    source = (await readRepositoryInputFile(configPath)).toString("utf8");
   } catch (error) {
     if (error instanceof RepositoryServiceError) {
       throw error;
@@ -182,6 +183,42 @@ export async function loadRepositoryConfig(
     );
   }
 
+  return parseRepositoryConfigSource(source, configPath);
+}
+
+// Bound allocation and parser admission even if a file grows after inspection.
+export async function readRepositoryInputFile(filename: string): Promise<Buffer> {
+  const handle = await open(filename, "r");
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) throw new RepositoryServiceError(
+      "REVIEWED_FILE_INVALID", "In-app review requires a regular file.", 400);
+    if (metadata.size > MAX_GIT_OUTPUT_BYTES) throw new RepositoryServiceError(
+      "REVIEWED_FILE_TOO_LARGE", "This file exceeds the native review and validation budget.", 413);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for (;;) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_GIT_OUTPUT_BYTES - total + 1));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > MAX_GIT_OUTPUT_BYTES) throw new RepositoryServiceError(
+        "REVIEWED_FILE_TOO_LARGE", "The file grew beyond the native review and validation budget. Refresh before retrying.", 413);
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+    const bytes = Buffer.concat(chunks, total);
+    if (!Buffer.from(bytes.toString("utf8"), "utf8").equals(bytes)) throw new RepositoryServiceError(
+      "REVIEWED_FILE_ENCODING_INVALID", "In-app review requires UTF-8 configuration and backlog files.", 400);
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
+export function parseRepositoryConfigSource(
+  source: string,
+  configPath: string = REPOSITORY_CONFIG_FILENAME,
+): AgentFlowRepositoryConfig {
   let untyped: unknown;
   try {
     untyped = parse(source, {

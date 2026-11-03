@@ -599,3 +599,59 @@ Integrity-pin reconciliation binds the current tracked source documents: the spe
   cannot be used by the tag release job.
 - Tests verify step ordering, manifest-based artifact discovery, dirty-tree
   refusal, and failure propagation without running a live publication.
+
+## AF-CONSUMER-001 - Complete the guided consumer journey
+
+
+```yaml
+estimate_hours: 8
+depends_on: []
+owns:
+  - tests/multi-repo.acceptance.test.ts
+  - apps/server/src/repositories/config.ts
+  - apps/server/src/repositories/git.ts
+  - apps/server/src/http/routes/repositories.ts
+  - apps/server/src/repositories/backlog-approval.ts
+  - apps/server/src/repositories/index.ts
+  - apps/server/src/repositories/service.ts
+  - apps/server/src/repositories/types.ts
+  - apps/server/test/consumer-workflow.test.ts
+  - apps/server/test/repository-review-inputs.test.ts
+  - apps/server/test/repository-review-http.test.ts
+validate:
+  - npx vitest run --config vitest.config.ts apps/server/test/consumer-workflow.test.ts
+  - npm run typecheck
+produces:
+  - name: guided-consumer-api
+    type: api-contract
+    version: 1.0.0
+```
+
+Make the goal-first API truthful and complete for a non-developer. Add a
+read-only repository preflight before connection and require explicit approval
+before AgentFlow creates `.agentflow.yaml`. A repository that is already
+configured must connect without source mutation.
+
+After backlog generation and review, add an explicit action that safely commits
+only the repository configuration and reviewed backlog. Refuse the action when
+unrelated tracked, untracked, or staged changes exist. Validate the backlog
+before committing it, use a fixed truthful commit message, return the commit
+SHA, and preserve all unrelated work on every failure path.
+
+Fixture adaptation: multi-repository lifecycle tests now explicitly consent to initializing their own disposable repositories, retaining all lifecycle assertions and adding registration/plan status checks.
+
+Implementation qualification: a private native Git index binds the validated configuration/backlog snapshot while the normal index lock serializes ordinary Git writers. Existing hooks remain active. Refuse partial staging, preexisting locks and symbolic-link paths. A failed commit preserves staging; later working edits remain for review. A hook or reference change detected after commit returns the actual retained SHA and requires review, without resetting user work. No provider, publication, execution or semantic task acceptance is implied. BACKLOG.md restoration is coordinator source preparation, separate from runtime worker ownership.
+
+Read-only review returns the actual configuration/backlog bytes and SHA-256 digests. Guided callers bind their save to those digests and the configured backlog path. A distinct setup-only review/save permits the first configuration commit before clean-tree backlog generation, without reading, creating or validating a nonexistent backlog. Both explicit saves refuse active builds at the HTTP boundary. UTF-8 input reads are capped before YAML parsing using the existing native 10 MiB validation budget. No generation or build starts as a side effect.
+
+### Acceptance Criteria
+
+- The first connection check performs no write to the target repository.
+- Configured repositories connect without rewriting `.agentflow.yaml`.
+- The commit endpoint permits only `.agentflow.yaml` and the configured backlog
+  path, rejects unrelated changes with a plain-language next action, validates
+  the backlog before Git mutation, and returns durable commit evidence.
+- Tests prove read-only preflight, explicit initialization, safe reviewed-plan
+  commit, invalid backlog refusal, and unrelated-change refusal.
+- The endpoint contract never claims publication, deployment, or external
+  provider success.

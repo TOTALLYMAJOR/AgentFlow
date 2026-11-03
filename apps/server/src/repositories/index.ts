@@ -1,4 +1,9 @@
 export {
+  commitReviewedBacklog,
+  REVIEWED_BACKLOG_COMMIT_MESSAGE,
+  type CommitReviewedBacklogEvidence,
+} from "./backlog-approval.js";
+export {
   AgentFlowRepositoryConfigSchema,
   REPOSITORY_CONFIG_FILENAME,
   createRepositoryConfigFile,
@@ -33,8 +38,10 @@ export { detectRepositoryStack } from "./stack-detector.js";
 export type {
   InitializeRepositoryResult,
   LocalRepositoryInspection,
+  RepositoryPreflight,
   RegisteredRepositoryInspection,
   RegisterRepositoryOptions,
+  ReviewedBacklogCommitResult,
   RepositoryHealthChecks,
   RepositoryIssue,
   RepositoryIssueCode,
