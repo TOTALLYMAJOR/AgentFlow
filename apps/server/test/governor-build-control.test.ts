@@ -1,20 +1,25 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDatabaseRepositories } from "../src/db/index.js";
 import { resolveEnvironment } from "../src/config/environment.js";
 import { DEFAULT_ORGANIZATION_POLICY } from "../src/governance/organization-policy.js";
+import { HandoffManifestService } from "../src/artifacts/index.js";
 import { evaluateGovernedBuild } from "../src/governor/build-control.js";
 import { GovernorControlService } from "../src/governor/control-service.js";
-import { canonicalJsonSha256 } from "../src/integration/design-intelligence.js";
+import { canonicalJsonSha256, renderBacklog } from "../src/integration/design-intelligence.js";
+import { BuildCoordinator } from "../src/orchestration/coordinator.js";
+import { planBacklogMarkdown } from "../src/planning/planner.js";
 import { createDatabaseFixture, type DatabaseFixture } from "./helpers/database-fixture.js";
 import { approvedGovernedHandoff } from "./helpers/governed-handoff.js";
 
 describe("current native Governor failure attribution", () => {
   let fixture: DatabaseFixture | undefined;
-  afterEach(() => { vi.restoreAllMocks(); fixture?.cleanup(); fixture = undefined; });
+  let coordinator: BuildCoordinator | undefined;
+  afterEach(async () => { await coordinator?.shutdown(); vi.restoreAllMocks(); fixture?.cleanup(); fixture = undefined; coordinator = undefined; });
 
-  async function setup() {
+  async function setup(withNativePlan = false) {
     fixture = createDatabaseFixture();
     const store = createDatabaseRepositories(fixture.database);
     const root = path.join(fixture.directory, "repository");
@@ -27,10 +32,21 @@ describe("current native Governor failure attribution", () => {
     const handoffPath = path.join(root, "handoff.json");
     await writeFile(handoffPath, JSON.stringify(handoff));
     store.repositories.create({ id: "repo", name: "test", localPath: root, configPath: ".agentflow.yaml", baseBranch: "main" });
+    const binding = { id: handoff.handoffId, sha256: canonicalJsonSha256(handoff), path: "handoff.json", governedBaseCommit: handoff.repository.baseCommit, carrierPaths: ["handoff.json", "BACKLOG.md"], proofBoundary: handoff.proof.claimBoundary };
+    let nativePlan;
+    if (withNativePlan) {
+      const backlogContents = renderBacklog(handoff, "handoff.json", "BACKLOG.md");
+      const planned = planBacklogMarkdown(backlogContents).plan;
+      if (planned === undefined) throw new Error("Expected the existing native governed fixture plan");
+      nativePlan = { ...planned, id: "plan", repositoryId: "repo", backlogPath: "BACKLOG.md", backlogSha256: createHash("sha256").update(backlogContents).digest("hex"), createdAt: new Date().toISOString(), governedHandoff: binding };
+      store.plans.create({ id: nativePlan.id, repositoryId: "repo", backlogPath: "BACKLOG.md", backlogSha256: nativePlan.backlogSha256, backlogContents, repositoryConfig: {}, normalizedPlan: nativePlan });
+      store.plans.lock(nativePlan.id);
+    }
     store.builds.create({
       id: "build", repositoryId: "repo", backlogPath: "BACKLOG.md", baseCommit: handoff.repository.baseCommit,
+      ...(nativePlan === undefined ? {} : { planId: nativePlan.id }),
       integrationBranch: "integration", status: "running",
-      normalizedPlan: { governedHandoff: { id: handoff.handoffId, sha256: canonicalJsonSha256(handoff), path: "handoff.json", governedBaseCommit: handoff.repository.baseCommit, carrierPaths: ["handoff.json", "BACKLOG.md"], proofBoundary: handoff.proof.claimBoundary } },
+      normalizedPlan: nativePlan ?? { governedHandoff: binding },
       tasks: [{ id: "task", backlogTaskId: "AF-001", title: "Task", description: "Task", acceptanceCriteria: ["Passes"], state: "running", attempt: 1 }],
     });
     store.tasks.createAttempt({ id: "attempt-1", taskId: "task", buildId: "build", attempt: 1, status: "running" });
@@ -42,6 +58,46 @@ describe("current native Governor failure attribution", () => {
     const observed = vi.spyOn(GovernorControlService.prototype, "evaluate");
     return { store, dependencies, observed, handoffPath, handoff };
   }
+
+  it("records received retry delegation and the actual native scheduling refusal without authorizing a new attempt", async () => {
+    const { store, dependencies } = await setup(true);
+    store.tasks.transition("task", "failed", { errorCode: "PROVIDER_UNAVAILABLE", errorMessage: "inert transient failure" });
+    store.tasks.updateAttempt("task", 1, { status: "failed", errorCode: "PROVIDER_UNAVAILABLE", errorMessage: "inert transient failure" });
+    const getProvider = vi.fn(() => { throw new Error("Qualification must not dispatch a real or simulated worker"); });
+    coordinator = new BuildCoordinator({
+      ...dependencies,
+      handoffService: new HandoffManifestService(store, dependencies.environment.artifactsPath),
+      agentProviders: { get: getProvider },
+    } as unknown as ConstructorParameters<typeof BuildCoordinator>[0]);
+    // Exercise real coordinator boundaries without starting its dispatch loop.
+    const native = coordinator as unknown as {
+      governBuild(buildId: string): Promise<{ continue: boolean; delegateRetry: boolean } | undefined>;
+      scheduleAutomaticRetry(buildId: string, taskId: string, failureCode: string): void;
+    };
+    expect(store.plans.getById("plan").lockedAt).not.toBeNull();
+    expect(store.builds.getById("build").planId).toBe("plan");
+    expect(await native.governBuild("build")).toEqual({ continue: false, delegateRetry: true });
+    native.scheduleAutomaticRetry("build", "task", "PROVIDER_UNAVAILABLE");
+    await expect(coordinator.retry("build", "task")).rejects.toThrow("does not authorize retry");
+
+    const events = store.events.listForBuild("build");
+    const decision = events.find((event) => event.type === "governor.decision");
+    const acknowledgement = events.find((event) => event.type === "governor.intervention_acknowledged");
+    const refusal = events.find((event) => event.type === "task.retry_not_scheduled");
+    if (decision === undefined || acknowledgement === undefined || refusal === undefined) throw new Error("Expected the durable decision, delegation and refusal chain");
+    expect(decision.payload.decision).toMatchObject({ action: "DELEGATE_RETRY" });
+    expect(decision.payload.recordHash).toMatch(/^[0-9a-f]{64}$/);
+    // Acknowledgement means delegation received, not a successfully scheduled retry.
+    expect(acknowledgement.payload).toMatchObject({ decisionRecordHash: decision.payload.recordHash, action: "DELEGATE_RETRY", acknowledged: true, delegatedTo: "agentflow-existing-retry-policy" });
+    expect(refusal.taskId).toBe("task");
+    expect(refusal.payload).toMatchObject({ failureCode: "PROVIDER_UNAVAILABLE", reason: "governed handoff does not authorize retry" });
+    expect(decision.sequence).toBeLessThan(acknowledgement.sequence);
+    expect(acknowledgement.sequence).toBeLessThan(refusal.sequence);
+    expect(events.filter((event) => event.type === "governor.intervention_acknowledged")).toHaveLength(1);
+    expect(store.tasks.listAttempts("task")).toHaveLength(1);
+    expect(store.tasks.getById("task")).toMatchObject({ state: "failed", attempt: 1 });
+    expect(getProvider).not.toHaveBeenCalled();
+  });
 
   it.each(["VALIDATION_FAILED", "PROVIDER_UNAVAILABLE"])("retains %s history after successful retry without reviving repair/retry", async (code) => {
     const { store, dependencies, observed } = await setup();
