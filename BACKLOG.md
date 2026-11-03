@@ -542,3 +542,60 @@ No separate **later** task is admitted now. Remote-runner Harness Profile execut
 | HP-005 | Isolated worker/validation unit and integration acceptance on a named runtime/version |
 
 Backlog completion proves only the evidence named above. Publication, deployment, provider operation, production use, consuming-repository adoption, and human outcome acceptance require separate authority and evidence.
+
+<!-- Retained original task restored from 319aad4524aa39dd680c1b23f88fcd0c31d42c0a BACKLOG.md; execution/adoption and acceptance remain separate. -->
+
+## AF-RELEASE-001 - Automate clean release qualification
+
+
+```yaml
+estimate_hours: 6
+depends_on: []
+owns:
+  - apps/server/src/cli.ts
+  - scripts/create-release.mjs
+  - scripts/smoke-install.mjs
+  - BACKLOG.md
+  - vitest.config.ts
+  - .github/workflows/quality-and-release.yml
+  - package.json
+  - scripts/verify-release.mjs
+  - tests/release-qualification.test.ts
+validate:
+  - npx vitest run --config vitest.config.ts tests/release-qualification.test.ts
+  - npm run typecheck
+produces:
+  - name: qualified-release-pipeline
+    type: release-capability
+    version: 1.0.0
+```
+
+Add a deterministic release-qualification command and a GitHub Actions
+workflow. Pull requests and main-branch updates must run the complete repository
+verification gate. Version tags must build the release from the exact clean
+commit, verify checksums, smoke-install the generated tarball in an isolated
+environment, retain the evidence as an artifact, and only then create the
+GitHub release.
+
+The local qualification command must locate the tarball from the generated
+manifest rather than hard-coding the current version. It must fail closed on a
+dirty worktree for final qualification, support an explicit diagnostic mode
+that never claims release readiness, and print a machine-readable evidence
+summary.
+
+Implementation qualification note: release evidence uses a fresh destination. Existing evidence, symlinked destinations and internal evidence names that could replace release assets are refused before commands run. An output directory retaining an earlier qualification report requires a fresh `--output`. Fresh external `--evidence` is supported without deleting earlier reports. The native packer retains its own guards for replacing recognized release directories. Current cross-repository integration tests require their explicit isolated fixture settings; missing settings fail closed and are not skipped by this task. Local qualification does not establish hosted CI, publication or native integration acceptance.
+
+Integrity-pin reconciliation binds the current tracked source documents: the specification retains its original body plus the provenance banner from 8117b0a27bfe1488959b1e181ae5bb7fa0669760; implementation prompts match their first tracked LF bytes (the old pin described CRLF bytes). Source documents and authority wording are unchanged. Packaging, installed doctor and install smoke keep exact-byte checksum refusal, and smoke qualification also tests tampered installed copies.
+
+### Acceptance Criteria
+
+- `npm run release:verify` runs full verification, deterministic packaging,
+  checksum verification, and isolated install smoke proof in that order.
+- The release workflow uses the supported Node version and npm's lockfile.
+- A tag cannot create a GitHub release unless all qualification steps pass.
+- The published asset set contains the tarball, source archive, manifest, and
+  checksums from the same commit.
+- Diagnostic dirty-tree execution is clearly labeled non-final in output and
+  cannot be used by the tag release job.
+- Tests verify step ordering, manifest-based artifact discovery, dirty-tree
+  refusal, and failure propagation without running a live publication.
