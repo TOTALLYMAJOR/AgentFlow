@@ -146,7 +146,14 @@ export function fingerprintFailure(failure: Omit<TrafficControlFailure, "fingerp
     code: failure.code || "UNKNOWN",
     classification: failure.classification,
     validation: failure.validation ?? null,
-    signature: failure.signature.toLowerCase().replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, "<uuid>").replace(/:\d+(?::\d+)?\b/g, ":<line>").replace(/\s+/g, " ").trim(),
+    signature: failure.signature
+      .toLowerCase()
+      .replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, "<uuid>")
+      .replace(/\b0x[0-9a-f]+\b/gi, "<hex>")
+      .replace(/\/tmp\/[^/\s]+/g, "/tmp/<run>")
+      .replace(/:\d+(?::\d+)?\b/g, ":<line>")
+      .replace(/\s+/g, " ")
+      .trim(),
     files: sortedUnique(failure.files ?? []),
     requirementId: failure.requirementId ?? null,
   });

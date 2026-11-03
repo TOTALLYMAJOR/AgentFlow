@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { canonicalJsonSha256 } from "../src/integration/design-intelligence.js";
-import { bindTrafficControlContract, projectAgentFlowObservation, type AgentFlowObservationInput, type TrafficControlFailure } from "../src/integration/traffic-control.js";
+import { evaluateGovernor } from "../src/governor/control-service.js";
+import { bindTrafficControlContract, fingerprintFailure, projectAgentFlowObservation, type AgentFlowObservationInput, type TrafficControlFailure } from "../src/integration/traffic-control.js";
 import { approvedGovernedHandoff } from "./helpers/governed-handoff.js";
 
 const handoff = approvedGovernedHandoff({
@@ -93,6 +94,43 @@ describe("AgentFlow Traffic Control observation adapter", () => {
   function failureInput(): AgentFlowObservationInput {
     return { contract: bindTrafficControlContract(handoff), buildId: "build", phase: "RUNNING", attempt: 2, maxAttempts: 3, authority, taskChanges: [], impactedPaths: [], activeTaskCollisions: [], evidence: { items: [], satisfied: [], contradictory: [] }, failures: [failure, failure] };
   }
+
+  // TCP-002 reference fixture at Traffic Control 53488c8: volatile run paths and
+  // pointers describe one failure, while its HTTP status and semantic identity stay material.
+  const volatileFailures: TrafficControlFailure[] = [
+    "HTTP status 401 at /tmp/run-1/test.ts:42:9 pointer 0x1abc",
+    "HTTP status 401 at /tmp/run-2/test.ts:42:9 pointer 0x2abc",
+    "HTTP status 401 at /tmp/run-3/test.ts:42:9 pointer 0x3abc",
+  ].map((signature) => ({ ...failure, validation: "inert-check", signature, files: ["src/a/index.ts"], requirementId: "REQ-INERT" }));
+
+  it.each(volatileFailures)("matches the reference failure identity for $signature", (item) => {
+    expect(fingerprintFailure(item)).toBe("5923295a4ebabadd226cf218fd6575d35fbfa44bcfc834a8823f003595f62a30");
+  });
+
+  it("proposes reconsideration after three identical failures with volatile run paths and pointers", () => {
+    const input = { ...failureInput(), attempt: 3, maxAttempts: 4, failures: volatileFailures };
+    const observation = projectAgentFlowObservation(input);
+    expect(observation.failureRepeatCount).toBe(3);
+    expect(observation.failureHistory.map((item) => item.signature)).toEqual(volatileFailures.map((item) => item.signature));
+    expect(evaluateGovernor(input.contract, observation)).toMatchObject({
+      action: "PROPOSE_REPLAN", authorityEffect: "PROPOSAL_ONLY", requiresApproval: true,
+    });
+  });
+
+  it.each<{ name: string; change: Partial<TrafficControlFailure> }>([
+    { name: "HTTP status", change: { signature: "HTTP status 500 at /tmp/run-4/test.ts:42:9 pointer 0x4abc" } },
+    { name: "source file below the temporary run directory", change: { signature: "HTTP status 401 at /tmp/run-4/other.ts:42:9 pointer 0x4abc" } },
+    { name: "failure code", change: { code: "OTHER_FAILURE" } },
+    { name: "validation command", change: { validation: "other-check" } },
+    { name: "changed file identity", change: { files: ["src/b/index.ts"] } },
+    { name: "requirement identity", change: { requirementId: "REQ-OTHER" } },
+  ])("does not combine repeated failures with a different $name", ({ change }) => {
+    const currentFailure = { ...failure, validation: "inert-check", signature: "HTTP status 401 at /tmp/run-4/test.ts:42:9 pointer 0x4abc", files: ["src/a/index.ts"], requirementId: "REQ-INERT", ...change };
+    const input = { ...failureInput(), attempt: 3, maxAttempts: 4, failures: volatileFailures, currentFailure };
+    const observation = projectAgentFlowObservation(input);
+    expect(observation.failureRepeatCount).toBe(0);
+    expect(evaluateGovernor(input.contract, observation).action).toBe("REQUEST_REPAIR");
+  });
 
   it("explicit null means no active failure while preserving full normalized history", () => {
     const observation = projectAgentFlowObservation({ ...failureInput(), currentFailure: null });
