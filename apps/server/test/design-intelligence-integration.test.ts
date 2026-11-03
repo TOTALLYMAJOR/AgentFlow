@@ -2,7 +2,7 @@ import * as nativeEvidenceControl from "../src/governor/build-control.js";
 import { GovernorControlService } from "../src/governor/control-service.js";
 import Fastify from "fastify";
 import { registerWaleRunLabRoutes } from "../src/http/routes/wale-run-lab.js";
-import { WaleRunLabExperimentSchema } from "../src/integration/wale-run-lab.js";
+import { loadBoundWaleExperiment, WaleRunLabExperimentSchema } from "../src/integration/wale-run-lab.js";
 import { makeWaleRunLabReceiptBundle } from "../src/integration/wale-run-lab-receipt-bundle.js";
 import { createDatabaseRepositories } from "../src/db/index.js";
 import { createDatabaseFixture } from "./helpers/database-fixture.js";
@@ -22,6 +22,7 @@ import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import { resolveEnvironment } from "../src/config/environment.js";
 import { buildApp } from "../src/http/app.js";
+import { GitWorktreeManager } from "../src/git/index.js";
 import { backlogHandoffErrors, canonicalJsonSha256, GovernedTaskHandoffSchema, parseHandoffBinding, renderBacklog, verifyGovernedHandoffForExecution, verifyHandoffAuthoritySources } from "../src/integration/design-intelligence.js";
 import { planBacklogMarkdown } from "../src/planning/planner.js";
 
@@ -426,6 +427,150 @@ describe("Design Intelligence integration", () => {
     }
   }, 20_000);
 });
+
+describe("ordinary governed execution admission", () => {
+  it.each([
+    {
+      name: "authority source changes",
+      change: async (root: string) => writeFile(path.join(root, "AGENTS.md"), "# Changed authority after build creation\n"),
+      code: "GOVERNED_HANDOFF_NOT_EXECUTABLE",
+    },
+    {
+      name: "tracked source changes without a commit",
+      change: async (root: string) => writeFile(path.join(root, "src/index.js"), "export const changed = true;\n"),
+      code: "GOVERNED_HANDOFF_NOT_EXECUTABLE",
+    },
+    {
+      name: "tracked source changes in a later commit",
+      change: async (root: string) => {
+        await writeFile(path.join(root, "src/index.js"), "export const changed = true;\n");
+        await admissionGit(root, ["add", "src/index.js"]);
+        await admissionGit(root, ["commit", "-m", "fixture source drift"]);
+      },
+      code: "GOVERNED_HANDOFF_NOT_EXECUTABLE",
+    },
+    {
+      name: "HEAD changes without changing any file",
+      change: async (root: string) => { await admissionGit(root, ["commit", "--allow-empty", "-m", "fixture HEAD drift"]); },
+      code: "GOVERNED_EXECUTION_SNAPSHOT_STALE",
+    },
+  ])("refuses Start after $name without a Wale experiment", async ({ change, code }) => {
+    await withAdmissionFixture(true, async ({ root, app, context, buildId }) => {
+      expect(loadBoundWaleExperiment(context.store.events, buildId)).toBeUndefined();
+      await change(root);
+      const runtime = vi.spyOn(GitWorktreeManager, "create").mockRejectedValue(new Error("TEST_RUNTIME_MUST_NOT_START"));
+      const provider = vi.spyOn(context.agentProviders, "get").mockImplementation(() => { throw new Error("TEST_PROVIDER_MUST_NOT_RUN"); });
+
+      const response = await app.inject({ method: "POST", url: `/api/builds/${buildId}/start` });
+
+      expect(response.statusCode, response.body).toBe(409);
+      expect(response.json()).toMatchObject({ error: { code } });
+      expect(context.store.builds.getById(buildId).status).toBe("ready");
+      expect(runtime).not.toHaveBeenCalled();
+      expect(provider).not.toHaveBeenCalled();
+      expect(context.store.events.listForBuild(buildId).some((event) => event.type === "build.started")).toBe(false);
+    });
+  });
+
+  it("admits an unchanged exact governed snapshot without requiring a Wale experiment", async () => {
+    await withAdmissionFixture(true, async ({ context, buildId }) => {
+      expect(loadBoundWaleExperiment(context.store.events, buildId)).toBeUndefined();
+      const provider = vi.spyOn(context.agentProviders, "get").mockImplementation(() => { throw new Error("TEST_PROVIDER_MUST_NOT_RUN"); });
+
+      await expect(context.coordinator.validateExecutionAuthority(context.store.builds.getById(buildId))).resolves.toBeUndefined();
+
+      expect(provider).not.toHaveBeenCalled();
+      expect(context.store.builds.getById(buildId).status).toBe("ready");
+    });
+  });
+
+  it("preserves the ungoverned admission path without imposing a handoff", async () => {
+    await withAdmissionFixture(false, async ({ root, context, buildId }) => {
+      const build = context.store.builds.getById(buildId);
+      const plan = context.store.plans.getById(build.planId ?? "");
+      expect(plan.normalizedPlan.governedHandoff).toBeUndefined();
+      expect(loadBoundWaleExperiment(context.store.events, buildId)).toBeUndefined();
+      await writeFile(path.join(root, "src/index.js"), "export const ungoverned = true;\n");
+      const repositoryLookup = vi.spyOn(context.repositoryService, "get");
+      const provider = vi.spyOn(context.agentProviders, "get").mockImplementation(() => { throw new Error("TEST_PROVIDER_MUST_NOT_RUN"); });
+
+      await expect(context.coordinator.validateExecutionAuthority(build)).resolves.toBeUndefined();
+
+      expect(repositoryLookup).not.toHaveBeenCalled();
+      expect(provider).not.toHaveBeenCalled();
+      expect(context.store.builds.getById(buildId).status).toBe("ready");
+    });
+  });
+
+  it.each([
+    { name: "governed", governed: true },
+    { name: "ungoverned", governed: false },
+  ])("allows an unchanged $name build to Start with worker scheduling disabled", async ({ governed }) => {
+    await withAdmissionFixture(governed, async ({ root, app, context, buildId }) => {
+      const head = await admissionGit(root, ["rev-parse", "HEAD"]);
+      const scheduling = vi.spyOn(context.coordinator, "requestTick").mockImplementation(() => undefined);
+      const provider = vi.spyOn(context.agentProviders, "get").mockImplementation(() => { throw new Error("TEST_PROVIDER_MUST_NOT_RUN"); });
+
+      const response = await app.inject({ method: "POST", url: `/api/builds/${buildId}/start` });
+
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json()).toMatchObject({ id: buildId, status: "running" });
+      expect(context.store.builds.getById(buildId).integrationWorktree).not.toBeNull();
+      expect(scheduling).toHaveBeenCalledExactlyOnceWith(buildId);
+      expect(provider).not.toHaveBeenCalled();
+      expect(await admissionGit(root, ["rev-parse", "HEAD"])).toBe(head);
+      expect(await admissionGit(root, ["status", "--porcelain=v1"])).toBe("");
+    });
+  });
+});
+
+// Real Git, native plan/build routes and SQLite; no provider is invoked. The
+// existing synthetic approval helper binds fixture authority bytes and the base.
+async function withAdmissionFixture(
+  governed: boolean,
+  check: (fixture: { root: string; app: Awaited<ReturnType<typeof buildApp>>["app"]; context: AgentFlowContext; buildId: string }) => Promise<void>,
+): Promise<void> {
+  const temporary = await mkdtemp(path.join(tmpdir(), "agentflow-governed-admission-"));
+  const root = path.join(temporary, "repository");
+  let application: Awaited<ReturnType<typeof buildApp>> | undefined;
+  try {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await admissionGit(root, ["init", "--initial-branch=main"]);
+    await admissionGit(root, ["config", "user.name", "Native admission fixture"]);
+    await admissionGit(root, ["config", "user.email", "native-admission@example.invalid"]);
+    const authority = "# Synthetic admission test authority\n";
+    await writeFile(path.join(root, "AGENTS.md"), authority);
+    await writeFile(path.join(root, "src/index.js"), "export const original = true;\n");
+    application = await buildApp({ environment: resolveEnvironment({ AGENTFLOW_HOME: path.join(temporary, "runtime"), AGENTFLOW_LOG_LEVEL: "silent", AGENTFLOW_CODEX_BIN: path.join(temporary, "never-invoke-provider") }), staticRoot: false, logger: false });
+    const { app, context } = application;
+    await context.repositoryService.initialize(root);
+    await admissionGit(root, ["add", "."]);
+    await admissionGit(root, ["commit", "-m", "fixture base"]);
+    const baseCommit = await admissionGit(root, ["rev-parse", "HEAD"]);
+    const handoff = GovernedTaskHandoffSchema.parse(approvedHandoff(baseCommit, createHash("sha256").update(authority).digest("hex")));
+    const markdown = renderBacklog(handoff, "handoff.json", "BACKLOG.md");
+    if (governed) await writeFile(path.join(root, "handoff.json"), JSON.stringify(handoff));
+    await writeFile(path.join(root, "BACKLOG.md"), governed ? markdown : "# Native ungoverned test backlog\n\n" + markdown.slice(markdown.indexOf("## ")));
+    await admissionGit(root, ["add", "."]);
+    await admissionGit(root, ["commit", "-m", "fixture reviewed execution packet"]);
+    const registered = await app.inject({ method: "POST", url: "/api/repositories", payload: { path: root } });
+    expect(registered.statusCode, registered.body).toBe(201);
+    const repositoryId = registered.json<{ id: string }>().id;
+    const planned = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId } });
+    expect(planned.statusCode, planned.body).toBe(201);
+    const created = await app.inject({ method: "POST", url: "/api/builds", payload: { planId: planned.json<{ id: string }>().id } });
+    expect(created.statusCode, created.body).toBe(201);
+    await check({ root, app, context, buildId: created.json<{ id: string }>().id });
+  } finally {
+    vi.restoreAllMocks();
+    await application?.app.close();
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+async function admissionGit(root: string, arguments_: string[]): Promise<string> {
+  return (await execFileAsync("git", ["-C", root, ...arguments_], { encoding: "utf8" })).stdout.trim();
+}
 
 // This fixture executes native validation/commit/manifest producers, then exercises
 // the evidence seam. It does not claim HTTP admission or a provider journey.

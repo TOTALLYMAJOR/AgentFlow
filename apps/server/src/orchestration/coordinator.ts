@@ -187,11 +187,21 @@ export class BuildCoordinator {
 
   async validateExecutionAuthority(build: BuildEntity): Promise<void> {
     const experiment = loadBoundWaleExperiment(this.store.events, build.id);
-    if (experiment === undefined) return;
+    const capturedPlan: unknown = build.normalizedPlan;
+    // Preserve only the native pre-snapshot build shape. A missing current
+    // executionBaseCommit alone must never select legacy compatibility.
+    if (experiment === undefined && build.backlogSha256 === null && build.backlogContents === ""
+      && capturedPlan !== null && typeof capturedPlan === "object" && !Array.isArray(capturedPlan)
+      && Object.keys(capturedPlan).length === 0) return;
     const plan = build.planId === null ? undefined : this.store.plans.getById(build.planId);
     const governed = plan?.normalizedPlan.governedHandoff;
     if (governed === undefined) {
-      throw new AgentFlowError("WALE_EXPERIMENT_REQUIRES_GOVERNED_PLAN", "Experiment requires a governed immutable plan", 409);
+      if (experiment !== undefined) throw new AgentFlowError("WALE_EXPERIMENT_REQUIRES_GOVERNED_PLAN", "Experiment requires a governed immutable plan", 409);
+      if (capturedPlan !== null && typeof capturedPlan === "object"
+        && Object.hasOwn(capturedPlan, "governedHandoff")) {
+        throw new AgentFlowError("GOVERNED_HANDOFF_DRIFT", "Captured governed build no longer matches its immutable plan binding", 409);
+      }
+      return;
     }
     const repository = await this.repositoryService.get(build.repositoryId);
     const root = await realpath(repository.localPath);
@@ -203,8 +213,10 @@ export class BuildCoordinator {
     const verification = await verifyGovernedHandoffForExecution(root, handoff, governed.carrierPaths);
     if (verification.errors.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_NOT_EXECUTABLE", "Governed authority is no longer executable", 409);
     if (governed.executionBaseCommit === undefined || verification.currentHead !== governed.executionBaseCommit || build.baseCommit !== governed.executionBaseCommit) throw new AgentFlowError("GOVERNED_EXECUTION_SNAPSHOT_STALE", "Exact execution snapshot changed", 409);
-    const governedGitTree = await verifyWaleExperimentGitTree(experiment, root, handoff);
-    if (plan !== undefined) validateWaleExperimentAdmission(experiment, { plan, handoff, buildBaseCommit: build.baseCommit, governedGitTree });
+    if (experiment !== undefined) {
+      const governedGitTree = await verifyWaleExperimentGitTree(experiment, root, handoff);
+      if (plan !== undefined) validateWaleExperimentAdmission(experiment, { plan, handoff, buildBaseCommit: build.baseCommit, governedGitTree });
+    }
   }
 
   pause(buildId: string): BuildEntity {

@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDatabaseRepositories,
   openDatabase,
+  type BuildEntity,
   type DatabaseRepositories,
 } from "../src/db/index.js";
 import { GitWorktreeManager } from "../src/git/index.js";
@@ -77,6 +78,58 @@ describe("Run Lab authority overlay compatibility", () => {
     const build = { ...fixture.store.builds.getById(fixture.buildId), planId: "legacy-plan" };
     await expect(BuildCoordinator.prototype.validateExecutionAuthority.call(coordinator, build)).rejects.toMatchObject({ code: "GOVERNED_EXECUTION_SNAPSHOT_STALE" });
     expect(verify).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { name: "missing execution marker", execution: undefined, snapshot: "captured", digest: "current", contents: "" },
+    { name: "null execution marker", execution: null, snapshot: "captured", digest: "current", contents: "" },
+    { name: "malformed execution marker", execution: "not-a-commit", snapshot: "captured", digest: "current", contents: "" },
+    { name: "retained digest with an emptied plan snapshot", execution: undefined, snapshot: "empty", digest: "current", contents: "" },
+    { name: "retained plan snapshot without a backlog digest", execution: undefined, snapshot: "captured", digest: "null", contents: "" },
+    { name: "retained backlog contents with other snapshot markers lost", execution: undefined, snapshot: "empty", digest: "null", contents: "# Retained current backlog\n" },
+    { name: "an array instead of the legacy plan object", execution: undefined, snapshot: "array", digest: "null", contents: "" },
+    { name: "null instead of the legacy plan object", execution: undefined, snapshot: "null", digest: "null", contents: "" },
+    { name: "a missing digest instead of the exact legacy null", execution: undefined, snapshot: "empty", digest: "missing", contents: "" },
+  ])("does not reinterpret $name as an unsnapshotted legacy build", async ({ execution, snapshot, digest, contents }) => {
+    const fixture = await createFixture("current-binding-refusal", []);
+    await writeFile(path.join(fixture.repository, "retained-handoff.json"), "fixture carrier");
+    const handoff = { handoffId: "current" } as unknown as GovernedTaskHandoff;
+    vi.spyOn(governedAuthority, "loadGovernedTaskHandoff").mockResolvedValue(handoff);
+    const verify = vi.spyOn(governedAuthority, "verifyGovernedHandoffForExecution").mockResolvedValue({ errors: [], currentHead: "a".repeat(40) });
+    const binding = { id: "current", path: "retained-handoff.json", carrierPaths: [], sha256: governedAuthority.canonicalJsonSha256(handoff), ...(execution === undefined ? {} : { executionBaseCommit: execution }) };
+    const getPlan = vi.fn(() => ({ normalizedPlan: { governedHandoff: binding } }));
+    const coordinator = { store: { events: fixture.store.events, plans: { getById: getPlan } }, repositoryService: { get: async () => ({ localPath: fixture.repository }) } } as unknown as BuildCoordinator;
+    const normalizedPlan = snapshot === "captured" ? { governedHandoff: binding } : snapshot === "array" ? [] : snapshot === "null" ? null : {};
+    const build = {
+      ...fixture.store.builds.getById(fixture.buildId),
+      planId: "current-plan",
+      backlogSha256: digest === "current" ? "b".repeat(64) : digest === "null" ? null : undefined,
+      backlogContents: contents,
+      normalizedPlan,
+    } as unknown as BuildEntity;
+
+    await expect(BuildCoordinator.prototype.validateExecutionAuthority.call(coordinator, build)).rejects.toMatchObject({ code: "GOVERNED_EXECUTION_SNAPSHOT_STALE", statusCode: 409 });
+    expect(getPlan).toHaveBeenCalledExactlyOnceWith("current-plan");
+    expect(verify).toHaveBeenCalledOnce();
+  });
+
+  it.each(["current-plan", null])("refuses a missing immutable-plan binding when the build retains current governed authority (%s)", async (planId) => {
+    const fixture = await createFixture("missing-current-plan-binding", []);
+    const getPlan = vi.fn(() => ({ normalizedPlan: {} }));
+    const getRepository = vi.fn(() => { throw new Error("missing immutable binding must refuse before source inspection"); });
+    const coordinator = { store: { events: fixture.store.events, plans: { getById: getPlan } }, repositoryService: { get: getRepository } } as unknown as BuildCoordinator;
+    const build = {
+      ...fixture.store.builds.getById(fixture.buildId),
+      planId,
+      backlogSha256: "b".repeat(64),
+      backlogContents: "# Captured governed backlog\n",
+      normalizedPlan: { governedHandoff: { id: "current", executionBaseCommit: "a".repeat(40) } },
+    };
+
+    await expect(BuildCoordinator.prototype.validateExecutionAuthority.call(coordinator, build)).rejects.toMatchObject({ code: "GOVERNED_HANDOFF_DRIFT", statusCode: 409 });
+    if (planId === null) expect(getPlan).not.toHaveBeenCalled();
+    else expect(getPlan).toHaveBeenCalledExactlyOnceWith(planId);
+    expect(getRepository).not.toHaveBeenCalled();
   });
 });
 
