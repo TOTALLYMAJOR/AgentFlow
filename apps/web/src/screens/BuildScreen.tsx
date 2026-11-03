@@ -339,7 +339,10 @@ export function BuildScreen({
 
       <div className="build-state-strip" aria-live="polite">
         <StatusBadge status={active.status} />
-        <span className="mono">{active.id}</span>
+        <details>
+          <summary>View build identity</summary>
+          <code>{active.id}</code>
+        </details>
         <span>{stream.connected ? "Events live" : "Reconnecting events"}</span>
       </div>
 

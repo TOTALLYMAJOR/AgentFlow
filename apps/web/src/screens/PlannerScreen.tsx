@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   Button,
   Checkbox,
@@ -14,14 +14,18 @@ import {
   MagnifyingGlassIcon,
   PencilSimpleIcon,
   PlayIcon,
+  WarningCircleIcon,
 } from "@phosphor-icons/react";
 import useSWR from "swr";
 import { apiFetch, postJson } from "../api/client.js";
+import { pendingConfigurationReview, subscribeConfigurationReviews } from "../api/types.js";
 import type {
   BuildSummary,
   BacklogGenerationResult,
   PlanSummary,
   RepositoryTarget,
+  ReviewedBacklogCommitResult,
+  ReviewedBacklogSnapshot,
 } from "../api/types.js";
 import { EmptyState } from "../components/EmptyState.js";
 import { LoadingState } from "../components/LoadingState.js";
@@ -60,10 +64,39 @@ export function PlannerScreen({
   const [generating, setGenerating] = useState(false);
   const [generation, setGeneration] =
     useState<BacklogGenerationResult | null>(null);
+  const [reviewAcknowledged, setReviewAcknowledged] = useState(false);
   const [reviewConfirmed, setReviewConfirmed] = useState(false);
+  const [reviewCommit, setReviewCommit] =
+    useState<ReviewedBacklogCommitResult | null>(null);
+  const [committingReview, setCommittingReview] = useState(false);
+  const [recordedCommitSha, setRecordedCommitSha] = useState<string | null>(null);
+  const [reviewBlocked, setReviewBlocked] = useState(false);
+  const [recoveryAcknowledged, setRecoveryAcknowledged] = useState(false);
+  const [recheckingReview, setRecheckingReview] = useState(false);
+  const [recordedBuildId, setRecordedBuildId] = useState<string | null>(null);
+  const [reviewSnapshot, setReviewSnapshot] = useState<ReviewedBacklogSnapshot | null>(null);
+  const [loadingReview, setLoadingReview] = useState(false);
+  const [reviewLoadError, setReviewLoadError] = useState<string | null>(null);
+  const reviewRequestRef = useRef(0);
   const [planning, setPlanning] = useState(false);
   const [starting, setStarting] = useState(false);
   const [planApproved, setPlanApproved] = useState(false);
+  const [checkedPlanBinding, setCheckedPlanBinding] = useState<string | null>(null);
+  const configurationRecovery = useSyncExternalStore(
+    subscribeConfigurationReviews,
+    () => pendingConfigurationReview(repositoryId),
+    () => null,
+  );
+  const invalidatePlan = useCallback(() => {
+    setPlan(null);
+    setPlanApproved(false);
+    setCheckedPlanBinding(null);
+  }, []);
+  useEffect(() => {
+    if (configurationRecovery !== null) {
+      invalidatePlan();
+    }
+  }, [configurationRecovery, invalidatePlan]);
   const [error, setError] = useState<string | null>(null);
   const [errorDetails, setErrorDetails] = useState<unknown>(null);
   const selectedRepository = useMemo(
@@ -74,16 +107,71 @@ export function PlannerScreen({
     [repositories.data, repositoryId],
   );
 
+  const loadReviewSnapshot = useCallback(async (id: string): Promise<void> => {
+    const request = ++reviewRequestRef.current;
+    invalidatePlan();
+    setReviewSnapshot(null);
+    setReviewAcknowledged(false);
+    setReviewLoadError(null);
+    if (id.length === 0) {
+      setLoadingReview(false);
+      return;
+    }
+    setLoadingReview(true);
+    try {
+      const snapshot = await apiFetch<ReviewedBacklogSnapshot>(
+        `/api/repositories/${id}/backlog/review`,
+      );
+      if (request === reviewRequestRef.current) {
+        setReviewSnapshot(snapshot);
+      }
+    } catch (cause) {
+      if (request === reviewRequestRef.current) {
+        setReviewLoadError(cause instanceof Error ? cause.message : "The configured review files could not be loaded.");
+      }
+    } finally {
+      if (request === reviewRequestRef.current) {
+        setLoadingReview(false);
+      }
+    }
+  }, [invalidatePlan]);
+
+  useEffect(() => {
+    void loadReviewSnapshot(repositoryId);
+    return () => { reviewRequestRef.current += 1; };
+  }, [repositoryId, loadReviewSnapshot]);
+
+  const busy = generating || committingReview || planning || starting || recheckingReview || loadingReview;
+  const selectedBacklogPath = generation?.backlogPath ?? backlogPath.trim();
+  const reviewMatchesSelection = reviewSnapshot !== null && (
+    selectedBacklogPath.length === 0 ||
+    selectedBacklogPath.replace(/^\.\//u, "") === reviewSnapshot.backlogPath ||
+    selectedBacklogPath === reviewSnapshot.absoluteBacklogPath
+  );
+  const hasBacklogForReview = generation !== null || (reviewSnapshot !== null && reviewMatchesSelection);
+  const currentPlanBinding = JSON.stringify([
+    repositoryId, backlogPath.trim(), generationMode, objective.trim(),
+    reviewSnapshot?.backlogPath, reviewSnapshot?.backlogSha256, reviewSnapshot?.configurationSha256,
+  ]);
+  const planMatchesCurrentInputs = checkedPlanBinding !== null && checkedPlanBinding === currentPlanBinding;
+  const canCheckPlan = configurationRecovery === null && selectedRepository?.eligible === true &&
+    reviewSnapshot?.valid === true && reviewMatchesSelection &&
+    !busy && !reviewBlocked && (generation === null || reviewConfirmed);
+
   async function generateBacklog(): Promise<void> {
-    if (repositoryId.length === 0) {
+    if (selectedRepository?.eligible !== true || busy || reviewBlocked || pendingConfigurationReview(repositoryId) !== null) {
       return;
     }
     setGenerating(true);
     setError(null);
     setErrorDetails(null);
     setPlan(null);
+    setPlanApproved(false);
     setGeneration(null);
+    setReviewAcknowledged(false);
     setReviewConfirmed(false);
+    setReviewCommit(null);
+    setRecordedCommitSha(null);
     try {
       const result = await postJson<BacklogGenerationResult>(
         `/api/repositories/${repositoryId}/backlog/generate`,
@@ -96,6 +184,7 @@ export function PlannerScreen({
         },
       );
       setGeneration(result);
+      await loadReviewSnapshot(repositoryId);
       if (backlogPath.length === 0) {
         setBacklogPath(result.backlogPath);
       }
@@ -113,11 +202,97 @@ export function PlannerScreen({
     }
   }
 
+  async function commitReviewedBacklog(): Promise<void> {
+    if (
+      repositoryId.length === 0 ||
+      reviewSnapshot?.valid !== true || !reviewMatchesSelection ||
+      !reviewAcknowledged || busy || reviewBlocked || pendingConfigurationReview(repositoryId) !== null ||
+      recordedCommitSha !== null
+    ) {
+      return;
+    }
+    setCommittingReview(true);
+    setError(null);
+    setErrorDetails(null);
+    try {
+      const result = await postJson<ReviewedBacklogCommitResult>(
+        `/api/repositories/${repositoryId}/backlog/commit`,
+        {
+          expectedBacklogPath: reviewSnapshot.backlogPath,
+          expectedBacklogSha256: reviewSnapshot.backlogSha256,
+          expectedConfigurationSha256: reviewSnapshot.configurationSha256,
+        },
+      );
+      setReviewCommit(result);
+      setRecordedCommitSha(result.commitSha);
+      setReviewBlocked(result.requiresWorktreeReview);
+      setReviewConfirmed(!result.requiresWorktreeReview);
+      setRecoveryAcknowledged(false);
+      setPlan(null);
+      setPlanApproved(false);
+      await repositories.mutate().catch(() => undefined);
+    } catch (cause) {
+      const details = readErrorDetails(cause);
+      const commitSha = readRecordedCommitSha(details);
+      setReviewConfirmed(false);
+      setReviewCommit(null);
+      setRecordedCommitSha(commitSha);
+      if (commitSha === null) {
+        setReviewSnapshot(null);
+        setReviewAcknowledged(false);
+      }
+      setReviewBlocked(commitSha !== null);
+      setRecoveryAcknowledged(false);
+      setPlan(null);
+      setPlanApproved(false);
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "The reviewed plan could not be committed.",
+      );
+      setErrorDetails(details);
+    } finally {
+      setCommittingReview(false);
+    }
+  }
+
+  async function recheckReviewedCheckout(): Promise<void> {
+    if (!reviewBlocked || !recoveryAcknowledged || busy) {
+      return;
+    }
+    setRecheckingReview(true);
+    try {
+      const targets = await repositories.mutate();
+      const target = targets?.find((entry) => entry.repositoryId === repositoryId);
+      if (target?.eligible !== true) {
+        setError("The checkout is still blocked. Resolve the listed readiness issues before checking a new plan.");
+        setErrorDetails(target?.blockers ?? null);
+        return;
+      }
+      setReviewBlocked(false);
+      setReviewConfirmed(true);
+      await loadReviewSnapshot(repositoryId);
+      setPlan(null);
+      setPlanApproved(false);
+      setError(null);
+      setErrorDetails(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Readiness could not be confirmed.");
+    } finally {
+      setRecheckingReview(false);
+    }
+  }
+
   async function createPlan(
     event: React.SyntheticEvent<HTMLFormElement>,
   ): Promise<void> {
     event.preventDefault();
+    if (!canCheckPlan) {
+      return;
+    }
     setPlanning(true);
+    invalidatePlan();
+    const binding = currentPlanBinding;
     setError(null);
     setErrorDetails(null);
     try {
@@ -125,7 +300,11 @@ export function PlannerScreen({
         repositoryId,
         ...(backlogPath.length === 0 ? {} : { backlogPath }),
       });
+      if (result.backlogSha256 !== undefined && result.backlogSha256 !== reviewSnapshot.backlogSha256) {
+        throw new Error("The immutable plan differs from the reviewed backlog. Reload the current files and check a new plan.");
+      }
       setPlan(result);
+      setCheckedPlanBinding(binding);
       setPlanApproved(false);
     } catch (cause) {
       setPlan(null);
@@ -141,16 +320,29 @@ export function PlannerScreen({
   }
 
   async function startBuild(): Promise<void> {
-    if (plan === null || !planApproved) {
+    if (plan === null || reviewSnapshot === null || !planApproved || !planMatchesCurrentInputs || busy || reviewBlocked ||
+      recordedBuildId !== null || pendingConfigurationReview(repositoryId) !== null) {
       return;
     }
     setStarting(true);
     setError(null);
+    setErrorDetails(null);
     let createdBuild: BuildSummary | null = null;
     try {
+      const current = await apiFetch<ReviewedBacklogSnapshot>(`/api/repositories/${repositoryId}/backlog/review`);
+      if (pendingConfigurationReview(repositoryId) !== null || current.repositoryId !== repositoryId ||
+        !current.valid || current.backlogPath !== reviewSnapshot.backlogPath ||
+        current.backlogSha256 !== reviewSnapshot.backlogSha256 ||
+        current.configurationSha256 !== reviewSnapshot.configurationSha256) {
+        invalidatePlan();
+        setReviewSnapshot(current.repositoryId === repositoryId ? current : null);
+        setReviewAcknowledged(false);
+        throw new Error("The reviewed source or setup recovery state changed. Review the current files, then check and approve a new plan before starting.");
+      }
       createdBuild = await postJson<BuildSummary>("/api/builds", {
         planId: plan.id,
       });
+      setRecordedBuildId(createdBuild.id);
       await postJson<BuildSummary>(`/api/builds/${createdBuild.id}/start`);
       onBuildStarted(createdBuild.id);
     } catch (cause) {
@@ -159,7 +351,7 @@ export function PlannerScreen({
       setError(
         createdBuild === null
           ? message
-          : `${message} Build ${createdBuild.id} remains recorded as ready for review.`,
+          : `${message} Build ${createdBuild.id} is recorded; its current start state is unknown until read back in Activity.`,
       );
     } finally {
       setStarting(false);
@@ -171,7 +363,7 @@ export function PlannerScreen({
       <>
         <PageTitle
           title="Review the work plan"
-          description="AgentFlow explains the outcome, boundaries, and quality checks before any work begins."
+          description="Review the outcome, source changes, and quality checks before explicitly starting coding work."
         />
         <Flash variant="danger">
           Repository state could not be loaded, so planning is unavailable.
@@ -185,7 +377,7 @@ export function PlannerScreen({
       <>
         <PageTitle
           title="Review the work plan"
-          description="AgentFlow explains the outcome, boundaries, and quality checks before any work begins."
+          description="Review the outcome, source changes, and quality checks before explicitly starting coding work."
         />
         <LoadingState label="Loading planner repositories" />
       </>
@@ -197,7 +389,7 @@ export function PlannerScreen({
       <>
         <PageTitle
           title="Review the work plan"
-          description="AgentFlow explains the outcome, boundaries, and quality checks before any work begins."
+          description="Review the outcome, source changes, and quality checks before explicitly starting coding work."
         />
         <EmptyState
           title="Connect a project first"
@@ -213,13 +405,13 @@ export function PlannerScreen({
     <>
       <PageTitle
         title="Review the work plan"
-        description="AgentFlow explains the outcome, boundaries, and quality checks before any work begins."
+        description="Review the outcome, source changes, and quality checks before explicitly starting coding work."
         actions={
           plan === null ? null : (
             <Button
               variant="primary"
               leadingVisual={PlayIcon}
-              disabled={starting || !planApproved}
+              disabled={busy || !planApproved || !planMatchesCurrentInputs || reviewBlocked || configurationRecovery !== null || recordedBuildId !== null}
               onClick={() => {
                 void startBuild();
               }}
@@ -229,18 +421,33 @@ export function PlannerScreen({
           )
         }
       />
+      {configurationRecovery === null ? null : (
+        <Flash variant="warning" className="spaced-flash" role="status">
+          <strong>Setup recovery is required for this repository</strong>
+          <p>Return to Workspace, select this project, and review the current setup and recorded commit. Generation, planning, saving and start remain blocked until explicit recovery and native readiness recheck.</p>
+          <details><summary>View recorded setup commit</summary><code>{configurationRecovery.commitSha}</code></details>
+        </Flash>
+      )}
       <form className="planner-form" onSubmit={(event) => void createPlan(event)}>
         <FormControl required>
           <FormControl.Label>Repository</FormControl.Label>
           <Select
             block
             value={repositoryId}
+            disabled={busy || recordedBuildId !== null}
             onChange={(event) => {
+              invalidatePlan();
               setRepositoryId(event.target.value);
-              setPlan(null);
-              setPlanApproved(false);
+              setBacklogPath("");
               setGeneration(null);
+              setReviewAcknowledged(false);
               setReviewConfirmed(false);
+              setReviewCommit(null);
+              setRecordedCommitSha(null);
+              setReviewBlocked(false);
+              setRecoveryAcknowledged(false);
+              setError(null);
+              setErrorDetails(null);
             }}
           >
             <Select.Option value="">Select repository</Select.Option>
@@ -248,7 +455,6 @@ export function PlannerScreen({
               <Select.Option
                 key={repository.repositoryId}
                 value={repository.repositoryId}
-                disabled={!repository.eligible}
               >
                 {repository.name}
                 {repository.eligible
@@ -265,11 +471,16 @@ export function PlannerScreen({
           <TextInput
             block
             value={backlogPath}
+            disabled={busy || reviewBlocked || configurationRecovery !== null || recordedBuildId !== null}
             placeholder="BACKLOG.md"
             onChange={(event) => {
+              invalidatePlan();
               setBacklogPath(event.target.value);
-              setPlan(null);
-              setPlanApproved(false);
+              setGeneration(null);
+              setReviewAcknowledged(false);
+              setReviewConfirmed(false);
+              setReviewCommit(null);
+              setRecordedCommitSha(null);
             }}
           />
           <FormControl.Caption>
@@ -279,15 +490,38 @@ export function PlannerScreen({
         <Button
           variant="primary"
           type="submit"
-          disabled={
-            repositoryId.length === 0 ||
-            planning ||
-            (generation !== null && !reviewConfirmed)
-          }
+          disabled={!canCheckPlan || recordedBuildId !== null}
         >
           {planning ? "Checking plan..." : "Check this plan"}
         </Button>
       </form>
+      {generation === null && reviewLoadError !== null ? (
+        <Flash variant="warning" className="spaced-flash" role="status">
+          The configured backlog cannot yet be reviewed: {reviewLoadError}
+          <p>If a backlog is missing, generate a draft below. Existing invalid files need checkout review.</p>
+          <Button disabled={busy} onClick={() => void loadReviewSnapshot(repositoryId)}>Reload review files</Button>
+        </Flash>
+      ) : null}
+      {generation === null && reviewSnapshot !== null && !reviewMatchesSelection ? (
+        <Flash variant="warning" className="spaced-flash">
+          This path is outside the configured backlog <code>{reviewSnapshot.backlogPath}</code>.
+          Reconcile the selection and repository configuration before planning.
+          This action will not edit configuration automatically.
+        </Flash>
+      ) : null}
+      {selectedRepository === null || selectedRepository.eligible ? null : (
+        <Flash variant="warning" className="spaced-flash" role="status">
+          <strong>Checkout readiness needs attention</strong>
+          <ul>
+            {selectedRepository.blockers.map((blocker) => (
+              <li key={blocker.code}>{blocker.message} {blocker.recovery}</li>
+            ))}
+          </ul>
+          {generation === null ? null : (
+            <p>A generated review file must be reviewed and committed before planning.</p>
+          )}
+        </Flash>
+      )}
       <section
         className="workflow-guide"
         aria-labelledby="workflow-guide-title"
@@ -297,7 +531,7 @@ export function PlannerScreen({
             <h2 id="workflow-guide-title">From repository to running build</h2>
             <span className="workflow-guide__subtitle">
               Follow the four gates in order. AgentFlow will stop before unsafe
-              work.
+              work. Checking a plan and starting it are separate actions.
             </span>
           </div>
           <StatusBadge
@@ -312,7 +546,7 @@ export function PlannerScreen({
         </header>
 
         <ol className="workflow-steps">
-          <li className={repositoryId.length > 0 ? "is-complete" : "is-current"}>
+          <li className={selectedRepository?.eligible === true && selectedRepository.clean ? "is-complete" : "is-current"}>
             <span className="workflow-step__number">1</span>
             <div>
               <strong>Choose a clean checkout</strong>
@@ -327,7 +561,7 @@ export function PlannerScreen({
           </li>
           <li
             className={
-              generation !== null
+              hasBacklogForReview
                 ? "is-complete"
                 : repositoryId.length > 0
                   ? "is-current"
@@ -336,10 +570,11 @@ export function PlannerScreen({
           >
             <span className="workflow-step__number">2</span>
             <div>
-              <strong>Create the backlog</strong>
+              <strong>Create or reuse the backlog</strong>
               <p>
-                Let Codex choose from repository evidence, or give it one clear
-                outcome. Only the backlog file may change.
+                Reuse the configured backlog, or explicitly draft one from
+                repository evidence or a chosen outcome. Generation writes a
+                local review file and does not start coding work.
               </p>
             </div>
           </li>
@@ -347,7 +582,7 @@ export function PlannerScreen({
             className={
               reviewConfirmed
                 ? "is-complete"
-                : generation !== null
+                : hasBacklogForReview
                   ? "is-current"
                   : ""
             }
@@ -361,7 +596,7 @@ export function PlannerScreen({
               </p>
             </div>
           </li>
-          <li className={plan !== null ? "is-complete" : reviewConfirmed ? "is-current" : ""}>
+          <li className={plan !== null || reviewConfirmed ? "is-current" : ""}>
             <span className="workflow-step__number">4</span>
             <div>
               <strong>Validate and start</strong>
@@ -379,10 +614,14 @@ export function PlannerScreen({
               type="button"
               className={generationMode === "auto" ? "mode-card is-selected" : "mode-card"}
               aria-pressed={generationMode === "auto"}
+              disabled={busy || reviewBlocked || configurationRecovery !== null || recordedBuildId !== null}
               onClick={() => {
+                invalidatePlan();
                 setGenerationMode("auto");
                 setGeneration(null);
+                setReviewAcknowledged(false);
                 setReviewConfirmed(false);
+                setReviewCommit(null);
               }}
             >
               <MagnifyingGlassIcon size={22} aria-hidden="true" />
@@ -397,10 +636,14 @@ export function PlannerScreen({
               type="button"
               className={generationMode === "objective" ? "mode-card is-selected" : "mode-card"}
               aria-pressed={generationMode === "objective"}
+              disabled={busy || reviewBlocked || configurationRecovery !== null || recordedBuildId !== null}
               onClick={() => {
+                invalidatePlan();
                 setGenerationMode("objective");
                 setGeneration(null);
+                setReviewAcknowledged(false);
                 setReviewConfirmed(false);
+                setReviewCommit(null);
               }}
             >
               <PencilSimpleIcon size={22} aria-hidden="true" />
@@ -420,8 +663,10 @@ export function PlannerScreen({
                 block
                 rows={4}
                 value={objective}
+                disabled={busy || reviewBlocked || configurationRecovery !== null || recordedBuildId !== null}
                 placeholder="Build athlete goals with coach review, organization isolation, accessible UI, API contracts, migrations, and focused tests."
                 onChange={(event) => {
+                  invalidatePlan();
                   setObjective(event.target.value);
                 }}
               />
@@ -444,8 +689,8 @@ export function PlannerScreen({
           <Button
             variant="primary"
             disabled={
-              repositoryId.length === 0 ||
-              generating ||
+              selectedRepository?.eligible !== true ||
+              busy || reviewBlocked || configurationRecovery !== null || recordedBuildId !== null ||
               (generationMode === "objective" && objective.trim().length < 10)
             }
             onClick={() => {
@@ -460,22 +705,26 @@ export function PlannerScreen({
           </Button>
         </div>
 
-        {generation === null ? null : (
-          <div className="backlog-review" role="status">
-            <div className="backlog-review__heading">
+        {generation === null && reviewSnapshot === null ? null : (
+          <div className="backlog-review">
+            <div className="backlog-review__heading" role="status">
               <CheckCircleIcon size={24} aria-hidden="true" />
               <div>
-                <strong>Backlog drafted at {generation.backlogPath}</strong>
-                <p>{generation.nextAction}</p>
+                <strong>{generation === null ? `Configured backlog at ${reviewSnapshot?.backlogPath ?? "the registered path"}` : `Backlog drafted at ${generation.backlogPath}`}</strong>
+                <p>
+                  Review the current exact files before saving any changes.
+                  Reading or committing this backlog does not start coding;
+                  publishing, deployment, and external operations remain separate.
+                </p>
               </div>
             </div>
-            {generation.summary.length === 0 ? null : (
+            {generation === null || generation.summary.length === 0 ? null : (
               <details>
                 <summary>Read Codex’s selection summary</summary>
                 <pre>{generation.summary}</pre>
               </details>
             )}
-            <div className="decomposition-summary">
+            {generation === null ? null : <div className="decomposition-summary">
               <span>
                 <strong>{generation.decomposition.epics.length}</strong> epics
               </span>
@@ -484,38 +733,161 @@ export function PlannerScreen({
                 drafts
               </span>
               <StatusBadge
-                status={generation.decomposition.valid ? "valid" : "review"}
+                status={reviewSnapshot?.valid === true ? "valid" : "review"}
               />
-            </div>
-            <div className="commit-instructions">
-              <span>Review and commit from the registered checkout:</span>
-              <code>
-                git add {generation.backlogPath} &amp;&amp; git commit -m
-                &quot;docs: define AgentFlow backlog&quot;
-              </code>
-            </div>
+            </div>}
+            {generation === null || generation.warnings.length === 0 ? null : (
+              <Flash variant="warning">{generation.warnings}</Flash>
+            )}
+            <section className="backlog-file-review" aria-labelledby="backlog-file-review-title">
+              <header>
+                <h3 id="backlog-file-review-title">Review the exact local files</h3>
+                <Button disabled={busy || recordedCommitSha !== null} onClick={() => void loadReviewSnapshot(repositoryId)}>
+                  {loadingReview ? "Loading review files..." : "Reload review files"}
+                </Button>
+              </header>
+              {loadingReview ? <LoadingState label="Reading configured backlog and setup" /> : reviewLoadError !== null ? (
+                <Flash variant="warning">{reviewLoadError} Saving and planning remain unavailable until authoritative readback succeeds.</Flash>
+              ) : reviewSnapshot === null ? (
+                <p>Load the current configured files before recording review.</p>
+              ) : (
+                <>
+                  <p>
+                    Read-only snapshot of <code>{reviewSnapshot.backlogPath}</code> and{" "}
+                    <code>{reviewSnapshot.configurationPath}</code>. Saving is bound to
+                    these exact contents; later edits require a fresh review.
+                  </p>
+                  <pre className="backlog-file-review__contents" tabIndex={0} aria-label="Current configured backlog contents">{reviewSnapshot.backlogContents}</pre>
+                  <details>
+                    <summary>Review .agentflow.yaml contents</summary>
+                    <pre className="backlog-file-review__contents" tabIndex={0}>{reviewSnapshot.configurationContents}</pre>
+                  </details>
+                  <details>
+                    <summary>View review snapshot identities</summary>
+                    <p>Backlog SHA-256: <code>{reviewSnapshot.backlogSha256}</code></p>
+                    <p>Configuration SHA-256: <code>{reviewSnapshot.configurationSha256}</code></p>
+                  </details>
+                  {reviewMatchesSelection ? null : (
+                    <Flash variant="warning">
+                      The selected file <code>{selectedBacklogPath}</code> differs from
+                      the configured backlog shown above. Saving and planning are blocked.
+                      Reconcile the file selection and configuration in the checkout,
+                      then reload the review files; no configuration is edited automatically.
+                    </Flash>
+                  )}
+                  {reviewSnapshot.valid ? null : (
+                    <Flash variant="warning">
+                      The current backlog is invalid. Correct the review file in
+                      the checkout, then reload these files before saving.
+                      <ul>{reviewSnapshot.validationErrors.map((entry, index) => <li key={`${index}:${entry}`}>{entry}</li>)}</ul>
+                    </Flash>
+                  )}
+                </>
+              )}
+            </section>
             <label className="review-confirmation">
               <Checkbox
-                checked={reviewConfirmed}
+                checked={reviewAcknowledged}
+                disabled={busy || configurationRecovery !== null || recordedCommitSha !== null || reviewSnapshot?.valid !== true || !reviewMatchesSelection}
                 onChange={(event) => {
-                  setReviewConfirmed(event.target.checked);
+                  setReviewAcknowledged(event.target.checked);
                 }}
               />
-              <span>I reviewed and committed this backlog.</span>
+              <span>
+                I reviewed these exact backlog and setup contents, including
+                the outcome, ownership, dependencies, and quality checks.
+              </span>
             </label>
+            {recordedCommitSha === null ? (
+              <div className="review-commit-action">
+                <div>
+                  <strong>Record the reviewed backlog</strong>
+                  <p>
+                    AgentFlow may commit <code>.agentflow.yaml</code> and{" "}
+                    <code>{reviewSnapshot?.backlogPath ?? generation?.backlogPath ?? "the configured backlog"}</code> locally. Unrelated or
+                    partially staged changes must be resolved separately. No
+                    remote push or coding work starts.
+                  </p>
+                </div>
+                <Button
+                  variant="primary"
+                  disabled={
+                    !reviewAcknowledged ||
+                    reviewSnapshot?.valid !== true || !reviewMatchesSelection ||
+                    busy || reviewBlocked || configurationRecovery !== null
+                  }
+                  onClick={() => {
+                    void commitReviewedBacklog();
+                  }}
+                >
+                  {committingReview ? "Recording backlog..." : "Commit reviewed backlog"}
+                </Button>
+              </div>
+            ) : (
+              <div className="review-commit-proof" role="status">
+                {reviewBlocked ? <WarningCircleIcon size={22} aria-hidden="true" /> : <CheckCircleIcon size={22} aria-hidden="true" />}
+                <div>
+                  <strong>
+                    {reviewBlocked ? "A local commit exists; checkout review is required" : "Reviewed backlog recorded locally"}
+                  </strong>
+                  <p>
+                    {reviewBlocked
+                      ? "Do not retry the commit. Review the recorded commit and any later checkout changes before checking an immutable plan."
+                      : "The backlog is recorded. Check the immutable plan, review its tasks, then explicitly approve and start."}
+                  </p>
+                  {reviewCommit === null ? null : <p>{reviewCommit.nextAction}</p>}
+                  <details>
+                    <summary>Review local commit evidence</summary>
+                    <code>{recordedCommitSha}</code>
+                    {reviewCommit === null ? null : (
+                      <>
+                        <p>{reviewCommit.commitMessage}</p>
+                        <ul>{reviewCommit.committedPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
+                      </>
+                    )}
+                  </details>
+                </div>
+              </div>
+            )}
+            {reviewBlocked ? (
+              <div className="review-recovery">
+                <label className="review-confirmation">
+                  <Checkbox checked={recoveryAcknowledged} disabled={busy} onChange={(event) => setRecoveryAcknowledged(event.target.checked)} />
+                  <span>I reviewed the recorded commit and resolved later checkout changes.</span>
+                </label>
+                <Button disabled={busy || !recoveryAcknowledged} onClick={() => void recheckReviewedCheckout()}>
+                  {recheckingReview ? "Rechecking readiness..." : "Recheck reviewed checkout"}
+                </Button>
+                <p>This read-only check does not commit, plan, or start work.</p>
+              </div>
+            ) : null}
           </div>
         )}
       </section>
       {error === null ? null : (
         <Flash variant="danger" className="spaced-flash" role="alert">
-          <strong>Plan not confirmed</strong>
+          <strong>{recordedCommitSha === null ? "Action needs attention" : "Local commit recorded; review next steps"}</strong>
           <br />
           {error}
+          <p>
+            {recordedCommitSha !== null
+              ? "A commit is already recorded. Review its evidence and the checkout; do not repeat the commit action blindly."
+              : "Review the details, resolve invalid content or unrelated checkout changes, then reload and review the exact files before retrying. No plan has been approved by this error."}
+          </p>
           {errorDetails === null ? null : (
-            <pre className="flash-details">
-              {JSON.stringify(errorDetails, null, 2)}
-            </pre>
+            <details>
+              <summary>Review action details</summary>
+              <pre className="flash-details">{JSON.stringify(errorDetails, null, 2)}</pre>
+            </details>
           )}
+        </Flash>
+      )}
+      {recordedBuildId === null ? null : (
+        <Flash variant="warning" className="spaced-flash" role="status">
+          A build is recorded. Review its native state before taking another
+          start action.
+          <Button onClick={() => onBuildStarted(recordedBuildId)}>Review recorded build</Button>
+          <details><summary>View build identity</summary><code>{recordedBuildId}</code></details>
         </Flash>
       )}
       {plan === null ? (
@@ -535,7 +907,7 @@ export function PlannerScreen({
           <header className="section-heading">
             <div>
               <h2 id="plan-result-title">Your proposed plan</h2>
-              <span className="mono">{plan.id}</span>
+              <details><summary>View immutable plan identity</summary><code>{plan.id}</code></details>
             </div>
             <StatusBadge status="validated" />
           </header>
@@ -554,8 +926,8 @@ export function PlannerScreen({
                     : `Complete ${plan.tasks.length} reviewed improvements`}
                 </h3>
                 <p>
-                  AgentFlow will complete {plan.tasks.length} planned steps in{" "}
-                  {plan.waves.length} stages. The expected duration is{" "}
+                  This plan contains {plan.tasks.length} steps in{" "}
+                  {plan.waves.length} stages. Its estimated duration is{" "}
                   {formatPlanTime(plan.estimates.expectedElapsedHours)}.
                 </p>
               </div>
@@ -577,6 +949,7 @@ export function PlannerScreen({
             <label className="plan-approval-confirmation">
               <Checkbox
                 checked={planApproved}
+                disabled={busy || reviewBlocked || configurationRecovery !== null || !planMatchesCurrentInputs || recordedBuildId !== null}
                 onChange={(event) => {
                   setPlanApproved(event.target.checked);
                 }}
@@ -806,4 +1179,18 @@ function summarizeRisk(plan: PlanSummary): string {
   return highestRisk >= 7
     ? "Higher-risk changes are isolated and validated"
     : "Standard guarded work with validation before integration";
+}
+
+function readErrorDetails(cause: unknown): unknown {
+  return typeof cause === "object" && cause !== null && "details" in cause
+    ? (cause as { details?: unknown }).details ?? null
+    : null;
+}
+
+function readRecordedCommitSha(details: unknown): string | null {
+  if (typeof details !== "object" || details === null || !("commitSha" in details)) {
+    return null;
+  }
+  const value = (details as { commitSha?: unknown }).commitSha;
+  return typeof value === "string" && value.length > 0 ? value : null;
 }

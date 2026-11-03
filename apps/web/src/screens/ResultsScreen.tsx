@@ -31,7 +31,7 @@ export function ResultsScreen(): React.JSX.Element {
     <>
       <PageTitle
         title="Completed work"
-        description="Review what changed, how it was checked, and what still needs attention."
+        description="Review local integration and quality evidence. Publication, deployment, and external operation remain separate outcomes."
       />
       {builds.error !== undefined ? (
         <Flash variant="danger">

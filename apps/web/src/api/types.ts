@@ -100,6 +100,74 @@ export interface RepositorySummary {
   updatedAt: string;
 }
 
+export interface RepositoryPreflight {
+  localPath: string;
+  configPath: string;
+  status: "ready" | "invalid" | "unavailable";
+  checks: {
+    pathExists: boolean;
+    directory: boolean;
+    accessible: boolean;
+    gitRepository: boolean;
+    configPresent: boolean;
+    configValid: boolean;
+    baseBranchExists: boolean;
+  };
+  issues: Array<{
+    code: string;
+    message: string;
+    details?: unknown;
+  }>;
+  detectedStack: RepositorySummary["detectedStack"];
+  canConnect: boolean;
+  requiresInitialization: boolean;
+  proposedChanges: string[];
+  nextAction: string;
+}
+
+export interface ConfigurationReviewSnapshot {
+  repositoryId: string;
+  configurationPath: string;
+  configurationContents: string;
+  configurationSha256: string;
+  valid: true;
+  nextAction: string;
+}
+
+export interface ReviewedConfigurationCommitResult {
+  repositoryId: string;
+  configurationPath: string;
+  commitSha: string;
+  commitMessage: string;
+  committedPaths: string[];
+  requiresWorktreeReview: boolean;
+  nextAction: string;
+}
+
+export interface ReviewedBacklogSnapshot {
+  repositoryId: string;
+  backlogPath: string;
+  absoluteBacklogPath: string;
+  configurationPath: ".agentflow.yaml";
+  backlogContents: string;
+  configurationContents: string;
+  backlogSha256: string;
+  configurationSha256: string;
+  valid: boolean;
+  validationErrors: string[];
+  nextAction: string;
+}
+
+export interface ReviewedBacklogCommitResult {
+  repositoryId: string;
+  commitSha: string;
+  commitMessage: string;
+  committedPaths: string[];
+  backlogPath: string;
+  requiresWorktreeReview: boolean;
+  nextAction: string;
+}
+
 export interface RepositoryTarget {
   repositoryId: string;
   name: string;
@@ -505,4 +573,76 @@ export interface GovernanceOverview {
     visual: { maximum_difference_ratio: number };
   };
   templates: GovernanceTemplate[];
+}
+
+// Advisory tab-local continuation only. Native repository and approval records remain authoritative.
+// Persist identities, never source contents, credentials or an authorization decision.
+export interface PendingConfigurationReview {
+  repositoryId: string;
+  commitSha: string;
+  configurationSha256: string;
+}
+
+const pendingConfigurationReviews = new Map<string, PendingConfigurationReview>();
+const clearedConfigurationReviews = new Set<string>();
+const configurationReviewEvent = "agentflow:configuration-review-required";
+const configurationReviewStoragePrefix = "agentflow.configuration-review-required.v1:";
+
+export function pendingConfigurationReview(repositoryId: string): PendingConfigurationReview | null {
+  if (clearedConfigurationReviews.has(repositoryId)) {
+    return null;
+  }
+  const remembered = pendingConfigurationReviews.get(repositoryId);
+  if (remembered !== undefined) {
+    return remembered;
+  }
+  try {
+    const raw = globalThis.sessionStorage.getItem(configurationReviewStoragePrefix + repositoryId);
+    if (raw === null) {
+      return null;
+    }
+    const value: unknown = JSON.parse(raw);
+    if (typeof value === "object" && value !== null &&
+      "repositoryId" in value && value.repositoryId === repositoryId &&
+      "commitSha" in value && typeof value.commitSha === "string" && /^[a-f0-9]{40,64}$/iu.test(value.commitSha) &&
+      "configurationSha256" in value && typeof value.configurationSha256 === "string" && /^[a-f0-9]{64}$/iu.test(value.configurationSha256)) {
+      const review = { repositoryId, commitSha: value.commitSha, configurationSha256: value.configurationSha256 };
+      pendingConfigurationReviews.set(repositoryId, review);
+      return review;
+    }
+  } catch {
+    // Storage can be unavailable or malformed. Never attach unverified stored context to a repository.
+  }
+  return null;
+}
+
+export function retainConfigurationReview(review: PendingConfigurationReview): void {
+  clearedConfigurationReviews.delete(review.repositoryId);
+  pendingConfigurationReviews.set(review.repositoryId, review);
+  try {
+    globalThis.sessionStorage.setItem(configurationReviewStoragePrefix + review.repositoryId, JSON.stringify(review));
+  } catch {
+    // Keep the in-memory continuation gate when browser storage is unavailable.
+  }
+  if (typeof globalThis.dispatchEvent === "function") {
+    globalThis.dispatchEvent(new Event(configurationReviewEvent));
+  }
+}
+
+export function clearConfigurationReview(repositoryId: string): void {
+  clearedConfigurationReviews.add(repositoryId);
+  pendingConfigurationReviews.delete(repositoryId);
+  try {
+    globalThis.sessionStorage.removeItem(configurationReviewStoragePrefix + repositoryId);
+  } catch {
+    // In-memory recovery still completes; this store never authorizes a native action.
+  }
+  if (typeof globalThis.dispatchEvent === "function") {
+    globalThis.dispatchEvent(new Event(configurationReviewEvent));
+  }
+}
+
+export function subscribeConfigurationReviews(onChange: () => void): () => void {
+  globalThis.addEventListener(configurationReviewEvent, onChange);
+  return () => globalThis.removeEventListener(configurationReviewEvent, onChange);
 }

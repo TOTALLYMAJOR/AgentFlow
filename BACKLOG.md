@@ -655,3 +655,62 @@ Read-only review returns the actual configuration/backlog bytes and SHA-256 dige
   commit, invalid backlog refusal, and unrelated-change refusal.
 - The endpoint contract never claims publication, deployment, or external
   provider success.
+
+## AF-UI-001 - Deliver the modern guided interface
+
+```yaml
+estimate_hours: 8
+depends_on:
+  - AF-CONSUMER-001
+owns:
+  - apps/web/index.html
+  - apps/web/src/api/types.ts
+  - apps/web/src/components/AppNavigation.tsx
+  - apps/web/src/components/ResultBuildCard.tsx
+  - apps/web/src/screens/BuildScreen.tsx
+  - apps/web/src/screens/PlannerScreen.tsx
+  - apps/web/src/screens/ResultsScreen.tsx
+  - apps/web/src/screens/StartScreen.tsx
+  - apps/web/src/styles.css
+validate:
+  - npm run typecheck
+  - npm run build:web
+produces:
+  - name: modern-consumer-interface
+    type: product-capability
+    version: 1.0.0
+consumes:
+  - task: AF-CONSUMER-001
+    artifact: guided-consumer-api
+    version: 1.0.0
+```
+
+Apply the installed `design-taste-frontend` guidance as a redesign-preserve
+pass. Keep Primer and Phosphor as the single product design system. Use a calm,
+confident devtool language with `DESIGN_VARIANCE 5`, `MOTION_INTENSITY 4`, and
+`VISUAL_DENSITY 5`.
+
+Turn the connection experience into a clear preflight and explicit setup
+decision. Turn reviewed backlog approval into a complete in-product action.
+Modernize navigation, typography, spacing, surface hierarchy, progress, and
+completed-work reporting without hiding operational truth.
+
+### Acceptance Criteria
+
+- Project connection first shows a read-only readiness result.
+- If setup is missing, the UI names `.agentflow.yaml` and requires explicit
+  consent before creating it.
+- The planner explains that backlog generation changes a review file but does
+  not start coding work.
+- A reviewed valid backlog can be committed from the UI without a terminal.
+- Unrelated-change and invalid-backlog failures show a safe next action.
+- Advanced IDs and logs remain available through progressive disclosure.
+- Loading, empty, error, blocked, and success states remain complete.
+- The interface uses one accent, one radius system, readable CTA contrast,
+  visible keyboard focus, and no wrapped desktop CTA labels.
+- Motion communicates hierarchy or action feedback, honors reduced motion, and
+  does not use scroll listeners.
+- The dashboard has no visible em dash or en dash characters.
+- Layouts have no horizontal overflow at 1440px, 1024px, 768px, and 390px.
+- Result copy distinguishes integration, quality checks, publication,
+  deployment, and external operation.

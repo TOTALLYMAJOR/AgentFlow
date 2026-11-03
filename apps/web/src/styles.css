@@ -4,6 +4,7 @@
     -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --af-accent: #0969da;
   --af-accent-strong: #0550ae;
+  --af-on-accent: #ffffff;
   --af-bg: #f6f8fa;
   --af-canvas: #ffffff;
   --af-subtle: #f6f8fa;
@@ -19,6 +20,7 @@
   :root {
     --af-accent: #4493f8;
     --af-accent-strong: #58a6ff;
+    --af-on-accent: #0d1117;
     --af-bg: #0d1117;
     --af-canvas: #151b23;
     --af-subtle: #212830;
@@ -904,7 +906,7 @@ td:first-child {
 .impact-analysis select {
   background: var(--bgColor-default);
   border: 1px solid var(--borderColor-default);
-  border-radius: 6px;
+  border-radius: var(--af-radius);
   color: var(--fgColor-default);
   min-height: 32px;
   padding-inline: var(--base-size-8);
@@ -973,7 +975,7 @@ td:first-child {
 .visual-proof select {
   background: var(--bgColor-default);
   border: 1px solid var(--borderColor-default);
-  border-radius: 6px;
+  border-radius: var(--af-radius);
   color: var(--fgColor-default);
   min-height: 32px;
   padding-inline: var(--base-size-8);
@@ -1459,7 +1461,7 @@ td:first-child {
 .command-list li {
   padding: 8px 10px;
   border: 1px solid var(--af-border);
-  border-radius: 6px;
+  border-radius: var(--af-radius);
   background: var(--af-subtle);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 12px;
@@ -1474,7 +1476,7 @@ td:first-child {
   padding: 14px;
   overflow: auto;
   border: 1px solid var(--af-border);
-  border-radius: 6px;
+  border-radius: var(--af-radius);
   background: var(--af-sidebar);
   color: #f0f6fc;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
@@ -1497,7 +1499,7 @@ td:first-child {
 .inspector-event-list > li {
   padding: 13px;
   border: 1px solid var(--af-border);
-  border-radius: 6px;
+  border-radius: var(--af-radius);
 }
 
 .attempt-list header,
@@ -1539,7 +1541,7 @@ td:first-child {
   min-width: 0;
   padding: 13px;
   border: 1px solid var(--af-border);
-  border-radius: 6px;
+  border-radius: var(--af-radius);
 }
 
 .attempt-document > header {
@@ -1708,7 +1710,7 @@ td:first-child {
   gap: 4px;
   padding: 10px 12px;
   border: 1px solid var(--af-border);
-  border-radius: 6px;
+  border-radius: var(--af-radius);
 }
 
 .build-detail-grid,
@@ -2074,7 +2076,7 @@ td:first-child {
   gap: 12px;
   padding: 13px 12px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--af-radius);
   background: transparent;
   color: var(--af-text);
   cursor: pointer;
@@ -2838,4 +2840,357 @@ td:first-child {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
   }
+}
+
+/* Guided setup and reviewed-backlog actions retain the established product tokens. */
+.main-content,
+.goal-composer__form,
+.goal-composer__layout > *,
+.connection-wizard > *,
+.project-readiness,
+.review-commit-action > div,
+.review-commit-proof > div {
+  min-width: 0;
+}
+
+[data-component="Button"] {
+  white-space: nowrap;
+}
+
+[data-component="Button"][data-variant="primary"] {
+  border-color: var(--af-accent);
+  background: var(--af-accent);
+  color: var(--af-on-accent);
+}
+
+[data-component="Button"][data-variant="primary"]:hover:not(:disabled) {
+  border-color: var(--af-accent-strong);
+  background: var(--af-accent-strong);
+  color: var(--af-on-accent);
+}
+
+[data-component="Button"][data-variant="primary"]:disabled {
+  border-color: var(--af-border);
+  background: var(--af-subtle);
+  color: var(--af-muted);
+}
+
+.connection-wizard__heading > span {
+  color: var(--af-on-accent);
+}
+
+.project-readiness {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 18px;
+  padding: 20px;
+  border: 1px solid var(--af-border);
+  border-left: 3px solid var(--af-accent);
+  border-radius: var(--af-radius);
+  background: var(--af-canvas);
+}
+
+.project-readiness__lead,
+.review-commit-proof {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.project-readiness__lead > svg,
+.review-commit-proof > svg {
+  flex: 0 0 auto;
+  color: var(--af-accent);
+}
+
+.project-readiness__lead > div,
+.review-commit-action > div,
+.review-commit-proof > div,
+.review-recovery {
+  display: grid;
+  gap: 6px;
+}
+
+.project-readiness p,
+.review-commit-action p,
+.review-commit-proof p,
+.review-recovery p {
+  margin: 0;
+  color: var(--af-muted);
+  line-height: 1.5;
+}
+
+.project-readiness__checks {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.project-readiness__checks div {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border-radius: var(--af-radius);
+  background: var(--af-subtle);
+}
+
+.project-readiness__checks dt {
+  color: var(--af-muted);
+  font-size: 12px;
+}
+
+.project-readiness__checks dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.project-readiness__checks .is-ready {
+  color: var(--af-accent-strong);
+}
+
+.project-readiness details,
+.review-commit-proof details {
+  padding-top: 8px;
+}
+
+.project-readiness summary,
+.review-commit-proof summary,
+.planner-form ~ section summary {
+  cursor: pointer;
+}
+
+.project-readiness ul {
+  display: grid;
+  gap: 8px;
+  padding-left: 20px;
+}
+
+.project-readiness li > strong,
+.project-readiness li > span {
+  display: block;
+}
+
+.project-readiness li > span {
+  color: var(--af-muted);
+}
+
+.setup-consent,
+.review-commit-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px 20px;
+  padding: 18px;
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius);
+  background: var(--af-subtle);
+}
+
+.setup-consent > button {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.setup-consent > details {
+  grid-column: 1 / -1;
+}
+
+.review-commit-proof,
+.review-recovery {
+  padding: 18px;
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius);
+  background: var(--af-subtle);
+}
+
+.review-recovery {
+  justify-items: start;
+  gap: 14px;
+}
+
+.review-confirmation {
+  align-items: flex-start;
+  line-height: 1.5;
+}
+
+.mode-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.project-readiness,
+.backlog-review,
+.review-commit-proof,
+.result-card,
+.build-state-strip {
+  overflow-wrap: anywhere;
+}
+
+.backlog-review pre,
+.flash-details {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.build-state-strip details {
+  min-width: 0;
+}
+
+.build-state-strip details code {
+  display: block;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .project-readiness,
+  .review-commit-proof {
+    animation: start-screen-enter 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+}
+
+@media (max-width: 980px) {
+  .setup-consent,
+  .review-commit-action {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: start;
+  }
+
+  .setup-consent > button {
+    grid-column: auto;
+    grid-row: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .project-readiness__checks {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .setup-consent,
+  .review-commit-action {
+    justify-items: stretch;
+  }
+
+  .review-recovery > button {
+    width: 100%;
+  }
+}
+
+.backlog-file-review {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.backlog-file-review > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.backlog-file-review h3,
+.backlog-file-review p {
+  margin: 0;
+}
+
+.backlog-file-review__contents {
+  max-height: 32rem;
+  max-width: 100%;
+  padding: 16px;
+  overflow: auto;
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius);
+  background: var(--af-subtle);
+  color: var(--af-text);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.setup-review {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+  padding: 24px;
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius);
+  background: var(--af-canvas);
+  overflow-wrap: anywhere;
+}
+
+.setup-review > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.setup-review h2,
+.setup-review p {
+  margin: 0;
+}
+
+.setup-review > button {
+  justify-self: start;
+}
+
+@media (max-width: 640px) {
+  .setup-review {
+    padding: 18px;
+  }
+
+  .setup-review > button {
+    width: 100%;
+  }
+}
+
+/* Keep Primer controls and product surfaces on the same selected color scheme. */
+.app-shell {
+  --fgColor-default: var(--af-text);
+  --fgColor-muted: var(--af-muted);
+  --fgColor-accent: var(--af-accent-strong);
+  --fgColor-onEmphasis: var(--af-on-accent);
+  --bgColor-default: var(--af-canvas);
+  --bgColor-muted: var(--af-subtle);
+  --bgColor-inset: var(--af-bg);
+  --borderColor-default: var(--af-border);
+  --borderColor-muted: var(--af-border);
+  color: var(--af-text);
+}
+
+.main-content {
+  color: var(--af-text);
+}
+
+.main-content input,
+.main-content textarea,
+.main-content select {
+  border-color: var(--af-border);
+  background-color: var(--af-canvas);
+  color: var(--af-text);
+}
+
+.main-content label {
+  color: var(--af-text);
+}
+
+.decomposition-summary {
+  gap: 16px;
+  padding-block: 12px;
+  border-color: var(--af-border);
+}
+
+.decomposition-summary span {
+  color: var(--af-muted);
+}
+
+.decomposition-summary strong {
+  color: var(--af-text);
+}
+
+.goal-composer__form code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
