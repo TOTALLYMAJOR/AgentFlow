@@ -189,6 +189,12 @@ for the runner protocol.
 
 ## Quality and release
 
+Use a current Node 22 release, at least 22.20.0, for source development and full
+release qualification. This covers the locked development, build and test
+toolchain, including its optional native packaging dependency. CI selects
+Node 22. The packaged CLI installation minimum above applies to
+its runtime dependencies; it is not the source toolchain minimum.
+
 ```bash
 npm run lint
 npm run typecheck
