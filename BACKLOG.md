@@ -105,6 +105,8 @@ estimate_hours: 8
 depends_on:
   - AFI-001
 owns:
+  - apps/server/test/design-intelligence-integration.test.ts
+  - apps/server/test/helpers/governed-handoff.ts
   - apps/server/src/recovery/service.ts
   - apps/server/test/coordinator-governed-recovery.test.ts
   - apps/server/test/recovery.test.ts
@@ -131,6 +133,7 @@ owns:
   - apps/server/test/integration-runtime.test.ts
   - apps/server/test/worker-runtime.test.ts
 validate:
+  - npm test -- apps/server/test/design-intelligence-integration.test.ts
   - npm test -- --run apps/server/test/coordinator-governed-recovery.test.ts apps/server/test/recovery.test.ts apps/server/test/traffic-control-observation.test.ts apps/server/test/governor-build-control.test.ts
   - npm test -- --run apps/server/test/database.test.ts apps/server/test/delivery-size.test.ts apps/server/test/integration-runtime.test.ts apps/server/test/worker-runtime.test.ts apps/server/test/governor-control-service.test.ts apps/server/test/traffic-control-observation.test.ts
   - npm test -- --run apps/server/test/traffic-control-integration.test.ts apps/server/test/orchestration.test.ts
@@ -151,6 +154,9 @@ produces:
 ```
 
 Converge the existing Wave 0 TCP-002 observations as immutable projections from AgentFlow plans, tasks, attempts, validations, events, artifacts, leases, retries, and integration records. Converge TCP-003 decisions and bounded interventions only through existing coordinator transitions. Preserve decision provenance and explicit intervention acknowledgement; replay must be idempotent and mutation-free. Reconsideration and replanning remain proposals requiring normal AgentFlow authority.
+
+
+Local chronology qualification projects failure-relative evidence only from supported native failed-state event frames and sequence. Missing or conflicting strict frames refuse rather than invent historical evidence. Legacy fallback and unsupported historical certificate snapshots remain explicit limitations. Normal integration failures after native certificate publication remain outside this proof; complete historical certificate context is not asserted. The existing malformed-capability regression now invokes the actual coordinator failure producer with inert ports; original semantic refusal, repair-decision and no-integration assertions remain unchanged. This source preparation does not declare AFI-002 or TCP-002 accepted.
 
 ### Acceptance Criteria
 

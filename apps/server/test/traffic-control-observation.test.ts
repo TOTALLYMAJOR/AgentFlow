@@ -132,6 +132,36 @@ describe("AgentFlow Traffic Control observation adapter", () => {
     expect(evaluateGovernor(input.contract, observation).action).toBe("REQUEST_REPAIR");
   });
 
+  it.each(["omitted", "undefined", "null"] as const)("reports zero failure-relative progress before any failure when currentFailure is %s", (currentFailure) => {
+    const input: AgentFlowObservationInput = {
+      ...failureInput(), failures: [],
+      evidence: { items: ["inert-validation"], satisfied: ["inert-check"], contradictory: [] },
+    };
+    if (currentFailure === "null") input.currentFailure = null;
+    if (currentFailure === "undefined") input.currentFailure = undefined;
+    const observation = projectAgentFlowObservation(input);
+    expect(observation.evidence).toEqual(input.evidence);
+    expect(observation.failure).toBeNull();
+    expect(observation.failureHistory).toEqual([]);
+    expect(observation.evidenceDelta).toEqual({
+      newItems: [], newlySatisfied: [], newContradictions: [], score: 0, direction: "ZERO",
+    });
+    expect(evaluateGovernor(input.contract, observation).action).toBe("CONTINUE");
+  });
+
+  it("measures active-failure progress against supplied prior failure evidence", () => {
+    const input: AgentFlowObservationInput = {
+      ...failureInput(),
+      previousEvidence: { items: ["prior-fact"], satisfied: ["focused-tests"], contradictory: [] },
+      evidence: { items: ["prior-fact", "new-cause"], satisfied: ["focused-tests"], contradictory: [] },
+    };
+    const observation = projectAgentFlowObservation(input);
+    expect(observation.failureRepeatCount).toBe(2);
+    expect(observation.evidenceDelta).toEqual({
+      newItems: ["new-cause"], newlySatisfied: [], newContradictions: [], score: 1, direction: "POSITIVE",
+    });
+  });
+
   it("explicit null means no active failure while preserving full normalized history", () => {
     const observation = projectAgentFlowObservation({ ...failureInput(), currentFailure: null });
     expect(observation.failure).toBeNull();

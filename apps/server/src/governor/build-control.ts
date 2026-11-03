@@ -5,7 +5,8 @@ import path from "node:path";
 import { z } from "zod";
 import type { AgentFlowContext } from "../http/context.js";
 import { canonicalJsonSha256, loadGovernedTaskHandoff, backlogHandoffErrors, usesNativeValidationEvidence, nativeValidationEvidenceProfileErrors, NATIVE_VALIDATION_EVIDENCE_TYPE, NATIVE_VALIDATION_EVIDENCE_VERSION, type GovernedTaskHandoff } from "../integration/design-intelligence.js";
-import { bindTrafficControlContract, projectAgentFlowObservation, type TrafficControlFailure } from "../integration/traffic-control.js";
+import { bindTrafficControlContract, fingerprintFailure, projectAgentFlowObservation, type TrafficControlFailure } from "../integration/traffic-control.js";
+import type { BuildEventEntity } from "../db/index.js";
 import { nowIso } from "../util/ids.js";
 import { DEFAULT_RETRYABLE_FAILURE_CODES } from "../orchestration/retry-policy.js";
 import { GovernorControlService } from "./control-service.js";
@@ -14,6 +15,9 @@ import { HANDOFF_MANIFEST_SCHEMA_VERSION } from "../artifacts/index.js";
 import { normalizeValidationCommand } from "../validation/index.js";
 
 type GovernorDependencies = Pick<AgentFlowContext, "store" | "repositoryService" | "environment" | "organizationPolicy">;
+type Evidence = { items: string[]; satisfied: string[]; contradictory: string[] };
+interface FailureSource { buildId: string; taskId: string; attemptId: string; attempt: number; failure: TrafficControlFailure; }
+const NATIVE_FAILURE_EVENT_TYPES = new Set(["task.remote_worker_failed", "task.worker_failed", "task.execution_pipeline_failed", "task.validation_failed"]);
 
 export async function evaluateGovernedBuild(dependencies: GovernorDependencies, buildId: string) {
   const build = dependencies.store.builds.getById(buildId);
@@ -45,22 +49,19 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     const currentBuild = dependencies.store.builds.getById(buildId);
     const currentTasks = dependencies.store.tasks.listForBuild(buildId);
     requireNativeEvidence(equalNativeEvidence({ status: build.status, binding: build.normalizedPlan.governedHandoff, tasks }, { status: currentBuild.status, binding: currentBuild.normalizedPlan.governedHandoff, tasks: currentTasks }));
+    // Failed-state/frame capture and attempt-outcome persistence are separate
+    // native writes. A crash between them must not look like no active failure.
+    if (tasks.some((task) => task.state === "failed" && !dependencies.store.tasks.listAttempts(task.id).some((attempt) => attempt.buildId === buildId && attempt.taskId === task.id && attempt.attempt === task.attempt && attempt.status === "failed" && attempt.errorCode !== null))) throw new Error("GOVERNED_FAILURE_HISTORY_UNAVAILABLE: failed task and current native attempt are inconsistent");
   }
   // Certificate verification awaits private bytes. Capture contradictions and
   // chain predecessor only after it, with no further await before evaluation.
   const events = nativeEvidenceEvents(dependencies, buildId);
-  const legacyEvidence = events.filter((event) => event.type === "evidence.recorded").reduce(
-    (current, event) => ({
-      items: [...current.items, ...stringArray(event.payload.items)],
-      satisfied: [...current.satisfied, ...stringArray(event.payload.satisfied)],
-      contradictory: [...current.contradictory, ...stringArray(event.payload.contradictory)],
-    }),
-    { items: [] as string[], satisfied: [] as string[], contradictory: [] as string[] },
-  );
+  const legacyEvidence = evidenceBefore(events, Infinity);
   const evidence = usesNativeValidationEvidence(handoff)
     ? { items: certificates.map((item) => item.id), satisfied: certificates.map((item) => item.body.artifact.name), contradictory: legacyEvidence.contradictory }
     : legacyEvidence;
   let currentFailure: TrafficControlFailure | null = null;
+  const failureSources: FailureSource[] = [];
   const failures: TrafficControlFailure[] = tasks.flatMap((task) =>
     dependencies.store.tasks.listAttempts(task.id)
       .filter((attempt) => attempt.errorCode !== null)
@@ -75,10 +76,12 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
           files: dependencies.store.tasks.listChangedFiles(task.id, attempt.attempt).map((file) => file.path),
           fingerprint: "",
         };
+        failureSources.push({ buildId: attempt.buildId, taskId: task.id, attemptId: attempt.id, attempt: attempt.attempt, failure });
         if (task.state === "failed" && attempt.attempt === task.attempt && attempt.status === "failed") currentFailure = failure;
         return failure;
       }),
   );
+  const previousEvidence = failureEvidenceBaseline(events, buildId, failureSources, currentFailure, usesNativeValidationEvidence(handoff));
   const changedOwners = new Map<string, Set<string>>();
   for (const change of changes) for (const changedPath of change.paths) {
     const owners = changedOwners.get(changedPath) ?? new Set<string>();
@@ -110,6 +113,7 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     evidence,
     failures,
     currentFailure,
+    ...(previousEvidence === undefined ? {} : { previousEvidence }),
   });
   const prior = events.filter((event) => event.type === "governor.decision").at(-1)?.payload.recordHash;
   return new GovernorControlService(dependencies.store.events).evaluate({
@@ -118,6 +122,48 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     recordedAt: nowIso(),
     previousRecordHash: typeof prior === "string" ? prior : null,
   });
+}
+
+function evidenceBefore(events: BuildEventEntity[], sequence: number): Evidence {
+  return events.filter((event) => event.sequence < sequence && event.type === "evidence.recorded").reduce(
+    (current, event) => ({ items: [...current.items, ...stringArray(event.payload.items)], satisfied: [...current.satisfied, ...stringArray(event.payload.satisfied)], contradictory: [...current.contradictory, ...stringArray(event.payload.contradictory)] }),
+    { items: [] as string[], satisfied: [] as string[], contradictory: [] as string[] },
+  );
+}
+
+function failureEvidenceBaseline(events: BuildEventEntity[], buildId: string, sources: FailureSource[], current: TrafficControlFailure | null, strictNative: boolean): Evidence | undefined {
+  if (current === null) return undefined;
+  const unavailable = (): undefined => {
+    if (strictNative) throw new Error("GOVERNED_FAILURE_HISTORY_UNAVAILABLE: native failure-relative evidence is not sourced");
+    // Preserve supported legacy execution behavior. This fallback is not
+    // qualified native/history parity and must not be reported as such.
+    return undefined;
+  };
+  const frames: Array<{ sequence: number; fingerprint: string; source: FailureSource }> = [];
+  for (const source of sources) {
+    const matching = events.filter((event) => {
+      const frame = event.payload.governorFailure;
+      return typeof frame === "object" && frame !== null && "attemptId" in frame && frame.attemptId === source.attemptId;
+    });
+    if (matching.length === 0) return unavailable();
+    const event = matching[0];
+    if (matching.length !== 1 || event === undefined) throw new Error("GOVERNED_FAILURE_HISTORY_UNAVAILABLE: conflicting native failure boundary");
+    const frame = event.payload.governorFailure as Record<string, unknown>;
+    const fingerprint = fingerprintFailure(source.failure);
+    if (!NATIVE_FAILURE_EVENT_TYPES.has(event.type) || source.buildId !== buildId || event.buildId !== buildId || event.taskId !== source.taskId || event.payload.to !== "failed" || frame.attempt !== source.attempt || frame.fingerprint !== fingerprint) throw new Error("GOVERNED_FAILURE_HISTORY_UNAVAILABLE: native failure boundary does not match its supported producer and attempt");
+    frames.push({ sequence: event.sequence, fingerprint, source });
+  }
+  frames.sort((left, right) => left.sequence - right.sequence);
+  const active = frames.find((frame) => frame.source.failure === current);
+  if (active === undefined) return unavailable();
+  const prior = frames.filter((frame) => frame.sequence < active.sequence && frame.fingerprint === active.fingerprint).at(-1) ?? active;
+  const baseline = evidenceBefore(events, prior.sequence);
+  if (!strictNative) return baseline;
+  // Historical certificate event IDs alone cannot be promoted into a verified
+  // past snapshot. Keep that unsupported case protective, never union stale
+  // certificates into current satisfaction or guess their past validity.
+  if (events.some((event) => event.sequence < prior.sequence && event.type === CERTIFICATE_EVENT)) throw new Error("GOVERNED_FAILURE_HISTORY_UNAVAILABLE: historical native certificate snapshot is not qualified");
+  return { items: [], satisfied: [], contradictory: baseline.contradictory };
 }
 
 async function safeExistingPath(root: string, relative: string): Promise<string> {

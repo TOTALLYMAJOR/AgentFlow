@@ -108,13 +108,15 @@ export function projectAgentFlowObservation(input: AgentFlowObservationInput): T
   const unexpectedImpactedPaths = sortedUnique(input.impactedPaths.filter((impactedPath) => !pathAllowed(impactedPath, plannedPaths)));
   const collisions = sortedUnique(input.activeTaskCollisions);
   const evidence = normalizeEvidence(input.evidence);
-  const delta = evidenceDelta(normalizeEvidence(input.previousEvidence ?? { items: [], satisfied: [], contradictory: [] }), evidence);
   const failureHistory = input.failures.map((failure) => ({ ...failure, fingerprint: failure.fingerprint || fingerprintFailure(failure) }));
   const failure = input.currentFailure === undefined
     ? failureHistory.at(-1) ?? null
     : input.currentFailure === null
       ? null
       : { ...input.currentFailure, fingerprint: input.currentFailure.fingerprint || fingerprintFailure(input.currentFailure) };
+  const delta = failure === null && failureHistory.length === 0
+    ? evidenceDelta(evidence, evidence)
+    : evidenceDelta(normalizeEvidence(input.previousEvidence ?? { items: [], satisfied: [], contradictory: [] }), evidence);
   const repeatCount = failure === null ? 0 : failureHistory.filter((candidate) => candidate.fingerprint === failure.fingerprint).length;
   return {
     schema: "traffic-control/execution-observation@1",

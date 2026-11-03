@@ -13,7 +13,7 @@ interface GovernedTaskInput {
   owns: string[];
   acceptanceCriteria: string[];
   validate: string[];
-  produces: [];
+  produces: GovernedTaskHandoff["tasks"][number]["produces"];
   consumes: [];
 }
 

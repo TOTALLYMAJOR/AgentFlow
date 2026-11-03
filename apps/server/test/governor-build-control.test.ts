@@ -8,7 +8,9 @@ import { DEFAULT_ORGANIZATION_POLICY } from "../src/governance/organization-poli
 import { HandoffManifestService } from "../src/artifacts/index.js";
 import { evaluateGovernedBuild } from "../src/governor/build-control.js";
 import { GovernorControlService } from "../src/governor/control-service.js";
-import { canonicalJsonSha256, renderBacklog } from "../src/integration/design-intelligence.js";
+import { canonicalJsonSha256, renderBacklog, NATIVE_VALIDATION_EVIDENCE_TYPE, NATIVE_VALIDATION_EVIDENCE_VERSION } from "../src/integration/design-intelligence.js";
+import { fingerprintFailure } from "../src/integration/traffic-control.js";
+import { GitCommandRunner } from "../src/git/index.js";
 import { BuildCoordinator } from "../src/orchestration/coordinator.js";
 import { planBacklogMarkdown } from "../src/planning/planner.js";
 import { createDatabaseFixture, type DatabaseFixture } from "./helpers/database-fixture.js";
@@ -17,9 +19,9 @@ import { approvedGovernedHandoff } from "./helpers/governed-handoff.js";
 describe("current native Governor failure attribution", () => {
   let fixture: DatabaseFixture | undefined;
   let coordinator: BuildCoordinator | undefined;
-  afterEach(async () => { await coordinator?.shutdown(); vi.restoreAllMocks(); fixture?.cleanup(); fixture = undefined; coordinator = undefined; });
+  afterEach(async () => { await coordinator?.shutdown(); vi.restoreAllMocks(); vi.useRealTimers(); fixture?.cleanup(); fixture = undefined; coordinator = undefined; });
 
-  async function setup(withNativePlan = false) {
+  async function setup(withNativePlan = false, strictNativeEvidence = false) {
     fixture = createDatabaseFixture();
     const store = createDatabaseRepositories(fixture.database);
     const root = path.join(fixture.directory, "repository");
@@ -27,7 +29,7 @@ describe("current native Governor failure attribution", () => {
     const handoff = approvedGovernedHandoff({
       handoffId: "recovery-failure-test", baseCommit: "a".repeat(40),
       objective: "Unit-only native failure attribution.", requiredEvidence: ["focused-tests"], claimBoundary: "Unit test only; no execution approval.",
-      tasks: [{ id: "AF-001", title: "Task", description: "Task", estimateHours: 1, dependsOn: [], owns: ["src"], acceptanceCriteria: ["Passes"], validate: ["npm test"], produces: [], consumes: [] }],
+      tasks: [{ id: "AF-001", title: "Task", description: "Task", estimateHours: 1, dependsOn: [], owns: ["src"], acceptanceCriteria: ["Passes"], validate: ["npm test"], produces: strictNativeEvidence ? [{ name: "focused-tests", type: NATIVE_VALIDATION_EVIDENCE_TYPE, version: NATIVE_VALIDATION_EVIDENCE_VERSION }] : [], consumes: [] }],
     });
     const handoffPath = path.join(root, "handoff.json");
     await writeFile(handoffPath, JSON.stringify(handoff));
@@ -58,6 +60,127 @@ describe("current native Governor failure attribution", () => {
     const observed = vi.spyOn(GovernorControlService.prototype, "evaluate");
     return { store, dependencies, observed, handoffPath, handoff };
   }
+
+  it("uses native failure-relative evidence ordering when final task and attempt rows are identical", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-03T20:00:00Z"));
+    const snapshots = [];
+    for (const evidenceBefore of [true, false]) {
+      const { store, dependencies, observed } = await setup();
+      const getProvider = vi.fn(() => { throw new Error("History proof must never dispatch a worker"); });
+      coordinator = new BuildCoordinator({ ...dependencies, handoffService: new HandoffManifestService(store, dependencies.environment.artifactsPath), agentProviders: { get: getProvider } } as unknown as ConstructorParameters<typeof BuildCoordinator>[0]);
+      const native = coordinator as unknown as { failTask(taskId: string, eventType: string, errorCode: string, errorMessage: string): unknown };
+      const evidence = () => store.events.append({ buildId: "build", type: "evidence.recorded", payload: { items: ["cause:inert"] } });
+      if (evidenceBefore) evidence();
+      for (let number = 1; number <= 3; number += 1) {
+        const failure = { code: "VALIDATION_FAILED", classification: "deterministic" as const, retryable: false, signature: "same", files: [] };
+        store.tasks.updateAttempt("task", number, { status: "failed", errorCode: failure.code, errorMessage: failure.signature, completedAt: new Date().toISOString() });
+        // Actual coordinator producer captures explicit native source facts;
+        // no timestamp/path guess or invented evidence snapshot in the fixture.
+        native.failTask("task", "task.validation_failed", failure.code, failure.signature);
+        if (number < 3) {
+          store.tasks.retry("task", { attemptId: `attempt-${number + 1}` });
+          store.tasks.transition("task", "running");
+        }
+      }
+      if (!evidenceBefore) evidence();
+      const result = await evaluateGovernedBuild(dependencies, "build");
+      expect(store.events.listForBuild("build").filter((event) => event.type === "task.validation_failed")).toHaveLength(3);
+      expect(getProvider).not.toHaveBeenCalled();
+      snapshots.push({ task: store.tasks.getById("task"), attempts: store.tasks.listAttempts("task"), observation: observed.mock.calls.at(-1)?.[0].observation, action: result?.decision.action });
+      await coordinator.shutdown(); coordinator = undefined;
+      fixture?.cleanup(); fixture = undefined; vi.restoreAllMocks();
+    }
+    expect(snapshots[0]?.task).toEqual(snapshots[1]?.task);
+    expect(snapshots[0]?.attempts).toEqual(snapshots[1]?.attempts);
+    expect(snapshots[0]?.observation?.evidence).toEqual(snapshots[1]?.observation?.evidence);
+    expect(snapshots[0]?.action).toBe("PROPOSE_REPLAN");
+    expect(snapshots[0]?.observation?.evidenceDelta).toMatchObject({ score: 0, direction: "ZERO" });
+    expect(snapshots[1]?.action).toBe("REQUEST_REPAIR");
+    expect(snapshots[1]?.observation?.evidenceDelta).toMatchObject({ score: 1, direction: "POSITIVE" });
+  });
+
+  it("refuses incomplete strict native failure history instead of fabricating an empty baseline", async () => {
+    const { store, dependencies } = await setup(false, true);
+    store.tasks.transition("task", "failed", { errorCode: "VALIDATION_FAILED", errorMessage: "old failure" });
+    store.tasks.updateAttempt("task", 1, { status: "failed", errorCode: "VALIDATION_FAILED", errorMessage: "old failure" });
+    await expect(evaluateGovernedBuild(dependencies, "build")).rejects.toThrow("GOVERNED_FAILURE_HISTORY_UNAVAILABLE");
+  });
+
+  it("preserves supported legacy failure behavior without upgrading it to sourced history proof", async () => {
+    const { store, dependencies } = await setup();
+    store.tasks.transition("task", "failed", { errorCode: "VALIDATION_FAILED", errorMessage: "old failure" });
+    store.tasks.updateAttempt("task", 1, { status: "failed", errorCode: "VALIDATION_FAILED", errorMessage: "old failure" });
+    expect((await evaluateGovernedBuild(dependencies, "build"))?.decision.action).toBe("REQUEST_REPAIR");
+  });
+
+  it.each(["duplicate-boundary", "rewritten-attempt"])("refuses a claimed native failure source with %s", async (defect) => {
+    const { store, dependencies } = await setup();
+    coordinator = new BuildCoordinator({ ...dependencies, handoffService: new HandoffManifestService(store, dependencies.environment.artifactsPath), agentProviders: { get: () => { throw new Error("No provider permitted"); } } } as unknown as ConstructorParameters<typeof BuildCoordinator>[0]);
+    const native = coordinator as unknown as { failTask(taskId: string, eventType: string, code: string, message: string): unknown };
+    store.tasks.updateAttempt("task", 1, { status: "failed", errorCode: "VALIDATION_FAILED", errorMessage: "same" });
+    native.failTask("task", "task.validation_failed", "VALIDATION_FAILED", "same");
+    const boundary = store.events.listForBuild("build").find((event) => event.type === "task.validation_failed");
+    if (boundary === undefined) throw new Error("Expected actual native failure boundary");
+    if (defect === "duplicate-boundary") store.events.append({ buildId: "build", taskId: "task", type: boundary.type, payload: boundary.payload });
+    else store.tasks.updateAttempt("task", 1, { status: "failed", errorCode: "VALIDATION_FAILED", errorMessage: "rewritten after failure" });
+    await expect(evaluateGovernedBuild(dependencies, "build")).rejects.toThrow("GOVERNED_FAILURE_HISTORY_UNAVAILABLE");
+  });
+
+  it.each(["evidence.recorded", "task.state_changed"])("refuses an unsupported %s event masquerading as a native failure boundary", async (type) => {
+    const { store, dependencies } = await setup();
+    const attempt = store.tasks.getAttempt("task", 1);
+    store.tasks.transition("task", "failed", { errorCode: "VALIDATION_FAILED", errorMessage: "same" });
+    store.tasks.updateAttempt("task", 1, { status: "failed", errorCode: "VALIDATION_FAILED", errorMessage: "same" });
+    store.events.append({
+      buildId: "build", taskId: "task", type,
+      payload: { to: "failed", governorFailure: { attempt: 1, attemptId: attempt.id, fingerprint: fingerprintFailure({ code: "VALIDATION_FAILED", classification: "deterministic", retryable: false, signature: "same", files: [] }) } },
+    });
+    await expect(evaluateGovernedBuild(dependencies, "build")).rejects.toThrow("GOVERNED_FAILURE_HISTORY_UNAVAILABLE");
+  });
+
+  it("refuses the strict pipeline crash window between failed-state capture and attempt outcome persistence", async () => {
+    const { store, dependencies, handoffPath } = await setup(true, true);
+    const getProvider = vi.fn(() => { throw new Error("Crash qualification must not dispatch a provider"); });
+    coordinator = new BuildCoordinator({ ...dependencies, handoffService: new HandoffManifestService(store, dependencies.environment.artifactsPath), agentProviders: { get: getProvider } } as unknown as ConstructorParameters<typeof BuildCoordinator>[0]);
+    const native = coordinator as unknown as {
+      ensureRuntime(...args: unknown[]): Promise<unknown>;
+      buildPromptContext(...args: unknown[]): Promise<unknown>;
+      stopAndRecycleWorker(...args: unknown[]): void;
+      executeTask(buildId: string, taskId: string, workerId: string, signal: AbortSignal): Promise<void>;
+    };
+    // Begin after modeled admission and replace only runtime/worker ports. The
+    // real executeTask catch, failed-state capture and SQLite records remain.
+    vi.spyOn(coordinator, "validateExecutionAuthority").mockResolvedValue();
+    vi.spyOn(native, "ensureRuntime").mockResolvedValue({ integrationPath: () => path.dirname(handoffPath), createTaskWorktree: async () => ({ path: path.dirname(handoffPath), branchName: "inert-task", baseCommit: "a".repeat(40) }) });
+    vi.spyOn(GitCommandRunner.prototype, "run").mockResolvedValue({ stdout: "a".repeat(40) } as Awaited<ReturnType<GitCommandRunner["run"]>>);
+    vi.spyOn(store.workers, "assign").mockReturnValue(undefined as unknown as ReturnType<typeof store.workers.assign>);
+    vi.spyOn(native, "buildPromptContext").mockRejectedValue(new Error("inert pipeline failure"));
+    vi.spyOn(native, "stopAndRecycleWorker").mockImplementation(() => {});
+    vi.spyOn(store.tasks, "updateAttempt").mockImplementationOnce(() => { throw new Error("inert crash before attempt outcome"); });
+    await expect(native.executeTask("build", "task", "inert-worker", new AbortController().signal)).rejects.toThrow("inert crash before attempt outcome");
+    expect(store.tasks.getById("task")).toMatchObject({ state: "failed", errorCode: "EXECUTION_PIPELINE_FAILED" });
+    expect(store.tasks.getAttempt("task", 1)).toMatchObject({ status: "running", errorCode: null });
+    expect(store.events.listForBuild("build").find((event) => event.type === "task.execution_pipeline_failed")?.payload.governorFailure).toMatchObject({ attempt: 1, attemptId: "attempt-1" });
+    await expect(evaluateGovernedBuild(dependencies, "build")).rejects.toThrow("GOVERNED_FAILURE_HISTORY_UNAVAILABLE");
+    expect(getProvider).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("keeps strict native evidence current with historical certificate present=%s", async (historicalCertificate) => {
+    const { store, dependencies, handoff, observed } = await setup(false, true);
+    coordinator = new BuildCoordinator({ ...dependencies, handoffService: new HandoffManifestService(store, dependencies.environment.artifactsPath), agentProviders: { get: () => { throw new Error("No provider permitted"); } } } as unknown as ConstructorParameters<typeof BuildCoordinator>[0]);
+    const native = coordinator as unknown as { failTask(taskId: string, eventType: string, code: string, message: string): unknown };
+    store.events.append({ buildId: "build", type: "evidence.recorded", payload: { items: ["free-label"], satisfied: ["focused-tests"] } });
+    if (historicalCertificate) store.events.append({ buildId: "build", taskId: "task", type: "evidence.native_validation_certified", payload: { handoffSha256: canonicalJsonSha256(handoff), attempt: 1, artifactName: "focused-tests", certificateId: "f".repeat(64) } });
+    store.tasks.updateAttempt("task", 1, { status: "failed", errorCode: "VALIDATION_FAILED", errorMessage: "same" });
+    native.failTask("task", "task.validation_failed", "VALIDATION_FAILED", "same");
+    if (historicalCertificate) await expect(evaluateGovernedBuild(dependencies, "build")).rejects.toThrow("historical native certificate snapshot is not qualified");
+    else {
+      expect((await evaluateGovernedBuild(dependencies, "build"))?.decision.action).toBe("REQUEST_REPAIR");
+      expect(observed.mock.calls.at(-1)?.[0].observation.evidence).toEqual({ items: [], satisfied: [], contradictory: [] });
+      expect(observed.mock.calls.at(-1)?.[0].observation.evidenceDelta.score).toBe(0);
+    }
+  });
 
   it("records received retry delegation and the actual native scheduling refusal without authorizing a new attempt", async () => {
     const { store, dependencies } = await setup(true);

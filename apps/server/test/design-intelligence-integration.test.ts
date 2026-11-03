@@ -8,6 +8,7 @@ import { createDatabaseRepositories } from "../src/db/index.js";
 import { createDatabaseFixture } from "./helpers/database-fixture.js";
 import { HandoffManifestService } from "../src/artifacts/index.js";
 import { TaskCommitService } from "../src/orchestration/task-commit.js";
+import { BuildCoordinator } from "../src/orchestration/coordinator.js";
 import { validateTask } from "../src/validation/index.js";
 import { publishNativeValidationEvidence, readVerifiedNativeValidationEvidence, evaluateGovernedBuild } from "../src/governor/build-control.js";
 import { makeDesignIntelligenceReceipt } from "../src/integration/design-intelligence-receipt.js";
@@ -694,7 +695,16 @@ async function retryCapabilityFixture(f: Awaited<ReturnType<typeof nativeEvidenc
   }
   if (!summary.readyForCommit) {
     f.store.tasks.updateAttempt(f.taskId, attempt, { status: "failed", errorCode: summary.errorCode, errorMessage: summary.errorMessage, completedAt: summary.completedAt });
-    f.store.tasks.transition(f.taskId, "failed", { errorCode: summary.errorCode, errorMessage: summary.errorMessage }); return summary;
+    // Reuse the native validation-failure producer so its event sequence binds
+    // the failed attempt. A generic state shortcut cannot establish chronology.
+    const getProvider = vi.fn(() => { throw new Error("Retry evidence fixture must never dispatch a worker"); });
+    const coordinator = new BuildCoordinator({ ...f.context, handoffService: f.manifests, agentProviders: { get: getProvider } } as unknown as ConstructorParameters<typeof BuildCoordinator>[0]);
+    try {
+      const native = coordinator as unknown as { failTask(taskId: string, eventType: string, errorCode: string | null, errorMessage: string | null): unknown };
+      native.failTask(f.taskId, "task.validation_failed", summary.errorCode, summary.errorMessage);
+      expect(getProvider).not.toHaveBeenCalled();
+    } finally { await coordinator.shutdown(); }
+    return summary;
   }
   const committed = await new TaskCommitService().commit({ worktreePath: f.root, baseCommit: f.executionBase, branchName: "main", backlogTaskId: "AF-001", title: "Retry fixture", changedFiles: summary.ownership.changedFiles, allowNoChanges: false });
   f.store.tasks.recordChangedFiles(f.taskId, attempt, committed.changedFiles);

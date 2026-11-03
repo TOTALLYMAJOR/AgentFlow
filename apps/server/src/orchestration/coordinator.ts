@@ -61,6 +61,7 @@ import type { OrganizationPolicy } from "../governance/organization-policy.js";
 import { evaluateGovernedBuild, publishNativeValidationEvidence } from "../governor/build-control.js";
 
 import { canonicalJsonSha256, loadGovernedTaskHandoff, verifyGovernedHandoffForExecution } from "../integration/design-intelligence.js";
+import { fingerprintFailure } from "../integration/traffic-control.js";
 import { loadBoundWaleExperiment, validateWaleExperimentAdmission, verifyWaleExperimentGitTree } from "../integration/wale-run-lab.js";
 
 interface ActiveWorker {
@@ -1098,11 +1099,7 @@ export class BuildCoordinator {
         this.stopAndRecycleWorker(workerId, remoteOutcome.success);
         if (!remoteOutcome.success) {
           const failureCode = remoteOutcome.failureCode ?? "REMOTE_WORKER_FAILED";
-          this.store.tasks.transition(taskId, "failed", {
-            eventType: "task.remote_worker_failed",
-            errorCode: failureCode,
-            errorMessage: remoteOutcome.failureMessage ?? "Remote worker failed",
-          });
+          this.failTask(taskId, "task.remote_worker_failed", failureCode, remoteOutcome.failureMessage ?? "Remote worker failed");
           const governed = await this.governBuild(buildId);
           if (governed === undefined || governed.delegateRetry) this.scheduleAutomaticRetry(buildId, taskId, failureCode);
           return;
@@ -1167,11 +1164,7 @@ export class BuildCoordinator {
       if (!outcome.success) {
         const failureCode = outcome.failureCode ?? "WORKER_FAILED";
         if (current.state === "running") {
-          this.store.tasks.transition(taskId, "failed", {
-            eventType: "task.worker_failed",
-            errorCode: failureCode,
-            errorMessage: outcome.failureMessage ?? "Worker execution failed",
-          });
+          this.failTask(taskId, "task.worker_failed", failureCode, outcome.failureMessage ?? "Worker execution failed");
         }
         const governed = await this.governBuild(buildId);
         if (governed === undefined || governed.delegateRetry) this.scheduleAutomaticRetry(buildId, taskId, failureCode);
@@ -1221,11 +1214,7 @@ export class BuildCoordinator {
           task.state,
         )
       ) {
-        this.store.tasks.transition(taskId, "failed", {
-          eventType: "task.execution_pipeline_failed",
-          errorCode: failureCode,
-          errorMessage: failureMessage,
-        });
+        this.failTask(taskId, "task.execution_pipeline_failed", failureCode, failureMessage);
       }
       if (assigned) {
         this.stopAndRecycleWorker(workerId, false);
@@ -1456,11 +1445,7 @@ export class BuildCoordinator {
         errorMessage: summary.errorMessage,
         completedAt: summary.completedAt,
       });
-      this.store.tasks.transition(taskId, "failed", {
-        eventType: "task.validation_failed",
-        errorCode: summary.errorCode,
-        errorMessage: summary.errorMessage,
-      });
+      this.failTask(taskId, "task.validation_failed", summary.errorCode, summary.errorMessage);
       const governed = await this.governBuild(buildId);
       if (governed?.delegateRetry) this.scheduleAutomaticRetry(buildId, taskId, summary.errorCode ?? "VALIDATION_FAILED");
       return;
@@ -1862,6 +1847,26 @@ export class BuildCoordinator {
         .filter((document) => exampleKinds.test(document.artifactType))
         .map(stripArtifactType),
     };
+  }
+
+  private failTask(taskId: string, eventType: string, errorCode: string | null, errorMessage: string | null): TaskEntity {
+    return this.store.transaction(() => {
+      const task = this.store.tasks.getById(taskId);
+      const build = this.store.builds.getById(task.buildId);
+      const attempt = this.store.tasks.listAttempts(taskId).find((item) => item.attempt === task.attempt);
+      const governed = build.normalizedPlan.governedHandoff;
+      const retryable = errorCode !== null && DEFAULT_RETRYABLE_FAILURE_CODES.has(errorCode);
+      // The existing event's native sequence is the evidence fence. Capture
+      // identity/fingerprint atomically with the failed state, not a guessed
+      // historical snapshot or raw error text in a second event store.
+      const payload = typeof governed === "object" && governed !== null && attempt !== undefined && attempt.buildId === task.buildId && errorCode !== null
+        ? { governorFailure: {
+            attempt: attempt.attempt, attemptId: attempt.id,
+            fingerprint: fingerprintFailure({ code: errorCode, classification: retryable ? "transient" : "deterministic", retryable, signature: errorMessage ?? errorCode, files: this.store.tasks.listChangedFiles(taskId, attempt.attempt).map((file) => file.path) }),
+          } }
+        : {};
+      return this.store.tasks.transition(taskId, "failed", { eventType, errorCode, errorMessage, payload });
+    });
   }
 
   private persistWorkerOutcome(
