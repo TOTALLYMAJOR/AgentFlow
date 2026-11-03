@@ -4,6 +4,7 @@ import {
   ImageSquareIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { apiFetch } from "../api/client.js";
 import type {
@@ -16,6 +17,11 @@ import type {
 import { Metric } from "./Metric.js";
 import { StatusBadge } from "./StatusBadge.js";
 
+// Activity can cache these same URLs before durable terminal records exist.
+// Use explicit bound mutation below to bypass an earlier request's retained
+// deduplication promise without changing the shared canonical cache keys.
+const resultReadbackOptions = { revalidateOnMount: false };
+
 interface ResultBuildCardProps {
   build: BuildSummary;
 }
@@ -26,19 +32,40 @@ export function ResultBuildCard({
   const metrics = useSWR<BuildMetrics>(
     `/api/builds/${build.id}/metrics`,
     apiFetch,
+    resultReadbackOptions,
   );
   const events = useSWR<BuildEvent[]>(
     `/api/builds/${build.id}/events?limit=10000`,
     apiFetch,
+    resultReadbackOptions,
   );
   const artifacts = useSWR<ArtifactSummary[]>(
     `/api/builds/${build.id}/artifacts`,
     apiFetch,
+    resultReadbackOptions,
   );
   const manifests = useSWR<TaskManifest[]>(
     `/api/builds/${build.id}/manifests`,
     apiFetch,
+    resultReadbackOptions,
   );
+
+  const readbackKey = JSON.stringify([build.id, build.status, build.completedAt]);
+  const [completedReadbackKey, setCompletedReadbackKey] = useState<string | null>(null);
+  const refreshMetrics = metrics.mutate;
+  const refreshEvents = events.mutate;
+  const refreshArtifacts = artifacts.mutate;
+  const refreshManifests = manifests.mutate;
+
+  useEffect(() => {
+    let current = true;
+    void Promise.allSettled([
+      refreshMetrics(), refreshEvents(), refreshArtifacts(), refreshManifests(),
+    ]).then(() => {
+      if (current) setCompletedReadbackKey(readbackKey);
+    });
+    return () => { current = false; };
+  }, [readbackKey, refreshMetrics, refreshEvents, refreshArtifacts, refreshManifests]);
 
   const loadFailed = [
     metrics.error,
@@ -47,10 +74,11 @@ export function ResultBuildCard({
     manifests.error,
   ].some((error) => error !== undefined);
   const loading =
-    metrics.isLoading ||
-    events.isLoading ||
-    artifacts.isLoading ||
-    manifests.isLoading;
+    completedReadbackKey !== readbackKey ||
+    metrics.isLoading || metrics.isValidating ||
+    events.isLoading || events.isValidating ||
+    artifacts.isLoading || artifacts.isValidating ||
+    manifests.isLoading || manifests.isValidating;
   const failedValidationEvents = (events.data ?? []).filter(
     (event) =>
       /validation/i.test(event.type) &&
@@ -58,7 +86,8 @@ export function ResultBuildCard({
   );
   const failedTaskCount = metrics.data?.failedTasks ?? 0;
   const hasRecordedFailures = failedValidationEvents.length > 0 || failedTaskCount > 0;
-  const qualityEvidenceAvailable = metrics.error === undefined && events.error === undefined;
+  const qualityEvidenceAvailable = metrics.data !== undefined && events.data !== undefined &&
+    metrics.error === undefined && events.error === undefined;
   const integrationCount = metrics.data?.integratedTasks ??
     (build.tasks === undefined ? null : build.tasks.filter((task) => task.state === "integrated").length);
   const qualitySummary = failedValidationEvents.length > 0
@@ -167,9 +196,10 @@ export function ResultBuildCard({
           <div>
             <dt>Evidence</dt>
             <dd>
-              {artifacts.error !== undefined || manifests.error !== undefined
+              {artifacts.error !== undefined || manifests.error !== undefined ||
+                artifacts.data === undefined || manifests.data === undefined
                 ? "Record count unavailable"
-                : `${(artifacts.data?.length ?? 0) + (manifests.data?.length ?? 0)} confirmed records`}
+                : `${artifacts.data.length + manifests.data.length} confirmed records`}
             </dd>
           </div>
         </dl>
@@ -311,8 +341,8 @@ export function ResultBuildCard({
       )}
 
       <footer className="result-footer">
-        <span>{artifacts.error === undefined ? `${artifacts.data?.length ?? 0} artifacts` : "Artifacts unavailable"}</span>
-        <span>{manifests.error === undefined ? `${manifests.data?.length ?? 0} manifests` : "Manifests unavailable"}</span>
+        <span>{artifacts.error === undefined && artifacts.data !== undefined ? `${artifacts.data.length} artifacts` : "Artifacts unavailable"}</span>
+        <span>{manifests.error === undefined && manifests.data !== undefined ? `${manifests.data.length} manifests` : "Manifests unavailable"}</span>
         <span>
           Ended{" "}
           {build.completedAt === null

@@ -667,6 +667,9 @@ depends_on:
   - AF-CONSUMER-001
 owns:
   - apps/web/index.html
+  - apps/web/src/api/client.ts
+  - apps/web/test/api-client.test.ts
+  - apps/web/test/ResultBuildCard.test.tsx
   - apps/web/src/api/types.ts
   - apps/web/src/components/AppNavigation.tsx
   - apps/web/src/components/ResultBuildCard.tsx
@@ -678,6 +681,8 @@ owns:
 validate:
   - npm run typecheck
   - npm run build:web
+  - npm test -- apps/web/test/api-client.test.ts
+  - npm test -- apps/web/test/ResultBuildCard.test.tsx
 produces:
   - name: modern-consumer-interface
     type: product-capability
