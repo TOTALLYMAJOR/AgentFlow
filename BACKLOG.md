@@ -105,6 +105,7 @@ estimate_hours: 8
 depends_on:
   - AFI-001
 owns:
+  - apps/server/src/http/routes/design-intelligence.ts
   - apps/server/test/design-intelligence-integration.test.ts
   - apps/server/test/helpers/governed-handoff.ts
   - apps/server/src/recovery/service.ts
@@ -157,6 +158,8 @@ Converge the existing Wave 0 TCP-002 observations as immutable projections from 
 
 
 Local chronology qualification binds failure-relative evidence to actual supported native failed-state frames and event sequence. For the actual integration-failure producer, retained certificate, validated-manifest and validation-log bytes can establish narrowly bound pre-failure publication context for previousEvidence. Independent failure-time base/result/branch, own-attempt identity, hashes and event-prefix joins are required; missing or conflicting context refuses. Historical context never enters current items or satisfaction, and current verification remains unchanged. An asynchronous input fence includes native rows, per-attempt changed files and validation commands, plus the complete event prefix. Complete historical artifact state, unrecorded source revision, older/other producer context and canonical failure-history parity remain unqualified. Existing negative semantic/certification/repair/no-integration assertions remain intact. This is local engineering qualification, separate from native adoption or AFI-002/TCP-002 acceptance.
+
+Local TCP-003 error-receipt qualification links the existing governor.evaluation_failed event to its exact decision hash and action. Handler acknowledgement availability is distinct from later readback or receipt-persistence failure; observed status is catch-time readback, not final-state or effect-causality proof. Existing native transition eligibility prevents an invalid fallback pause without adding state edges or retry authority. Error durability still requires the existing journal append to succeed. Actual route ownership is recorded as local source preparation; exact native path/hunk adoption and task acceptance remain separate.
 
 ### Acceptance Criteria
 

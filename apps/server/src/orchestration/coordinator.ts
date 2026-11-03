@@ -53,6 +53,7 @@ import {
   workerResourceSnapshot,
 } from "./resources.js";
 import { TaskCommitService } from "./task-commit.js";
+import { canTransitionBuild } from "./state-machines.js";
 import {
   decideRetry,
   DEFAULT_RETRYABLE_FAILURE_CODES,
@@ -123,8 +124,13 @@ export class BuildCoordinator {
   }
 
   private async governBuild(buildId: string): Promise<{ continue: boolean; delegateRetry: boolean } | undefined> {
+    let evaluated: Awaited<ReturnType<typeof evaluateGovernedBuild>>;
+    let acknowledgement: boolean | undefined;
+    let observedBuildStatusBefore: string | undefined;
+    let runtimeApplyInvoked = false;
+    let receiptPersistAttempted = false;
     try {
-      const evaluated = await evaluateGovernedBuild({
+      evaluated = await evaluateGovernedBuild({
         store: this.store,
         repositoryService: this.repositoryService,
         environment: this.environment,
@@ -134,14 +140,17 @@ export class BuildCoordinator {
       const action = evaluated.decision.action;
       const allow = action === "CONTINUE";
       const delegateRetry = action === "DELEGATE_RETRY";
+      observedBuildStatusBefore = this.store.builds.getById(buildId).status;
       let acknowledged = allow || delegateRetry;
       if (!allow && !delegateRetry) {
-        const build = this.store.builds.getById(buildId);
-        if (["ready", "running", "interrupted"].includes(build.status)) {
+        if (canTransitionBuild(this.store.builds.getById(buildId).status, "paused")) {
+          runtimeApplyInvoked = true;
           this.pause(buildId);
           acknowledged = true;
         }
       }
+      acknowledgement = acknowledged;
+      receiptPersistAttempted = true;
       this.store.events.append({
         buildId,
         type: "governor.intervention_acknowledged",
@@ -154,13 +163,31 @@ export class BuildCoordinator {
       });
       return { continue: allow, delegateRetry };
     } catch (error) {
+      let observedBuildStatusAfter: string | undefined;
+      try { observedBuildStatusAfter = this.store.builds.getById(buildId).status; }
+      catch { /* Failed readback cannot establish whether an effect occurred. */ }
       this.store.events.append({
         buildId,
         type: "governor.evaluation_failed",
-        payload: { message: errorMessage(error) },
+        payload: {
+          message: errorMessage(error),
+          ...(evaluated === undefined ? {} : {
+            decisionRecordHash: evaluated.record.recordHash,
+            action: evaluated.decision.action,
+            // Absence of an acknowledgement does not prove absence of effects.
+            acknowledged: acknowledgement ?? false,
+            details: {
+              runtimeApplyInvoked,
+              acknowledgementAvailable: acknowledgement !== undefined,
+              receiptPersistAttempted,
+              observedBuildStatusBefore,
+              observedBuildStatusAfter,
+            },
+          }),
+        },
       });
       const build = this.store.builds.getById(buildId);
-      if (["ready", "running", "interrupted"].includes(build.status)) this.pause(buildId);
+      if (canTransitionBuild(build.status, "paused")) this.pause(buildId);
       return { continue: false, delegateRetry: false };
     }
   }

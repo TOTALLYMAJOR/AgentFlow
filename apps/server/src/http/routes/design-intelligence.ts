@@ -46,20 +46,53 @@ export function registerDesignIntelligenceRoutes(app: FastifyInstance, context: 
     const { id } = BuildParameters.parse(request.params);
     const evaluated = await evaluateGovernedBuild(context, id);
     if (evaluated === undefined) throw new AgentFlowError("GOVERNED_HANDOFF_MISSING", `Build ${id} is not bound to a Design Intelligence handoff`, 409);
-    const tasks = context.store.tasks.listForBuild(id);
-    const latestFailedTask = [...tasks].reverse().find((task) => task.errorCode !== null);
-    const acknowledgement = await applyGovernorDecision(evaluated.decision, {
-      continue: async () => ({ acknowledged: true }),
-      delegateRetry: async () => ({ acknowledged: latestFailedTask !== undefined && context.store.retrySchedules.get(latestFailedTask.id) !== undefined, details: { delegatedTo: "agentflow-existing-retry-schedule" } }),
-      requestRepair: async () => { context.coordinator.pause(id); return { acknowledged: true, details: { state: "paused", nextAction: "bounded-repair" } }; },
-      blockIntegration: async () => { context.coordinator.pause(id); return { acknowledged: true, details: { state: "paused" } }; },
-      pauseForReview: async () => { context.coordinator.pause(id); return { acknowledged: true, details: { state: "paused" } }; },
-      requestReconsider: async () => ({ acknowledged: false, details: { requiresApproval: true } }),
-      proposeReplan: async () => ({ acknowledged: false, details: { requiresApproval: true } }),
-      cancel: async () => { context.coordinator.cancel(id); return { acknowledged: true, details: { state: "cancelled" } }; },
-    });
-    context.store.events.append({ buildId: id, type: "governor.intervention_acknowledged", payload: { decisionRecordHash: evaluated.record.recordHash, action: evaluated.decision.action, ...acknowledgement } });
-    return { ...evaluated, acknowledgement };
+    let acknowledgement: Awaited<ReturnType<typeof applyGovernorDecision>> | undefined;
+    let observedBuildStatusBefore: string | undefined;
+    let runtimeApplyInvoked = false;
+    let receiptPersistAttempted = false;
+    try {
+      const tasks = context.store.tasks.listForBuild(id);
+      const latestFailedTask = [...tasks].reverse().find((task) => task.errorCode !== null);
+      observedBuildStatusBefore = context.store.builds.getById(id).status;
+      runtimeApplyInvoked = true;
+      acknowledgement = await applyGovernorDecision(evaluated.decision, {
+        continue: async () => ({ acknowledged: true }),
+        delegateRetry: async () => ({ acknowledged: latestFailedTask !== undefined && context.store.retrySchedules.get(latestFailedTask.id) !== undefined, details: { delegatedTo: "agentflow-existing-retry-schedule" } }),
+        requestRepair: async () => { context.coordinator.pause(id); return { acknowledged: true, details: { state: "paused", nextAction: "bounded-repair" } }; },
+        blockIntegration: async () => { context.coordinator.pause(id); return { acknowledged: true, details: { state: "paused" } }; },
+        pauseForReview: async () => { context.coordinator.pause(id); return { acknowledged: true, details: { state: "paused" } }; },
+        requestReconsider: async () => ({ acknowledged: false, details: { requiresApproval: true } }),
+        proposeReplan: async () => ({ acknowledged: false, details: { requiresApproval: true } }),
+        cancel: async () => { context.coordinator.cancel(id); return { acknowledged: true, details: { state: "cancelled" } }; },
+      });
+      receiptPersistAttempted = true;
+      context.store.events.append({ buildId: id, type: "governor.intervention_acknowledged", payload: { decisionRecordHash: evaluated.record.recordHash, action: evaluated.decision.action, ...acknowledgement } });
+      return { ...evaluated, acknowledgement };
+    } catch (error) {
+      let observedBuildStatusAfter: string | undefined;
+      try { observedBuildStatusAfter = context.store.builds.getById(id).status; }
+      catch { /* Failed readback cannot establish whether an effect occurred. */ }
+      context.store.events.append({
+        buildId: id,
+        type: "governor.evaluation_failed",
+        payload: {
+          decisionRecordHash: evaluated.record.recordHash,
+          action: evaluated.decision.action,
+          message: error instanceof Error ? error.message : String(error),
+          // A returned ACK survives a later persistence error. Missing ACK is
+          // not evidence that the runtime action had no effect.
+          acknowledged: acknowledgement?.acknowledged ?? false,
+          details: {
+            runtimeApplyInvoked,
+            acknowledgementAvailable: acknowledgement !== undefined,
+            receiptPersistAttempted,
+            observedBuildStatusBefore,
+            observedBuildStatusAfter,
+          },
+        },
+      });
+      throw error;
+    }
   });
 }
 

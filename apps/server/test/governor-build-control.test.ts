@@ -2,6 +2,10 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import Fastify from "fastify";
+import { registerErrorHandling } from "../src/http/errors.js";
+import { registerDesignIntelligenceRoutes } from "../src/http/routes/design-intelligence.js";
+import type { AgentFlowContext } from "../src/http/context.js";
 import { createDatabaseRepositories } from "../src/db/index.js";
 import { resolveEnvironment } from "../src/config/environment.js";
 import { DEFAULT_ORGANIZATION_POLICY } from "../src/governance/organization-policy.js";
@@ -21,7 +25,7 @@ describe("current native Governor failure attribution", () => {
   let coordinator: BuildCoordinator | undefined;
   afterEach(async () => { await coordinator?.shutdown(); vi.restoreAllMocks(); vi.useRealTimers(); fixture?.cleanup(); fixture = undefined; coordinator = undefined; });
 
-  async function setup(withNativePlan = false, strictNativeEvidence = false) {
+  async function setup(withNativePlan = false, strictNativeEvidence = false, buildStatus: "running" | "ready" = "running") {
     fixture = createDatabaseFixture();
     const store = createDatabaseRepositories(fixture.database);
     const root = path.join(fixture.directory, "repository");
@@ -47,7 +51,7 @@ describe("current native Governor failure attribution", () => {
     store.builds.create({
       id: "build", repositoryId: "repo", backlogPath: "BACKLOG.md", baseCommit: handoff.repository.baseCommit,
       ...(nativePlan === undefined ? {} : { planId: nativePlan.id }),
-      integrationBranch: "integration", status: "running",
+      integrationBranch: "integration", status: buildStatus,
       normalizedPlan: nativePlan ?? { governedHandoff: binding },
       tasks: [{ id: "task", backlogTaskId: "AF-001", title: "Task", description: "Task", acceptanceCriteria: ["Passes"], state: "running", attempt: 1 }],
     });
@@ -60,6 +64,129 @@ describe("current native Governor failure attribution", () => {
     const observed = vi.spyOn(GovernorControlService.prototype, "evaluate");
     return { store, dependencies, observed, handoffPath, handoff };
   }
+
+
+  describe("TCP-003 durable intervention errors", () => {
+    type Boundary = "http" | "coordinator";
+
+    async function exercise(boundary: Boundary, afterEffect: boolean, receiptFailure = false, readbackFailure = false) {
+      const commitsEffect = afterEffect || receiptFailure || (readbackFailure && boundary === "coordinator");
+      const { store, dependencies } = await setup(true, false, !commitsEffect && boundary === "coordinator" ? "ready" : "running");
+      store.tasks.transition("task", "failed", { errorCode: "VALIDATION_FAILED", errorMessage: "inert current failure" });
+      store.tasks.updateAttempt("task", 1, { status: "failed", errorCode: "VALIDATION_FAILED", errorMessage: "inert current failure" });
+      if (!commitsEffect && !readbackFailure && boundary === "http") store.builds.transition("build", "paused");
+
+      let providerCalls = 0;
+      coordinator = new BuildCoordinator({
+        ...dependencies,
+        handoffService: new HandoffManifestService(store, dependencies.environment.artifactsPath),
+        agentProviders: { get: () => { providerCalls += 1; throw new Error("TCP-003 QA must never dispatch a provider"); } },
+      } as unknown as ConstructorParameters<typeof BuildCoordinator>[0]);
+      const nativePause = coordinator.pause.bind(coordinator);
+      if (receiptFailure || readbackFailure) {
+        const nativeAppend = store.events.append.bind(store.events);
+        let failAcknowledgement = true;
+        let pendingReadback = false;
+        if (readbackFailure && boundary === "http") {
+          const nativeList = store.tasks.listForBuild.bind(store.tasks);
+          vi.spyOn(store.tasks, "listForBuild").mockImplementation((...args) => {
+            if (pendingReadback) { pendingReadback = false; throw new Error("inert native task readback failure before runtime apply"); }
+            return nativeList(...args);
+          });
+        } else if (readbackFailure) {
+          const nativeGet = store.builds.getById.bind(store.builds);
+          vi.spyOn(store.builds, "getById").mockImplementation((...args) => {
+            if (pendingReadback) { pendingReadback = false; throw new Error("inert native build readback failure before runtime apply"); }
+            return nativeGet(...args);
+          });
+        }
+        vi.spyOn(store.events, "append").mockImplementation((input) => {
+          if (receiptFailure && input.type === "governor.intervention_acknowledged" && failAcknowledgement) {
+            failAcknowledgement = false;
+            throw new Error("inert journal failure after runtime acknowledgement returned");
+          }
+          const event = nativeAppend(input);
+          if (readbackFailure && input.type === "governor.decision") pendingReadback = true;
+          return event;
+        });
+      }
+      if (afterEffect) {
+        // Keep the real native transaction and build.paused event. Only its
+        // returned result is lost, as a caller can observe after a boundary error.
+        vi.spyOn(coordinator, "pause").mockImplementation((id) => {
+          nativePause(id);
+          throw new Error("inert error after native pause committed");
+        });
+      }
+      const native = coordinator as unknown as {
+        governBuild(buildId: string): Promise<{ continue: boolean; delegateRetry: boolean } | undefined>;
+      };
+      const app = Fastify({ logger: false });
+      registerErrorHandling(app);
+      registerDesignIntelligenceRoutes(app, { ...dependencies, coordinator } as unknown as AgentFlowContext);
+      const initialStatus = store.builds.getById("build").status;
+      const initialPauseCount = store.events.listForBuild("build").filter((event) => event.type === "build.paused").length;
+      const responses: unknown[] = [];
+      try {
+        for (let number = 0; number < 2; number += 1) {
+          if (boundary === "http") {
+            const response = await app.inject({ method: "POST", url: "/api/builds/build/governor/evaluate" });
+            responses.push({ status: response.statusCode, body: response.json<unknown>() });
+          } else {
+            try { responses.push(await native.governBuild("build")); }
+            catch (error) {
+              responses.push({ rejected: true, name: error instanceof Error ? error.name : typeof error, message: error instanceof Error ? error.message : String(error) });
+            }
+          }
+        }
+        const events = store.events.listForBuild("build");
+        const decisions = events.filter((event) => event.type === "governor.decision");
+        const pauseCount = events.filter((event) => event.type === "build.paused").length;
+        const firstHash = decisions[0]?.payload.recordHash;
+        const outcomes = events.filter((event) => event.type !== "governor.decision" && event.type.startsWith("governor.") && event.payload.decisionRecordHash === firstHash);
+
+        // State and replay assertions are independent of the missing receipt.
+        expect(decisions).toHaveLength(2);
+        expect(decisions[0]?.payload.decision).toMatchObject({ action: "REQUEST_REPAIR" });
+        expect(store.builds.getById("build").status).toBe(commitsEffect ? "paused" : initialStatus);
+        expect(pauseCount - initialPauseCount).toBe(commitsEffect ? 1 : 0);
+        expect(store.tasks.listAttempts("task")).toHaveLength(1);
+        expect(store.retrySchedules.list()).toEqual([]);
+        expect(providerCalls).toBe(0);
+        if (boundary === "http") {
+          expect(responses).toMatchObject([
+            { status: commitsEffect || readbackFailure ? 500 : 409, body: { error: { code: commitsEffect || readbackFailure ? "INTERNAL_ERROR" : "STATE_CONFLICT" } } },
+            { status: readbackFailure ? 500 : 409, body: { error: { code: readbackFailure ? "INTERNAL_ERROR" : "STATE_CONFLICT" } } },
+          ]);
+        } else expect(responses).toEqual([{ continue: false, delegateRetry: false }, { continue: false, delegateRetry: false }]);
+        // This catches an omitted durable result for a persisted decision.
+        // It does not equate an exception with no effect or invent an outcome enum.
+        expect(outcomes, "first persisted decision needs a hash-correlated durable handler outcome").toHaveLength(1);
+        expect(outcomes[0]?.payload).toMatchObject({ decisionRecordHash: firstHash, action: "REQUEST_REPAIR", acknowledged: receiptFailure });
+        if (commitsEffect && !readbackFailure) {
+          expect(outcomes[0]?.payload.details).toMatchObject({ acknowledgementAvailable: receiptFailure, receiptPersistAttempted: receiptFailure, observedBuildStatusBefore: "running", observedBuildStatusAfter: "paused" });
+        } else if (readbackFailure) {
+          expect(outcomes[0]?.payload.details).toMatchObject({ runtimeApplyInvoked: false, acknowledgementAvailable: false, receiptPersistAttempted: false, observedBuildStatusAfter: "running" });
+        }
+      } finally { await app.close(); }
+    }
+
+    it.each(["http", "coordinator"] as const)("%s retains the decision binding when native state protection refuses before mutation", async (boundary) => {
+      await exercise(boundary, false);
+    });
+
+    it.each(["http", "coordinator"] as const)("%s retains the decision binding when a native pause commits before the returned outcome is lost", async (boundary) => {
+      await exercise(boundary, true);
+    });
+
+    it.each(["http", "coordinator"] as const)("%s preserves a returned runtime acknowledgement when journal persistence fails", async (boundary) => {
+      await exercise(boundary, false, true);
+    });
+
+    it.each(["http", "coordinator"] as const)("%s binds native readback failure without claiming a runtime acknowledgement", async (boundary) => {
+      await exercise(boundary, false, false, true);
+    });
+  });
 
   it("uses native failure-relative evidence ordering when final task and attempt rows are identical", async () => {
     vi.useFakeTimers();
