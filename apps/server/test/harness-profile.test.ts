@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { buildHarnessProfile, HarnessProfileError, validateHarnessProfile } from '../src/harness/profile.js';
+import { buildHarnessProfile, HarnessProfileError, parseHarnessProfileSource, validateHarnessProfile } from '../src/harness/profile.js';
 import type { HarnessProfile } from '../src/harness/profile.js';
+
+function sourceDigest(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
 
 // Exact proposed-v1.json from Proofloom 34ed5877b2a92c3b65081ad13b19803d44d8096d.
 // Accepted schema task TTR-C992B68A725C46C05060; this is proposal integrity only.
@@ -601,6 +605,107 @@ describe('accepted Harness Profile v1 semantic prerequisite', () => {
       const profile = structuredClone(FROZEN_PROFILE);
       mutate(profile);
       expect(validateHarnessProfile(profile)).not.toEqual([]);
+    }
+  });
+});
+
+
+describe('exact Harness Profile source boundary', () => {
+  function parse(source: string) {
+    const bytes = Buffer.from(source, 'utf8');
+    return parseHarnessProfileSource(bytes, sourceDigest(bytes));
+  }
+
+  it('retains exact UTF-8 content separately from the canonical profile digest', () => {
+    const sourceText = JSON.stringify(FROZEN_PROFILE, null, 2) + '\r\n';
+    const bytes = Buffer.from(sourceText);
+    const result = parseHarnessProfileSource(bytes, sourceDigest(bytes));
+    expect(result).toEqual({ sourceText, sourceSha256: sourceDigest(bytes), profile: FROZEN_PROFILE });
+    expect(result.sourceSha256).not.toBe(result.profile.profileSha256);
+    bytes.fill(0);
+    expect(result.sourceText).toBe(sourceText);
+    expect(result.profile.state).toBe('PROPOSED');
+  });
+
+  it('accepts native-compatible formatting without silently replacing the reviewed bytes', () => {
+    const compact = JSON.stringify(FROZEN_PROFILE);
+    const indented = '\t\n' + JSON.stringify(FROZEN_PROFILE, null, 4) + '\r\n';
+    const first = parse(compact), second = parse(indented);
+    expect(first.profile).toEqual(second.profile);
+    expect(first.sourceSha256).not.toBe(second.sourceSha256);
+    expect(first.sourceText).toBe(compact);
+    expect(second.sourceText).toBe(indented);
+  });
+
+  it.each(['1.0', '1e0', '1E+0', '10e-1', '0.1e1'])('refuses the float token %s before object parsing erases its type', (token) => {
+    const source = JSON.stringify(FROZEN_PROFILE).replace('"schemaVersion":1', `"schemaVersion":${token}`);
+    expect(validateHarnessProfile(JSON.parse(source))).toEqual([]);
+    expect(() => parse(source)).toThrow('unsupported schemaVersion token');
+  });
+
+  it('uses decoded keys and the actual last JSON member just like the native parser', () => {
+    const source = JSON.stringify(FROZEN_PROFILE);
+    expect(parse(source.replace('"schemaVersion":1', '"\\u0073chemaVersion":1')).profile).toEqual(FROZEN_PROFILE);
+    expect(parse(source.replace('"schemaVersion":1', '"schemaVersion":1.0,"schemaVersion":1')).profile).toEqual(FROZEN_PROFILE);
+    expect(() => parse(source.replace('"schemaVersion":1', '"schemaVersion":1,"schemaVersion":1e0'))).toThrow('unsupported schemaVersion token');
+  });
+
+  it('does not interpret text inside a requirement as a JSON version token', () => {
+    const profile = structuredClone(FROZEN_PROFILE);
+    first(profile.requiredSemantics).intent = 'Observe the text "schemaVersion":1.0 without granting authority.';
+    const built = rebuild(profile);
+    expect(parse(JSON.stringify(built)).profile).toEqual(built);
+  });
+
+  it.each([
+    ['missing digest', ''], ['uppercase digest', 'A'.repeat(64)],
+    ['changed digest', '0'.repeat(64)], ['semantic digest instead of source digest', FROZEN_PROFILE.profileSha256],
+  ])('refuses %s', (_label, supplied) => {
+    const bytes = Buffer.from(JSON.stringify(FROZEN_PROFILE));
+    expect(() => parseHarnessProfileSource(bytes, supplied)).toThrow(HarnessProfileError);
+  });
+
+  it('refuses changed bytes even when parsed semantics are identical', () => {
+    const bytes = Buffer.from(JSON.stringify(FROZEN_PROFILE));
+    const changed = Buffer.concat([bytes, Buffer.from('\n')]);
+    expect(() => parseHarnessProfileSource(changed, sourceDigest(bytes))).toThrow('source bytes do not match supplied digest');
+  });
+
+  it('hashes and decodes only the supplied byte view', () => {
+    const bytes = Buffer.from(JSON.stringify(FROZEN_PROFILE));
+    const padded = Buffer.concat([Buffer.from('prefix'), bytes, Buffer.from('suffix')]);
+    const view = padded.subarray(6, 6 + bytes.length);
+    expect(parseHarnessProfileSource(view, sourceDigest(bytes)).profile).toEqual(FROZEN_PROFILE);
+  });
+
+  it.each([[0xff], [0xc0, 0x80], [0xe2, 0x82], [0xed, 0xa0, 0x80]])('refuses invalid UTF-8 bytes %j', (...values: number[]) => {
+    const bytes = Uint8Array.from(values);
+    expect(() => parseHarnessProfileSource(bytes, sourceDigest(bytes))).toThrow('source must contain valid UTF-8');
+  });
+
+  it('does not silently remove a byte-order mark', () => {
+    const bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify(FROZEN_PROFILE))]);
+    expect(() => parseHarnessProfileSource(bytes, sourceDigest(bytes))).toThrow('source must contain valid JSON');
+  });
+
+  it.each(['', '{', '{"sample":"private-placeholder",}', 'null trailing'])('refuses malformed JSON without echoing source content', (source) => {
+    expect(() => parse(source)).toThrow(/^source must contain valid JSON$/);
+  });
+
+  it.each(['null', '[]', 'true', '1', '"profile"'])('refuses a non-profile JSON root %s', (source) => {
+    expect(() => parse(source)).toThrow('Harness Profile must be an object');
+  });
+
+  it('replays semantic validation after verifying the source digest', () => {
+    for (const mutate of [
+      (profile: Record<string, unknown>) => { profile.state = 'APPROVED'; },
+      (profile: Record<string, unknown>) => { profile.schemaVersion = 2; },
+      (profile: Record<string, unknown>) => { profile.profileSha256 = 'f'.repeat(64); },
+      (profile: Record<string, unknown>) => { profile.executionAuthorized = true; },
+    ]) {
+      const profile = structuredClone(FROZEN_PROFILE) as unknown as Record<string, unknown>;
+      mutate(profile);
+      expect(() => parse(JSON.stringify(profile))).toThrow(HarnessProfileError);
     }
   });
 });

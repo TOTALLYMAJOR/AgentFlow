@@ -379,8 +379,8 @@ export function buildHarnessProfile(
 
 /**
  * Validate an already parsed object's canonical proposal integrity, not admission.
- * Parsing erases numeric token spelling (1, 1.0, 1e0); serialized canonical-byte
- * validation belongs to a future accepted carrier and is not supplied here.
+ * Parsing erases numeric token spelling (1, 1.0, 1e0). For serialized input use
+ * parseHarnessProfileSource; neither function establishes adoption or authority.
  */
 export function validateHarnessProfile(value: unknown): string[] {
   if (!object(value)) return ['Harness Profile must be an object'];
@@ -398,4 +398,57 @@ export function validateHarnessProfile(value: unknown): string[] {
     if (error instanceof HarnessProfileError || error instanceof TypeError || error instanceof RangeError) return [error.message];
     throw error;
   }
+}
+
+export interface HarnessProfileSource {
+  sourceText: string;
+  sourceSha256: string;
+  profile: HarnessProfile;
+}
+
+/**
+ * Verify supplied file bytes and native-v1 proposal semantics without I/O.
+ * The caller must separately establish where the expected source digest comes
+ * from and whether that exact source is adopted. This is not an approval check.
+ * Formatting remains part of source identity; it is not the semantic digest.
+ */
+export function parseHarnessProfileSource(
+  sourceBytes: Uint8Array,
+  expectedSourceSha256: string,
+): HarnessProfileSource {
+  match(expectedSourceSha256, SHA256, 'sourceSha256');
+  const bytes = Uint8Array.from(sourceBytes);
+  const sourceSha256 = createHash('sha256').update(bytes).digest('hex');
+  if (sourceSha256 !== expectedSourceSha256) fail('source bytes do not match supplied digest');
+  let sourceText: string;
+  try {
+    // Preserve a BOM so the JSON parser refuses it, matching native utf-8 reads.
+    sourceText = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return fail('source must contain valid UTF-8');
+  }
+  const versionTokens = new WeakMap<object, string>();
+  let value: unknown;
+  try {
+    value = JSON.parse(sourceText, function (
+      this: object, key: string, item: unknown, context?: { source?: string },
+    ): unknown {
+      if (key === 'schemaVersion' && typeof item === 'number') {
+        versionTokens.set(this, context?.source ?? '');
+      }
+      return item;
+    }) as unknown;
+  } catch {
+    // JSON syntax errors can quote input. Do not expose raw source diagnostics.
+    return fail('source must contain valid JSON');
+  }
+  // Python distinguishes int 1 from float 1.0/1e0. Node's parsed Number does
+  // not; retain the actual primitive token through the built-in JSON reviver.
+  // A runtime lacking token context refuses instead of silently weakening this.
+  if (object(value) && typeof value.schemaVersion === 'number' && versionTokens.get(value) !== '1') {
+    fail('unsupported schemaVersion token');
+  }
+  const errors = validateHarnessProfile(value);
+  if (errors.length > 0) fail(errors.join('; '));
+  return { sourceText, sourceSha256, profile: value as HarnessProfile };
 }
