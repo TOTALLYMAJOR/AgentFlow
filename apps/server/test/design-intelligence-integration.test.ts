@@ -665,10 +665,10 @@ function fixtureCapabilityDocuments(handoff: ReturnType<typeof GovernedTaskHando
 }
 
 async function retryCapabilityFixture(f: Awaited<ReturnType<typeof nativeEvidenceFixture>>, change: "none" | "format" | "malformed" = "none") {
-  f.store.tasks.transition(f.taskId, "failed", { eventType: "unit.fixture_retry_requested", errorCode: "UNIT_RETRY" });
+  if (f.store.tasks.getById(f.taskId).state !== "failed") f.store.tasks.transition(f.taskId, "failed", { eventType: "unit.fixture_retry_requested", errorCode: "UNIT_RETRY" });
   f.store.tasks.retry(f.taskId); const attempt = f.store.tasks.getById(f.taskId).attempt;
   f.store.tasks.updateAttempt(f.taskId, attempt, { status: "running", startedAt: new Date().toISOString() }); f.store.tasks.transition(f.taskId, "running");
-  await writeFile(path.join(f.root, "src/index.js"), "export const ready = true; // retry\n");
+  await writeFile(path.join(f.root, "src/index.js"), `export const ready = true; // retry ${attempt}\n`);
   if (change !== "none") {
     if (f.capabilityDocuments === undefined) throw new Error("Missing retry capability documents");
     const plan = structuredClone(f.capabilityDocuments.plan);
@@ -738,7 +738,195 @@ async function failNativeIntegrationFixture(f: Awaited<ReturnType<typeof nativeE
   } finally { update?.mockRestore(); await coordinator.shutdown(); }
 }
 
+// Canonical-shape/native-provenance fixture, not a Traffic Control cumulative
+// event-parity oracle. Every positive source comes from native producers above.
+async function nativeIntegrationHistoryFixture(f: Awaited<ReturnType<typeof nativeEvidenceFixture>>, count: number) {
+  const certificates: Awaited<ReturnType<typeof readVerifiedNativeValidationEvidence>> = [];
+  const frames: ReturnType<typeof f.store.events.listForBuild> = [];
+  const snapshots: Array<{ fingerprint: unknown; evidence: { items: string[]; satisfied: string[]; contradictory: string[] } }> = [];
+  for (let attempt = 1; attempt <= count; attempt += 1) {
+    if (attempt > 1) {
+      const retry = await retryCapabilityFixture(f);
+      expect(retry.readyForCommit, JSON.stringify(retry)).toBe(true);
+    }
+    await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+    const current = await readVerifiedNativeValidationEvidence(f, f.buildId, f.handoff);
+    expect(current).toHaveLength(1);
+    const certificate = current[0];
+    if (certificate === undefined) throw new Error("Missing actual own-attempt native certificate");
+    expect(certificate.body.producer).toMatchObject({ buildId: f.buildId, taskId: f.taskId, attempt });
+    expect(certificates.map((item) => item.id)).not.toContain(certificate.id);
+    const publication = f.store.events.listForBuild(f.buildId).find((event) => event.type === "evidence.native_validation_certified" && event.payload.certificateId === certificate.id);
+    const priorFrame = frames.at(-1);
+    if (publication === undefined) throw new Error("Missing actual certificate publication fence");
+    if (priorFrame !== undefined) expect(publication.sequence).toBeGreaterThan(priorFrame.sequence);
+    await failNativeIntegrationFixture(f);
+    const frame = f.store.events.listForBuild(f.buildId).filter((event) => event.type === "integration.failed").at(-1);
+    const nativeAttempt = f.store.tasks.getAttempt(f.taskId, attempt);
+    if (frame === undefined) throw new Error("Missing actual manager failure frame");
+    expect(frame.sequence).toBeGreaterThan(publication.sequence);
+    expect(frame.payload.governorFailure).toMatchObject({ attempt, attemptId: nativeAttempt.id });
+    expect((frame.payload.governorFailure as Record<string, unknown>).fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(nativeAttempt).toMatchObject({ status: "failed", errorCode: "INTEGRATION_VALIDATION_FAILED" });
+    expect(f.store.tasks.getById(f.taskId)).toMatchObject({ state: "failed", attempt, errorCode: "INTEGRATION_VALIDATION_FAILED" });
+    certificates.push(certificate); frames.push(frame);
+    snapshots.push({ fingerprint: (frame.payload.governorFailure as Record<string, unknown>).fingerprint, evidence: { items: [certificate.id], satisfied: [certificate.body.artifact.name], contradictory: [] } });
+  }
+  return { certificates, frames, snapshots };
+}
+
 describe("historical native publication context", () => {
+  it.each([
+    { failures: 1, retryAfterFailure: false, label: "one actual integration failure" },
+    { failures: 2, retryAfterFailure: false, label: "two actual integration failures" },
+    { failures: 2, retryAfterFailure: true, label: "two failures after a later native retry clears the active failure" },
+  ])("projects canonical own-attempt history for $label without reviving current evidence", async ({ failures, retryAfterFailure }) => {
+    const f = await nativeEvidenceFixture(false, undefined, true);
+    const observed = vi.spyOn(GovernorControlService.prototype, "evaluate");
+    try {
+      const history = await nativeIntegrationHistoryFixture(f, failures);
+      if (retryAfterFailure) {
+        const retry = await retryCapabilityFixture(f);
+        expect(retry.readyForCommit, JSON.stringify(retry)).toBe(true);
+        // Actual validation and manifest publication have completed, but this
+        // later attempt has no certificate publication to revive current proof.
+        expect(f.store.tasks.getById(f.taskId).state).toBe("validated");
+      }
+      expect(await readVerifiedNativeValidationEvidence(f, f.buildId, f.handoff)).toEqual([]);
+      const retainedTask = f.store.tasks.getById(f.taskId);
+      const retainedAttempts = f.store.tasks.listAttempts(f.taskId);
+      const retainedEvents = f.store.events.listForBuild(f.buildId);
+      const result = await evaluateGovernedBuild(f.context, f.buildId);
+      const observation = observed.mock.calls.at(-1)?.[0].observation;
+      if (process.env.TCP002_HISTORICAL_OUTPUT_ROOT !== undefined) {
+        await mkdir(process.env.TCP002_HISTORICAL_OUTPUT_ROOT, { recursive: true });
+        await writeFile(path.join(process.env.TCP002_HISTORICAL_OUTPUT_ROOT, `canonical-history-${failures}-failures${retryAfterFailure ? "-after-retry" : ""}.actual.json`), JSON.stringify({
+          schemaVersion: 1,
+          classification: "CANONICAL_SHAPE_NATIVE_PROVENANCE_CONFORMANCE_NOT_TRAFFIC_CONTROL_CUMULATIVE_PARITY",
+          buildId: f.buildId,
+          taskId: f.taskId,
+          task: { state: retainedTask.state, attempt: retainedTask.attempt, errorCode: retainedTask.errorCode },
+          attempts: retainedAttempts.map((attempt) => ({ id: attempt.id, attempt: attempt.attempt, status: attempt.status, errorCode: attempt.errorCode, resultCommit: attempt.resultCommit })),
+          certificates: history.certificates.map((certificate) => ({
+            id: certificate.id,
+            attempt: certificate.body.producer.attempt,
+            manifestId: certificate.body.manifest.id,
+            resultCommit: certificate.body.producer.resultCommit,
+            publicationSequence: retainedEvents.find((event) => event.type === "evidence.native_validation_certified" && event.payload.certificateId === certificate.id)?.sequence,
+          })),
+          failures: history.frames.map((event) => ({ eventType: event.type, sequence: event.sequence, taskId: event.taskId, nativeFrame: event.payload.governorFailure })),
+          action: result?.decision.action,
+          observation,
+          expectedCanonicalHistory: history.snapshots,
+        }, null, 2));
+      }
+      expect(result?.decision.action).toBe(retryAfterFailure ? "BLOCK_INTEGRATION" : "REQUEST_REPAIR");
+      expect(observation).toBeDefined();
+      expect(observation?.evidence).toEqual({ items: [], satisfied: [], contradictory: [] });
+      expect(observation?.failureHistory).toEqual(history.snapshots);
+      if (retryAfterFailure) {
+        expect(observation?.failure).toBeNull();
+        expect(observation?.failureRepeatCount).toBe(0);
+      } else {
+        const activeAttempt = retainedAttempts.find((attempt) => attempt.attempt === failures);
+        const frame = history.frames.at(-1);
+        if (activeAttempt === undefined || frame === undefined) throw new Error("Missing actual active native failure");
+        expect(observation?.failure).toEqual({
+          code: activeAttempt.errorCode,
+          classification: "deterministic",
+          retryable: false,
+          signature: activeAttempt.errorMessage ?? activeAttempt.errorCode,
+          files: f.store.tasks.listChangedFiles(f.taskId, failures).map((file) => file.path),
+          fingerprint: (frame.payload.governorFailure as Record<string, unknown>).fingerprint,
+        });
+        expect(observation?.failureRepeatCount).toBe(failures);
+      }
+      expect(f.store.tasks.getById(f.taskId)).toEqual(retainedTask);
+      expect(f.store.tasks.listAttempts(f.taskId)).toEqual(retainedAttempts);
+      expect(f.store.events.listForBuild(f.buildId).filter((event) => event.sequence <= (retainedEvents.at(-1)?.sequence ?? 0))).toEqual(retainedEvents);
+      expect(f.store.events.listForBuild(f.buildId).some((event) => event.type === "integration.completed")).toBe(false);
+    } finally { observed.mockRestore(); f.cleanup(); }
+  });
+
+  it("continues a genuinely certified native retry while preserving earlier own-attempt failure history", async () => {
+    const f = await nativeEvidenceFixture(false, undefined, true);
+    const observed = vi.spyOn(GovernorControlService.prototype, "evaluate");
+    try {
+      const history = await nativeIntegrationHistoryFixture(f, 2);
+      const retry = await retryCapabilityFixture(f);
+      expect(retry.readyForCommit, JSON.stringify(retry)).toBe(true);
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      const current = await readVerifiedNativeValidationEvidence(f, f.buildId, f.handoff);
+      expect(current).toHaveLength(1);
+      const certificate = current[0];
+      if (certificate === undefined) throw new Error("Missing actual third-attempt native certificate");
+      expect(certificate.body.producer).toMatchObject({ buildId: f.buildId, taskId: f.taskId, attempt: 3 });
+      expect(history.certificates.map((item) => item.id)).not.toContain(certificate.id);
+      const retainedTask = f.store.tasks.getById(f.taskId);
+      const retainedAttempts = f.store.tasks.listAttempts(f.taskId);
+      const retainedEvents = f.store.events.listForBuild(f.buildId);
+      const result = await evaluateGovernedBuild(f.context, f.buildId);
+      const observation = observed.mock.calls.at(-1)?.[0].observation;
+      if (process.env.TCP002_HISTORICAL_OUTPUT_ROOT !== undefined) {
+        await mkdir(process.env.TCP002_HISTORICAL_OUTPUT_ROOT, { recursive: true });
+        await writeFile(path.join(process.env.TCP002_HISTORICAL_OUTPUT_ROOT, "canonical-history-2-failures-current-retry-certificate.actual.json"), JSON.stringify({
+          schemaVersion: 1,
+          classification: "CANONICAL_SHAPE_NATIVE_PROVENANCE_CONFORMANCE_NOT_TRAFFIC_CONTROL_CUMULATIVE_PARITY",
+          buildId: f.buildId,
+          taskId: f.taskId,
+          attempts: retainedAttempts.map((attempt) => ({ id: attempt.id, attempt: attempt.attempt, status: attempt.status, errorCode: attempt.errorCode, resultCommit: attempt.resultCommit })),
+          certificates: [...history.certificates, certificate].map((item) => ({ id: item.id, attempt: item.body.producer.attempt, publicationSequence: retainedEvents.find((event) => event.type === "evidence.native_validation_certified" && event.payload.certificateId === item.id)?.sequence })),
+          failures: history.frames.map((event) => ({ eventType: event.type, sequence: event.sequence, taskId: event.taskId, nativeFrame: event.payload.governorFailure })),
+          action: result?.decision.action,
+          observation,
+          expectedCanonicalHistory: history.snapshots,
+        }, null, 2));
+      }
+      expect(result?.decision.action).toBe("CONTINUE");
+      expect(observation?.failure).toBeNull();
+      expect(observation?.failureRepeatCount).toBe(0);
+      expect(observation?.failureHistory).toEqual(history.snapshots);
+      expect(observation?.evidence).toEqual({ items: [certificate.id], satisfied: [certificate.body.artifact.name], contradictory: [] });
+      expect(f.store.tasks.getById(f.taskId)).toEqual(retainedTask);
+      expect(f.store.tasks.listAttempts(f.taskId)).toEqual(retainedAttempts);
+      expect(f.store.events.listForBuild(f.buildId).filter((event) => event.sequence <= (retainedEvents.at(-1)?.sequence ?? 0))).toEqual(retainedEvents);
+    } finally { observed.mockRestore(); f.cleanup(); }
+  });
+
+  it("refuses malformed contradiction history before an actual native integration failure", async () => {
+    const f = await nativeEvidenceFixture(false, undefined, true);
+    try {
+      await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+      expect(await readVerifiedNativeValidationEvidence(f, f.buildId, f.handoff)).toHaveLength(1);
+      // Deliberate negative corruption in this disposable journal, not a
+      // positive native evidence producer or an invented failure frame.
+      const malformed = f.store.events.append({ buildId: f.buildId, taskId: f.taskId, type: "evidence.recorded", payload: { contradictory: [{ unsupported: true }] } });
+      await failNativeIntegrationFixture(f);
+      const failure = f.store.events.listForBuild(f.buildId).find((event) => event.type === "integration.failed");
+      expect(malformed.sequence).toBeLessThan(failure?.sequence ?? 0);
+      expect(f.store.tasks.getAttempt(f.taskId, 1)).toMatchObject({ status: "failed", errorCode: "INTEGRATION_VALIDATION_FAILED" });
+      await expect(evaluateGovernedBuild(f.context, f.buildId)).rejects.toThrow("GOVERNED_FAILURE_HISTORY_UNAVAILABLE");
+      expect(f.store.events.listForBuild(f.buildId).some((event) => event.type === "governor.decision")).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it.each(["missing-old-certificate", "unsupported-old-frame"] as const)("refuses canonical history with %s even after a later retry clears the active failure", async (defect) => {
+    const f = await nativeEvidenceFixture(false, undefined, true);
+    try {
+      const history = await nativeIntegrationHistoryFixture(f, 2);
+      const retry = await retryCapabilityFixture(f);
+      expect(retry.readyForCommit, JSON.stringify(retry)).toBe(true);
+      const firstCertificate = history.certificates[0]; const firstFrame = history.frames[0];
+      if (firstCertificate === undefined || firstFrame === undefined) throw new Error("Missing actual earlier native sources");
+      // Corrupt only a disposable negative source after actual native producers
+      // have emitted all certificates and failure frames; no positive frame is seeded.
+      if (defect === "missing-old-certificate") await rm(firstCertificate.sourcePath);
+      else f.store.database.prepare("UPDATE build_events SET event_type = 'unit.unsupported_failure' WHERE sequence = ?").run(firstFrame.sequence);
+      await expect(evaluateGovernedBuild(f.context, f.buildId)).rejects.toThrow("GOVERNED_FAILURE_HISTORY_UNAVAILABLE");
+      expect(f.store.events.listForBuild(f.buildId).some((event) => event.type === "governor.decision")).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
   it("uses retained native publication context after actual integration failure without reviving current evidence", async () => {
     const f = await nativeEvidenceFixture(false, undefined, true);
     const observed = vi.spyOn(GovernorControlService.prototype, "evaluate");

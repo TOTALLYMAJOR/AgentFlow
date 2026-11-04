@@ -37,6 +37,11 @@ export interface TrafficControlFailure {
   fingerprint: string;
 }
 
+export interface TrafficControlFailureSnapshot {
+  fingerprint: string;
+  evidence: TrafficControlObservation["evidence"];
+}
+
 export interface TrafficControlObservation {
   schema: "traffic-control/execution-observation@1";
   buildId: string;
@@ -49,7 +54,7 @@ export interface TrafficControlObservation {
   impactedPaths: string[];
   activeTaskCollisions: string[];
   failure: TrafficControlFailure | null;
-  failureHistory: TrafficControlFailure[];
+  failureHistory: Array<TrafficControlFailure | TrafficControlFailureSnapshot>;
   failureRepeatCount: number;
   evidenceDelta: { newItems: string[]; newlySatisfied: string[]; newContradictions: string[]; score: number; direction: "POSITIVE" | "NEGATIVE" | "ZERO" };
   impactDelta: { unexpectedChangedPaths: string[]; unexpectedImpactedPaths: string[]; activeTaskCollisions: string[]; expanded: boolean };
@@ -68,6 +73,7 @@ export interface AgentFlowObservationInput {
   activeTaskCollisions: string[];
   evidence: TrafficControlObservation["evidence"];
   failures: TrafficControlFailure[];
+  failureSnapshots?: TrafficControlFailureSnapshot[];
   currentFailure?: TrafficControlFailure | null | undefined;
   previousEvidence?: TrafficControlObservation["evidence"];
   structuralConcern?: { reason: string; source?: string } | null;
@@ -108,9 +114,12 @@ export function projectAgentFlowObservation(input: AgentFlowObservationInput): T
   const unexpectedImpactedPaths = sortedUnique(input.impactedPaths.filter((impactedPath) => !pathAllowed(impactedPath, plannedPaths)));
   const collisions = sortedUnique(input.activeTaskCollisions);
   const evidence = normalizeEvidence(input.evidence);
-  const failureHistory = input.failures.map((failure) => ({ ...failure, fingerprint: failure.fingerprint || fingerprintFailure(failure) }));
+  const failures = input.failures.map((failure) => ({ ...failure, fingerprint: failure.fingerprint || fingerprintFailure(failure) }));
+  // The native caller owns source verification. Absence preserves the legacy
+  // flattened contract; explicit snapshots must account for every raw failure.
+  const failureHistory = input.failureSnapshots === undefined ? failures : normalizeFailureSnapshots(failures, input.failureSnapshots);
   const failure = input.currentFailure === undefined
-    ? failureHistory.at(-1) ?? null
+    ? failures.at(-1) ?? null
     : input.currentFailure === null
       ? null
       : { ...input.currentFailure, fingerprint: input.currentFailure.fingerprint || fingerprintFailure(input.currentFailure) };
@@ -169,6 +178,23 @@ function requireAuthority(authority: TrafficControlAuthority): void {
 
 function normalizeEvidence(value: TrafficControlObservation["evidence"]): TrafficControlObservation["evidence"] {
   return { items: sortedUnique(value.items), satisfied: sortedUnique(value.satisfied), contradictory: sortedUnique(value.contradictory) };
+}
+
+function normalizeFailureSnapshots(failures: TrafficControlFailure[], snapshots: unknown): TrafficControlFailureSnapshot[] {
+  const invalid = (): never => { throw new TypeError("Authoritative failure history snapshots must match every native failure and its evidence"); };
+  const strings = (values: unknown): values is string[] => Array.isArray(values) && Array.from(values).every((value: unknown) => typeof value === "string");
+  if (!Array.isArray(snapshots) || snapshots.length !== failures.length) return invalid();
+  return Array.from(snapshots, (snapshot: unknown, index) => {
+    if (snapshot === null || typeof snapshot !== "object") return invalid();
+    const record = snapshot as Record<string, unknown>;
+    const fingerprint = record.fingerprint;
+    const failure = failures[index];
+    if (failure === undefined || typeof fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(fingerprint) || fingerprint !== failure.fingerprint || fingerprint !== fingerprintFailure(failure)) return invalid();
+    if (record.evidence === null || typeof record.evidence !== "object") return invalid();
+    const evidence = record.evidence as Record<string, unknown>;
+    if (!strings(evidence.items) || !strings(evidence.satisfied) || !strings(evidence.contradictory)) return invalid();
+    return { fingerprint, evidence: normalizeEvidence({ items: evidence.items, satisfied: evidence.satisfied, contradictory: evidence.contradictory }) };
+  });
 }
 
 function evidenceDelta(previous: TrafficControlObservation["evidence"], current: TrafficControlObservation["evidence"]): TrafficControlObservation["evidenceDelta"] {

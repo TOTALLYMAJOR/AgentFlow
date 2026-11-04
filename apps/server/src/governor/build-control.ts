@@ -5,7 +5,7 @@ import path from "node:path";
 import { z } from "zod";
 import type { AgentFlowContext } from "../http/context.js";
 import { canonicalJsonSha256, loadGovernedTaskHandoff, backlogHandoffErrors, usesNativeValidationEvidence, nativeValidationEvidenceProfileErrors, NATIVE_VALIDATION_EVIDENCE_TYPE, NATIVE_VALIDATION_EVIDENCE_VERSION, type GovernedTaskHandoff } from "../integration/design-intelligence.js";
-import { bindTrafficControlContract, fingerprintFailure, projectAgentFlowObservation, type TrafficControlFailure } from "../integration/traffic-control.js";
+import { bindTrafficControlContract, fingerprintFailure, projectAgentFlowObservation, type TrafficControlFailure, type TrafficControlFailureSnapshot } from "../integration/traffic-control.js";
 import type { BuildEventEntity } from "../db/index.js";
 import { nowIso } from "../util/ids.js";
 import { DEFAULT_RETRYABLE_FAILURE_CODES } from "../orchestration/retry-policy.js";
@@ -48,7 +48,7 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
   }));
   // Bind historical projection inputs before the first current-verifier await,
   // including facts without an event producer such as changed-file records.
-  const historyInputs = usesNativeValidationEvidence(handoff) && tasks.some((task) => task.state === "failed") ? historicalProjectionInputs(dependencies, buildId) : undefined;
+  const historyInputs = usesNativeValidationEvidence(handoff) && tasks.some((task) => dependencies.store.tasks.listAttempts(task.id).some((attempt) => attempt.errorCode !== null)) ? historicalProjectionInputs(dependencies, buildId) : undefined;
   const certificates = usesNativeValidationEvidence(handoff) ? await readVerifiedNativeValidationEvidence(dependencies, buildId, handoff) : [];
   if (usesNativeValidationEvidence(handoff)) {
     const currentBuild = dependencies.store.builds.getById(buildId);
@@ -58,8 +58,8 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     // native writes. A crash between them must not look like no active failure.
     if (tasks.some((task) => task.state === "failed" && !dependencies.store.tasks.listAttempts(task.id).some((attempt) => attempt.buildId === buildId && attempt.taskId === task.id && attempt.attempt === task.attempt && attempt.status === "failed" && attempt.errorCode !== null))) throw new Error("GOVERNED_FAILURE_HISTORY_UNAVAILABLE: failed task and current native attempt are inconsistent");
   }
-  // Certificate verification awaits private bytes. Capture contradictions and
-  // chain predecessor only after it, with no further await before evaluation.
+  // Certificate verification awaits private bytes. Capture ordered events
+  // after it; all additional historical reads are fenced before projection.
   const events = nativeEvidenceEvents(dependencies, buildId);
   const legacyEvidence = evidenceBefore(events, Infinity);
   const evidence = usesNativeValidationEvidence(handoff)
@@ -87,14 +87,30 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
       }),
   );
   const context = failureEvidenceBaseline(events, buildId, failureSources, currentFailure, usesNativeValidationEvidence(handoff));
+  // A successful retry clears the active failure, not the provenance needed
+  // to describe older failures. This extra context never revives that failure.
+  const historyContext = context ?? (usesNativeValidationEvidence(handoff) && failures.length > 0 ? failureEvidenceBaseline(events, buildId, failureSources, failures.at(-1) ?? null, true) : undefined);
   let previousEvidence = context?.baseline;
-  if (usesNativeValidationEvidence(handoff) && context !== undefined) {
+  let failureSnapshots: TrafficControlFailureSnapshot[] | undefined;
+  let orderedFailures = failures;
+  if (usesNativeValidationEvidence(handoff) && historyContext !== undefined) {
     requireHistoricalContext(historyInputs !== undefined);
-    const historical = await readHistoricalNativePublicationContext(dependencies, buildId, handoff, events, context);
+    orderedFailures = historyContext.frames.map((frame) => frame.source.failure);
+    failureSnapshots = [];
+    for (const frame of historyContext.frames) {
+      const historical = await readHistoricalNativePublicationContext(dependencies, buildId, handoff, events, { ...historyContext, boundary: frame });
+      const contradictory = events.filter((event) => event.sequence < frame.sequence && event.type === "evidence.recorded").flatMap((event) => {
+        const parsed = z.array(z.string()).safeParse(event.payload.contradictory === undefined ? [] : event.payload.contradictory);
+        requireHistoricalContext(parsed.success);
+        return parsed.data;
+      });
+      const snapshot = { fingerprint: frame.fingerprint, evidence: { ...historical, contradictory } };
+      failureSnapshots.push(snapshot);
+      if (context?.boundary.sequence === frame.sequence) previousEvidence = snapshot.evidence;
+    }
     // Historical reads do not relax the current verifier or its async fence.
     const current = await readVerifiedNativeValidationEvidence(dependencies, buildId, handoff);
     requireHistoricalContext(equalNativeEvidence(current.map((item) => item.id), certificates.map((item) => item.id)) && equalNativeEvidence(historyInputs, historicalProjectionInputs(dependencies, buildId)));
-    previousEvidence = { ...historical, contradictory: context.baseline.contradictory };
     // No await after this full native record/event fence before projection.
   }
   const changedOwners = new Map<string, Set<string>>();
@@ -126,8 +142,9 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     impactedPaths: [],
     activeTaskCollisions: [...changedOwners.entries()].filter(([, owners]) => owners.size > 1).map(([changedPath]) => changedPath),
     evidence,
-    failures,
+    failures: orderedFailures,
     currentFailure,
+    ...(failureSnapshots === undefined ? {} : { failureSnapshots }),
     ...(previousEvidence === undefined ? {} : { previousEvidence }),
   });
   const prior = events.filter((event) => event.type === "governor.decision").at(-1)?.payload.recordHash;
@@ -195,8 +212,8 @@ const historicalCertificateSchema = z.object({
 }).strict();
 
 // Verify publication context from retained exact bytes and native sequence.
-// This is ONLY a previous-evidence comparison baseline, never current proof or
-// a reconstruction of omitted historical artifact fields or complete state.
+// This supplies historical snapshots and comparison baselines, never current
+// proof or omitted historical artifact fields or complete state.
 async function readHistoricalNativePublicationContext(dependencies: GovernorDependencies, buildId: string, handoff: GovernedTaskHandoff, events: BuildEventEntity[], context: FailureEvidenceContext): Promise<Evidence> {
   try {
     requireHistoricalContext(usesNativeValidationEvidence(handoff) && nativeValidationEvidenceProfileErrors(handoff).length === 0);
