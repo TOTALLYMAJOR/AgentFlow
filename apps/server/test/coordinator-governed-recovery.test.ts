@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDatabaseRepositories } from "../src/db/index.js";
@@ -34,14 +35,19 @@ describe("actual coordinator recovered integration governance", () => {
       tasks: [{ id: "AF-001", title: "Task", description: "Task", estimateHours: 1, dependsOn: [], owns: ["src"], acceptanceCriteria: ["Passes"], validate: ["npm test"], produces: [], consumes: [] }],
     });
     await writeFile(path.join(root, "handoff.json"), JSON.stringify(handoff));
-    const plan = planBacklogMarkdown(renderBacklog(handoff, "handoff.json", "BACKLOG.md")).plan;
+    const backlogContents = renderBacklog(handoff, "handoff.json", "BACKLOG.md");
+    const plan = planBacklogMarkdown(backlogContents).plan;
     if (plan === undefined) throw new Error("Expected unit fixture native plan");
     store.repositories.create({ id: "repo", name: "test", localPath: root, configPath: ".agentflow.yaml", baseBranch: "main" });
+    // Persist and lock the native plan through BuildRepository rather than
+    // constructing a planless governed snapshot; retain the fake Git boundary.
+    const backlogSha256 = createHash("sha256").update(backlogContents).digest("hex");
+    const repositoryConfig = { version: 1, repository: { name: "test", base_branch: "main" }, backlog: { path: "BACKLOG.md" }, workers: { maximum: 1 }, contracts: { roots: [] }, validation: { task_default: ["npm test"], integration: ["npm test"] }, docker: { enabled: false, compose_file: "compose.yaml" }, git: { remote: "origin", push_task_branches: false, push_integration_branch: false } };
+    const normalizedPlan = { ...plan, id: "plan", repositoryId: "repo", backlogPath: "BACKLOG.md", backlogSha256, createdAt: new Date().toISOString(), governedHandoff: { id: handoff.handoffId, sha256: canonicalJsonSha256(handoff), path: "handoff.json", governedBaseCommit: handoff.repository.baseCommit, carrierPaths: ["handoff.json", "BACKLOG.md"], proofBoundary: handoff.proof.claimBoundary } };
+    store.plans.create({ id: "plan", repositoryId: "repo", backlogPath: "BACKLOG.md", backlogSha256, backlogContents, repositoryConfig, normalizedPlan });
     store.builds.create({
-      id: "build", repositoryId: "repo", backlogPath: "BACKLOG.md", baseCommit: handoff.repository.baseCommit,
+      id: "build", planId: "plan", repositoryId: "repo", backlogPath: "BACKLOG.md", baseCommit: handoff.repository.baseCommit,
       integrationBranch: "integration", integrationWorktree: integrationPath, status: "running",
-      repositoryConfig: { version: 1, repository: { name: "test", base_branch: "main" }, backlog: { path: "BACKLOG.md" }, workers: { maximum: 1 }, contracts: { roots: [] }, validation: { task_default: ["npm test"], integration: ["npm test"] }, docker: { enabled: false, compose_file: "compose.yaml" }, git: { remote: "origin", push_task_branches: false, push_integration_branch: false } },
-      normalizedPlan: { ...plan, createdAt: new Date().toISOString(), governedHandoff: { id: handoff.handoffId, sha256: canonicalJsonSha256(handoff), path: "handoff.json", governedBaseCommit: handoff.repository.baseCommit, carrierPaths: ["handoff.json", "BACKLOG.md"], proofBoundary: handoff.proof.claimBoundary } },
       tasks: [{ id: "task", backlogTaskId: "AF-001", title: "Task", description: "Task", acceptanceCriteria: ["Passes"], state: "running", attempt: 1, baseCommit: handoff.repository.baseCommit, branchName: "task-branch", worktreePath: root }],
     });
     store.tasks.createAttempt({ id: "attempt", taskId: "task", buildId: "build", attempt: 1, status: "running" });

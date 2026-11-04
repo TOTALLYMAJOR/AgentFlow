@@ -4,6 +4,7 @@ import { access, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   BuildEntity,
+  PlanEntity,
   DatabaseRepositories,
   TaskEntity,
   ValidationStatus,
@@ -61,7 +62,7 @@ import {
 import type { OrganizationPolicy } from "../governance/organization-policy.js";
 import { evaluateGovernedBuild, publishNativeValidationEvidence } from "../governor/build-control.js";
 
-import { canonicalJsonSha256, loadGovernedTaskHandoff, verifyGovernedHandoffForExecution } from "../integration/design-intelligence.js";
+import { backlogHandoffErrors, canonicalJsonSha256, governedPlanSnapshotSha256, loadGovernedTaskHandoff, verifyGovernedHandoffForExecution } from "../integration/design-intelligence.js";
 import { fingerprintFailure } from "../integration/traffic-control.js";
 import { loadBoundWaleExperiment, validateWaleExperimentAdmission, verifyWaleExperimentGitTree } from "../integration/wale-run-lab.js";
 
@@ -216,13 +217,14 @@ export class BuildCoordinator {
   async validateExecutionAuthority(build: BuildEntity): Promise<void> {
     const experiment = loadBoundWaleExperiment(this.store.events, build.id);
     const capturedPlan: unknown = build.normalizedPlan;
-    // Preserve only the native pre-snapshot build shape. A missing current
-    // executionBaseCommit alone must never select legacy compatibility.
-    if (experiment === undefined && build.backlogSha256 === null && build.backlogContents === ""
-      && capturedPlan !== null && typeof capturedPlan === "object" && !Array.isArray(capturedPlan)
-      && Object.keys(capturedPlan).length === 0) return;
     const plan = build.planId === null ? undefined : this.store.plans.getById(build.planId);
     const governed = plan?.normalizedPlan.governedHandoff;
+    // Preserve only the native pre-snapshot build shape. A missing current
+    // executionBaseCommit alone must never select legacy compatibility, and
+    // clearing build data cannot erase the linked plan's current binding.
+    if (experiment === undefined && build.backlogSha256 === null && build.backlogContents === ""
+      && capturedPlan !== null && typeof capturedPlan === "object" && !Array.isArray(capturedPlan)
+      && Object.keys(capturedPlan).length === 0 && governed?.executionBaseCommit === undefined) return;
     if (governed === undefined) {
       if (experiment !== undefined) throw new AgentFlowError("WALE_EXPERIMENT_REQUIRES_GOVERNED_PLAN", "Experiment requires a governed immutable plan", 409);
       if (capturedPlan !== null && typeof capturedPlan === "object"
@@ -241,9 +243,15 @@ export class BuildCoordinator {
     const verification = await verifyGovernedHandoffForExecution(root, handoff, governed.carrierPaths);
     if (verification.errors.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_NOT_EXECUTABLE", "Governed authority is no longer executable", 409);
     if (governed.executionBaseCommit === undefined || verification.currentHead !== governed.executionBaseCommit || build.baseCommit !== governed.executionBaseCommit) throw new AgentFlowError("GOVERNED_EXECUTION_SNAPSHOT_STALE", "Exact execution snapshot changed", 409);
+    // Runtime construction and worker prompts consume the captured build
+    // snapshot. Rechecking only the current handoff does not bind that data
+    // to the immutable plan that the operator actually reviewed.
+    assertGovernedPlanSnapshot(build, plan);
+    const scopeDrift = backlogHandoffErrors(plan.normalizedPlan.tasks, handoff);
+    if (scopeDrift.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_SCOPE_DRIFT", "The immutable plan differs from its approved handoff scope", 409, scopeDrift);
     if (experiment !== undefined) {
       const governedGitTree = await verifyWaleExperimentGitTree(experiment, root, handoff);
-      if (plan !== undefined) validateWaleExperimentAdmission(experiment, { plan, handoff, buildBaseCommit: build.baseCommit, governedGitTree });
+      validateWaleExperimentAdmission(experiment, { plan, handoff, buildBaseCommit: build.baseCommit, governedGitTree });
     }
   }
 
@@ -258,6 +266,7 @@ export class BuildCoordinator {
     if (!["paused", "interrupted"].includes(build.status)) {
       throw new Error(`Build ${buildId} cannot resume from ${build.status}`);
     }
+    await this.validateExecutionAuthority(build);
     await this.ensureRuntime(build);
     for (const task of this.store.tasks.listForBuild(buildId)) {
       if (
@@ -1690,6 +1699,23 @@ export class BuildCoordinator {
   private async ensureRuntime(
     build: BuildEntity,
   ): Promise<GitWorktreeManager> {
+    // Recovery and scheduler callers may retain older BuildEntity objects.
+    // Check authoritative captured data before creating OR reusing runtime.
+    // This is a local snapshot comparison, not a Git audit on every tick.
+    build = this.store.builds.getById(build.id);
+    const plan = build.planId === null ? undefined : this.store.plans.getById(build.planId);
+    const governed = plan?.normalizedPlan.governedHandoff;
+    const captured: unknown = build.normalizedPlan;
+    const legacy = build.backlogSha256 === null && build.backlogContents === ""
+      && captured !== null && typeof captured === "object" && !Array.isArray(captured)
+      && Object.keys(captured).length === 0 && governed?.executionBaseCommit === undefined
+      && loadBoundWaleExperiment(this.store.events, build.id) === undefined;
+    if (!legacy) {
+      if (governed !== undefined) assertGovernedPlanSnapshot(build, plan);
+      else if (captured !== null && typeof captured === "object" && Object.hasOwn(captured, "governedHandoff")) {
+        throw new AgentFlowError("GOVERNED_HANDOFF_DRIFT", "Captured governed build no longer matches its immutable plan binding", 409);
+      }
+    }
     const existing = this.worktrees.get(build.id);
     if (existing !== undefined) {
       return existing;
@@ -2403,6 +2429,13 @@ function isProcessAlive(processId: number | null): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function assertGovernedPlanSnapshot(build: BuildEntity, plan: PlanEntity | undefined): asserts plan is PlanEntity {
+  if (plan === undefined || plan.id !== build.planId || plan.lockedAt === null
+    || governedPlanSnapshotSha256(plan) !== governedPlanSnapshotSha256(build)) {
+    throw new AgentFlowError("GOVERNED_PLAN_SNAPSHOT_DRIFT", "Captured build data differs from its locked immutable plan", 409);
+  }
 }
 
 function isAbortRequested(signal: AbortSignal | undefined): boolean {

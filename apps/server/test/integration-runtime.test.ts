@@ -48,14 +48,14 @@ afterEach(async () => {
 });
 
 describe("Run Lab authority overlay compatibility", () => {
-  it("preserves unbound native governed legacy builds without new snapshot or handoff requirements", async () => {
+  it("preserves unbound native governed legacy builds after reading their retained plan classification", async () => {
     const fixture = await createFixture("unbound-legacy", []);
     const getPlan = vi.fn(() => ({ normalizedPlan: { governedHandoff: { id: "legacy", path: "moved-away.json", carrierPaths: [], sha256: "a".repeat(64) } } }));
     const getRepository = vi.fn(() => { throw new Error("must not recheck unbound native authority"); });
     const coordinator = { store: { events: fixture.store.events, plans: { getById: getPlan } }, repositoryService: { get: getRepository } } as unknown as BuildCoordinator;
     const build = { ...fixture.store.builds.getById(fixture.buildId), planId: "legacy-plan" };
     await expect(BuildCoordinator.prototype.validateExecutionAuthority.call(coordinator, build)).resolves.toBeUndefined();
-    expect(getPlan).not.toHaveBeenCalled();
+    expect(getPlan).toHaveBeenCalledExactlyOnceWith("legacy-plan");
     expect(getRepository).not.toHaveBeenCalled();
   });
 

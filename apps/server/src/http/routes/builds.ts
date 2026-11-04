@@ -15,7 +15,7 @@ import {
   runGit,
 } from "../../repositories/index.js";
 import { GitCommandRunner, GitWorktreeManager, isPathInside } from "../../git/index.js";
-import { canonicalJsonSha256, loadGovernedTaskHandoff, verifyGovernedHandoffForExecution } from "../../integration/design-intelligence.js";
+import { backlogHandoffErrors, canonicalJsonSha256, governedPlanSnapshotSha256, loadGovernedTaskHandoff, verifyGovernedHandoffForExecution } from "../../integration/design-intelligence.js";
 import { validateWaleExperimentAdmission, verifyWaleExperimentGitTree, type WaleRunLabExperiment } from "../../integration/wale-run-lab.js";
 import type { GovernedTaskHandoff } from "../../integration/design-intelligence.js";
 import { createId } from "../../util/ids.js";
@@ -383,11 +383,18 @@ export async function createBuildForPlan(
     const verification = await verifyGovernedHandoffForExecution(repository.localPath, handoff, governed.carrierPaths);
     if (verification.errors.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_NOT_EXECUTABLE", "The governed handoff is not executable at the current repository snapshot", 409, verification.errors);
     if (governed.executionBaseCommit === undefined || verification.currentHead !== governed.executionBaseCommit) throw new AgentFlowError("GOVERNED_EXECUTION_SNAPSHOT_STALE", "The immutable plan no longer matches the exact execution snapshot", 409, { expected: governed.executionBaseCommit, actual: verification.currentHead });
+    const scopeDrift = backlogHandoffErrors(plan.normalizedPlan.tasks, handoff);
+    if (scopeDrift.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_SCOPE_DRIFT", "The plan differs from its approved handoff scope", 409, scopeDrift);
   }
   const baseCommit = (await runGit(repository.localPath, ["rev-parse", `${repository.baseBranch}^{commit}`])).stdout.trim();
   const governedGitTree = experiment === undefined || admittedHandoff === undefined ? undefined : await verifyWaleExperimentGitTree(experiment, repository.localPath, admittedHandoff);
   const boundExperiment = experiment === undefined ? undefined : validateWaleExperimentAdmission(experiment, { governedGitTree, plan, ...(admittedHandoff === undefined ? {} : { handoff: admittedHandoff }), buildBaseCommit: baseCommit });
   return context.store.transaction(() => {
+    // Native build creation rereads this row. Compare inside the same existing
+    // transaction so the verified plan is exactly the snapshot it captures.
+    if (admittedHandoff !== undefined && governedPlanSnapshotSha256(context.store.plans.getById(planId)) !== governedPlanSnapshotSha256(plan)) {
+      throw new AgentFlowError("GOVERNED_PLAN_SNAPSHOT_DRIFT", "The plan changed during build admission; create a fresh reviewed plan", 409);
+    }
   if (context.store.builds.findActive(plan.repositoryId) !== undefined) throw new AgentFlowError("ACTIVE_BUILD_EXISTS", "Repository already has an active build", 409);
   if (boundExperiment !== undefined && context.store.events.findByExperimentId(boundExperiment.experimentId) !== undefined) throw new AgentFlowError("WALE_EXPERIMENT_ID_CONFLICT", "Experiment already bound", 409);
   const buildId = createId("build");

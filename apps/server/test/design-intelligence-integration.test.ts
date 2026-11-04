@@ -430,7 +430,177 @@ describe("Design Intelligence integration", () => {
   }, 20_000);
 });
 
+function firstCapturedTask(plan: Record<string, unknown>): Record<string, unknown> {
+  const task = (plan.tasks as Array<Record<string, unknown>>)[0];
+  if (task === undefined) throw new Error("Expected the fixture's captured task");
+  return task;
+}
+
 describe("ordinary governed execution admission", () => {
+  it("checks current captured data when recovery reuses an already constructed runtime", async () => {
+    await withAdmissionFixture(true, async ({ app, context, buildId }) => {
+      vi.spyOn(context.coordinator, "requestTick").mockImplementation(() => {});
+      const started = await app.inject({ method: "POST", url: `/api/builds/${buildId}/start` });
+      expect(started.statusCode, started.body).toBe(200);
+      const staleBuild = context.store.builds.getById(buildId);
+      const task = context.store.tasks.listForBuild(buildId)[0];
+      if (task === undefined) throw new Error("Expected fixture task");
+      context.store.database.prepare("UPDATE builds SET backlog_contents = 'changed' WHERE id = ?").run(buildId);
+      const runtime = vi.spyOn(GitWorktreeManager, "create");
+      await expect(context.coordinator.queueIntegration(staleBuild, task)).rejects.toMatchObject({ code: "GOVERNED_PLAN_SNAPSHOT_DRIFT" });
+      expect(runtime).not.toHaveBeenCalled();
+      expect(context.store.tasks.getById(task.id).state).toBe("ready");
+    });
+  });
+
+  it.each(["paused", "interrupted"] as const)("resumes an unchanged %s governed build with scheduling disabled", async (status) => {
+    await withAdmissionFixture(true, async ({ app, context, buildId }) => {
+      context.store.builds.transition(buildId, "running");
+      context.store.builds.transition(buildId, status);
+      const scheduling = vi.spyOn(context.coordinator, "requestTick").mockImplementation(() => {});
+      const provider = vi.spyOn(context.agentProviders, "get").mockImplementation(() => { throw new Error("TEST_PROVIDER_MUST_NOT_RUN"); });
+      const response = await app.inject({ method: "POST", url: `/api/builds/${buildId}/resume` });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(context.store.builds.getById(buildId).status).toBe("running");
+      expect(scheduling).toHaveBeenCalledExactlyOnceWith(buildId);
+      expect(provider).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each(["paused", "interrupted"] as const)("refuses %s recovery before constructing runtime from a changed snapshot", async (status) => {
+    await withAdmissionFixture(true, async ({ app, context, buildId }) => {
+      context.store.builds.transition(buildId, "running");
+      context.store.builds.transition(buildId, status);
+      context.store.database.prepare("UPDATE builds SET backlog_contents = 'changed' WHERE id = ?").run(buildId);
+      const runtime = vi.spyOn(GitWorktreeManager, "create").mockRejectedValue(new Error("TEST_RUNTIME_MUST_NOT_START"));
+      const response = await app.inject({ method: "POST", url: `/api/builds/${buildId}/resume` });
+      expect(runtime).not.toHaveBeenCalled();
+      expect(response.statusCode, response.body).toBe(409);
+      expect(response.json()).toMatchObject({ error: { code: "GOVERNED_PLAN_SNAPSHOT_DRIFT" } });
+      expect(context.store.builds.getById(buildId).status).toBe(status);
+      expect(context.store.events.listForBuild(buildId).some((event) => event.type === "build.resumed")).toBe(false);
+    });
+  });
+
+  it.each(["resumeValidation", "queueIntegration"] as const)("refuses captured drift before %s recovery creates runtime", async (entry) => {
+    await withAdmissionFixture(true, async ({ context, buildId }) => {
+      context.store.database.prepare("UPDATE builds SET backlog_contents = 'changed' WHERE id = ?").run(buildId);
+      const task = context.store.tasks.listForBuild(buildId)[0];
+      if (task === undefined) throw new Error("Expected fixture task");
+      const runtime = vi.spyOn(GitWorktreeManager, "create").mockRejectedValue(new Error("TEST_RUNTIME_MUST_NOT_START"));
+      await expect(context.coordinator[entry](context.store.builds.getById(buildId), task)).rejects.toMatchObject({ code: "GOVERNED_PLAN_SNAPSHOT_DRIFT" });
+      expect(runtime).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each(["normalized_plan_json", "repository_config_json", "backlog_contents"])("refuses %s changes between verification and atomic build capture", async (column) => {
+    await withAdmissionFixture(true, async ({ app, context, buildId }) => {
+      const original = context.store.builds.getById(buildId);
+      context.store.builds.transition(buildId, "cancelled");
+      const planned = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId: original.repositoryId } });
+      expect(planned.statusCode, planned.body).toBe(201);
+      const planId = planned.json<{ id: string }>().id;
+      const transaction = context.store.transaction.bind(context.store);
+      vi.spyOn(context.store, "transaction").mockImplementationOnce((operation) => {
+        const current = context.store.plans.getById(planId);
+        const value = column === "backlog_contents" ? "changed" : JSON.stringify({ ...(column === "normalized_plan_json" ? current.normalizedPlan : current.repositoryConfig), changed: true });
+        context.store.database.prepare(`UPDATE plans SET ${column} = ? WHERE id = ?`).run(value, planId);
+        return transaction(operation);
+      });
+      const created = await app.inject({ method: "POST", url: "/api/builds", payload: { planId } });
+      expect(created.statusCode, created.body).toBe(409);
+      expect(created.json()).toMatchObject({ error: { code: "GOVERNED_PLAN_SNAPSHOT_DRIFT" } });
+      expect(context.store.builds.findActive(original.repositoryId)).toBeUndefined();
+      expect(context.store.plans.getById(planId).lockedAt).toBeNull();
+    });
+  });
+
+  it.each(["validate", "owns", "acceptanceCriteria"])("refuses build creation when the stored plan's %s no longer matches approval", async (field) => {
+    await withAdmissionFixture(true, async ({ app, context, buildId }) => {
+      const original = context.store.builds.getById(buildId);
+      context.store.builds.transition(buildId, "cancelled");
+      const planned = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId: original.repositoryId } });
+      expect(planned.statusCode, planned.body).toBe(201);
+      const plan = planned.json<Record<string, unknown>>();
+      firstCapturedTask(plan)[field] = ["different-reviewed-scope"];
+      // Native plan immutability starts when a build is created. Simulate
+      // pre-build corruption without removing that trigger or changing approval.
+      context.store.database.prepare("UPDATE plans SET normalized_plan_json = ? WHERE id = ?").run(JSON.stringify(plan), plan.id);
+      const created = await app.inject({ method: "POST", url: "/api/builds", payload: { planId: plan.id } });
+      expect(created.statusCode, created.body).toBe(409);
+      expect(created.json()).toMatchObject({ error: { code: "GOVERNED_HANDOFF_SCOPE_DRIFT" } });
+      expect(context.store.builds.findActive(original.repositoryId)).toBeUndefined();
+      expect(context.store.plans.getById(String(plan.id)).lockedAt).toBeNull();
+    });
+  });
+
+  it("compares canonical snapshot contents without treating JSON property order as drift", async () => {
+    await withAdmissionFixture(true, async ({ context, buildId }) => {
+      const build = context.store.builds.getById(buildId);
+      const reordered = Object.fromEntries(Object.entries(build.normalizedPlan).reverse());
+      context.store.database.prepare("UPDATE builds SET normalized_plan_json = ? WHERE id = ?").run(JSON.stringify(reordered), buildId);
+      await expect(context.coordinator.validateExecutionAuthority(context.store.builds.getById(buildId))).resolves.toBeUndefined();
+    });
+  });
+
+  it("does not downgrade a current governed plan by clearing every captured snapshot marker", async () => {
+    await withAdmissionFixture(true, async ({ app, context, buildId }) => {
+      context.store.database.prepare("UPDATE builds SET normalized_plan_json = '{}', backlog_sha256 = NULL, backlog_contents = '' WHERE id = ?").run(buildId);
+      const runtime = vi.spyOn(GitWorktreeManager, "create").mockRejectedValue(new Error("TEST_RUNTIME_MUST_NOT_START"));
+      const response = await app.inject({ method: "POST", url: `/api/builds/${buildId}/start` });
+      expect(runtime).not.toHaveBeenCalled();
+      expect(response.statusCode, response.body).toBe(409);
+      expect(response.json()).toMatchObject({ error: { code: "GOVERNED_PLAN_SNAPSHOT_DRIFT" } });
+    });
+  });
+
+  it.each([
+    { name: "task validation", column: "normalized_plan_json", change: (value: Record<string, unknown>) => { firstCapturedTask(value).validate = ["node -e 'process.exit(0)'"]; } },
+    { name: "task acceptance", column: "normalized_plan_json", change: (value: Record<string, unknown>) => { firstCapturedTask(value).acceptanceCriteria = ["A different result"]; } },
+    { name: "task ownership", column: "normalized_plan_json", change: (value: Record<string, unknown>) => { firstCapturedTask(value).owns = ["outside-reviewed-scope/"]; } },
+    { name: "removed handoff binding", column: "normalized_plan_json", change: (value: Record<string, unknown>) => { delete value.governedHandoff; } },
+    { name: "substituted handoff digest", column: "normalized_plan_json", change: (value: Record<string, unknown>) => { (value.governedHandoff as Record<string, unknown>).sha256 = "f".repeat(64); } },
+    { name: "plan identity", column: "normalized_plan_json", change: (value: Record<string, unknown>) => { value.id = "substituted-plan"; } },
+    { name: "repository configuration", column: "repository_config_json", change: (value: Record<string, unknown>) => { (value.validation as Record<string, unknown>).integration = ["node -e 'process.exit(0)'"]; } },
+  ])("refuses Start when captured $name differs from the immutable plan", async ({ column, change }) => {
+    await withAdmissionFixture(true, async ({ app, context, buildId }) => {
+      const build = context.store.builds.getById(buildId);
+      const captured = structuredClone(column === "normalized_plan_json" ? build.normalizedPlan : build.repositoryConfig);
+      change(captured);
+      // Fault injection into disposable SQLite only. The approved source and
+      // locked plan stay intact; no real provider or runtime may be reached.
+      context.store.database.prepare(`UPDATE builds SET ${column} = ? WHERE id = ?`).run(JSON.stringify(captured), buildId);
+      const runtime = vi.spyOn(GitWorktreeManager, "create").mockRejectedValue(new Error("TEST_RUNTIME_MUST_NOT_START"));
+      const provider = vi.spyOn(context.agentProviders, "get").mockImplementation(() => { throw new Error("TEST_PROVIDER_MUST_NOT_RUN"); });
+
+      const response = await app.inject({ method: "POST", url: `/api/builds/${buildId}/start` });
+
+      expect(runtime).not.toHaveBeenCalled();
+      expect(response.statusCode, response.body).toBe(409);
+      expect(response.json()).toMatchObject({ error: { code: "GOVERNED_PLAN_SNAPSHOT_DRIFT" } });
+      expect(context.store.builds.getById(buildId).status).toBe("ready");
+      expect(runtime).not.toHaveBeenCalled();
+      expect(provider).not.toHaveBeenCalled();
+      expect(context.store.events.listForBuild(buildId).some((event) => event.type === "build.started")).toBe(false);
+    });
+  });
+
+  it.each([
+    ["backlog_path", "different-backlog.md"],
+    ["backlog_sha256", "f".repeat(64)],
+    ["backlog_contents", "# Substituted backlog\n"],
+  ])("refuses captured %s drift before starting a governed runtime", async (column, value) => {
+    await withAdmissionFixture(true, async ({ app, context, buildId }) => {
+      context.store.database.prepare(`UPDATE builds SET ${column} = ? WHERE id = ?`).run(value, buildId);
+      const runtime = vi.spyOn(GitWorktreeManager, "create").mockRejectedValue(new Error("TEST_RUNTIME_MUST_NOT_START"));
+      const response = await app.inject({ method: "POST", url: `/api/builds/${buildId}/start` });
+      expect(response.statusCode, response.body).toBe(409);
+      expect(response.json()).toMatchObject({ error: { code: "GOVERNED_PLAN_SNAPSHOT_DRIFT" } });
+      expect(runtime).not.toHaveBeenCalled();
+      expect(context.store.builds.getById(buildId).status).toBe("ready");
+    });
+  });
+
   it.each([
     {
       name: "authority source changes",

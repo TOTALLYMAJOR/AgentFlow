@@ -201,6 +201,25 @@ export function canonicalJsonSha256(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(sortJson(value))).digest("hex");
 }
 
+/** Material plan data copied into a build; lifecycle fields are not authority. */
+export function governedPlanSnapshotSha256(snapshot: {
+  repositoryId: string;
+  backlogPath: string;
+  backlogSha256: string | null;
+  backlogContents: string;
+  repositoryConfig: Record<string, unknown>;
+  normalizedPlan: unknown;
+}): string {
+  return canonicalJsonSha256({
+    repositoryId: snapshot.repositoryId,
+    backlogPath: snapshot.backlogPath,
+    backlogSha256: snapshot.backlogSha256,
+    backlogContents: snapshot.backlogContents,
+    repositoryConfig: snapshot.repositoryConfig,
+    normalizedPlan: snapshot.normalizedPlan,
+  });
+}
+
 export async function loadGovernedTaskHandoff(path: string): Promise<GovernedTaskHandoff> {
   return GovernedTaskHandoffSchema.parse(JSON.parse(await readFile(path, "utf8")));
 }
