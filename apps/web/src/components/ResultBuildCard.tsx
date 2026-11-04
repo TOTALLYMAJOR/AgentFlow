@@ -255,7 +255,7 @@ export function ResultBuildCard({
           <div className="subsection-heading">
             <div>
               <h3 id={`outcomes-${build.id}`}>What changed</h3>
-              <p>{build.tasks?.length ?? 0} reviewed steps</p>
+              <p>{build.tasks?.length ?? 0} tasks</p>
             </div>
           </div>
           {build.tasks?.length === 0 || build.tasks === undefined ? (
