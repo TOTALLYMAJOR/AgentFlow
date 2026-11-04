@@ -15,50 +15,139 @@ jobs:
   quality:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: wale-native-ci
+    defaults:
+      run:
+        working-directory: agentflow
     steps:
       - uses: actions/checkout@v6
+        with:
+          path: agentflow
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: agentflow/package-lock.json
       - run: npm ci
-      - run: npm run verify
+      - uses: ./agentflow/.github/actions/native-fixtures
+        with:
+          native-read-key: ${{ secrets.WALE_NATIVE_READ_KEY }}
+      - name: Verify with private native fixtures
+        run: |
+          umask 077
+          private_dir="$(mktemp -d "$RUNNER_TEMP/native-verify-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB.XXXXXX")"
+          status=0
+          npm run verify >"$private_dir/verify.log" 2>&1 || status=$?
+          if [ "$status" -ne 0 ]; then
+            printf '%s\n' 'Native verification failed; private diagnostics retained on the runner.'
+            exit "$status"
+          fi
+          printf '%s\n' 'Native verification passed.'
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: wale-native-ci
+    defaults:
+      run:
+        working-directory: agentflow
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          path: agentflow
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: agentflow/package-lock.json
       - run: npm ci
+      - uses: ./agentflow/.github/actions/native-fixtures
+        with:
+          native-read-key: ${{ secrets.WALE_NATIVE_READ_KEY }}
       - name: Qualify tagged release
-        run: npm run release:verify -- --tag "$GITHUB_REF_NAME"
+        id: qualify
+        run: |
+          umask 077
+          private_dir="$(mktemp -d "$RUNNER_TEMP/native-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB.XXXXXX")"
+          status=0
+          npm run release:verify -- --tag "$GITHUB_REF_NAME" >"$private_dir/qualification.log" 2>&1 || status=$?
+          if [ "$status" -ne 0 ]; then
+            printf '%s\n' 'Release qualification failed; private diagnostics retained on the runner.'
+            exit "$status"
+          fi
+          printf '%s\n' 'Release qualification passed.'
+      - name: Stage public qualification artifacts
+        if: always()
+        env:
+          NATIVE_QUALIFICATION_OUTCOME: ${{ steps.qualify.outcome }}
+        run: |
+          umask 077
+          private_dir="$(mktemp -d "$RUNNER_TEMP/native-release-stage-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB.XXXXXX")"
+          status=0
+          node <<'NODE' >"$private_dir/stage.log" 2>&1 || status=$?
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const destination = path.join(process.env.RUNNER_TEMP, 'public-release');
+          fs.mkdirSync(destination, { mode: 0o700 });
+          const summaryPath = path.join(destination, 'qualification-summary.json');
+          fs.writeFileSync(summaryPath, JSON.stringify({ qualified: false }) + '\n', { mode: 0o600 });
+          if (process.env.NATIVE_QUALIFICATION_OUTCOME !== 'success') process.exit(0);
+          const root = path.resolve('release');
+          if (!fs.lstatSync(root).isDirectory() || fs.realpathSync(root) !== root) throw new Error('invalid release root');
+          if (!fs.lstatSync(path.join(root, 'release-evidence.json')).isFile()) throw new Error('invalid release evidence');
+          const evidence = JSON.parse(fs.readFileSync(path.join(root, 'release-evidence.json'), 'utf8'));
+          if (evidence.finalQualification !== true || evidence.releaseReady !== true) throw new Error('qualification not ready');
+          const names = [evidence.artifacts.tarball, evidence.artifacts.sourceArchive, 'release-manifest.json', 'SHA256SUMS'];
+          if (new Set(names).size !== 4) throw new Error('duplicate public artifact');
+          for (const name of names) {
+            if (typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) || name !== path.basename(name)) throw new Error('invalid public artifact');
+            const source = path.join(root, name);
+            if (!fs.lstatSync(source).isFile()) throw new Error('nonregular public artifact');
+          }
+          for (const name of names) fs.copyFileSync(path.join(root, name), path.join(destination, name), fs.constants.COPYFILE_EXCL);
+          fs.writeFileSync(summaryPath, JSON.stringify({ qualified: true }) + '\n', { mode: 0o600 });
+          NODE
+          if [ "$status" -ne 0 ]; then
+            printf '%s\n' 'Public release artifact staging failed; private diagnostics retained on the runner.'
+            exit "$status"
+          fi
+          printf '%s\n' 'Public qualification artifacts staged.'
       - name: Retain qualification evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: release-qualification-${{ github.ref_name }}
-          path: release/
+          path: ${{ runner.temp }}/public-release/
           if-no-files-found: warn
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          node -e "const evidence = JSON.parse(require('fs').readFileSync('release/release-evidence.json', 'utf8')); if (evidence.finalQualification !== true || evidence.releaseReady !== true) throw new Error('release evidence is not final and ready')"
-          tarball="$(node -p "JSON.parse(require('fs').readFileSync('release/release-evidence.json', 'utf8')).artifacts.tarball")"
-          source_archive="$(node -p "JSON.parse(require('fs').readFileSync('release/release-evidence.json', 'utf8')).artifacts.sourceArchive")"
-          gh release create "$GITHUB_REF_NAME" \
-            --verify-tag \
-            --title "AgentFlow $GITHUB_REF_NAME" \
-            --generate-notes \
-            "release/$tarball" \
-            "release/$source_archive" \
-            release/release-manifest.json \
-            release/SHA256SUMS
+          umask 077
+          private_dir="$(mktemp -d "$RUNNER_TEMP/native-release-publish-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB.XXXXXX")"
+          status=0
+          bash --noprofile --norc -e -o pipefail <<'PUBLISH' >"$private_dir/publish.log" 2>&1 || status=$?
+            node -e "const evidence = JSON.parse(require('fs').readFileSync('release/release-evidence.json', 'utf8')); if (evidence.finalQualification !== true || evidence.releaseReady !== true) throw new Error('release evidence is not final and ready')"
+            tarball="$(node -p "JSON.parse(require('fs').readFileSync('release/release-evidence.json', 'utf8')).artifacts.tarball")"
+            source_archive="$(node -p "JSON.parse(require('fs').readFileSync('release/release-evidence.json', 'utf8')).artifacts.sourceArchive")"
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --title "AgentFlow $GITHUB_REF_NAME" \
+              --generate-notes \
+              "$RUNNER_TEMP/public-release/$tarball" \
+              "$RUNNER_TEMP/public-release/$source_archive" \
+              "$RUNNER_TEMP/public-release/release-manifest.json" \
+              "$RUNNER_TEMP/public-release/SHA256SUMS"
+          PUBLISH
+          if [ "$status" -ne 0 ]; then
+            printf '%s\n' 'GitHub release creation failed; private diagnostics retained on the runner.'
+            exit "$status"
+          fi
+          printf '%s\n' 'GitHub release created.'

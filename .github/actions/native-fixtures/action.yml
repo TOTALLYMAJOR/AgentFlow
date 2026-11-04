@@ -1,0 +1,96 @@
+name: Prepare immutable native fixtures
+description: Prepare the reviewed private fixtures without publishing their diagnostics.
+inputs:
+  native-read-key:
+    description: Read-only PROOFLOOM deploy key from the protected wale-native-ci environment.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Authorize native fixture access
+      shell: bash
+      working-directory: agentflow
+      env:
+        NATIVE_EVENT_NAME: ${{ github.event_name }}
+        NATIVE_REPOSITORY: ${{ github.repository }}
+        NATIVE_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        NATIVE_ACTOR: ${{ github.actor }}
+        NATIVE_REF: ${{ github.ref }}
+        NATIVE_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        NATIVE_HEAD_REF: ${{ github.head_ref }}
+      run: |
+        allowed=false
+        if [ "${NATIVE_REPOSITORY,,}" = totallymajor/agentflow ] &&
+           [ "${NATIVE_REPOSITORY_OWNER,,}" = totallymajor ] &&
+           [ "${NATIVE_ACTOR,,}" = "${NATIVE_REPOSITORY_OWNER,,}" ]; then
+          if [ "$NATIVE_EVENT_NAME" = pull_request ] &&
+             [ "$NATIVE_HEAD_REPOSITORY" = "$NATIVE_REPOSITORY" ] &&
+             [ "$NATIVE_HEAD_REF" = codex/af-release-backlog-20261103 ]; then
+            allowed=true
+          elif [ "$NATIVE_EVENT_NAME" = push ]; then
+            case "$NATIVE_REF" in
+              refs/heads/main|refs/tags/v*) allowed=true ;;
+            esac
+          fi
+        fi
+        if [ "$allowed" != true ]; then
+          printf '%s\n' 'Native fixture access refused for this event, actor, or source.'
+          exit 1
+        fi
+        printf '%s\n' 'Native fixture access preflight passed; protected source review is still required.'
+    - name: Require protected fixture credential
+      if: inputs.native-read-key == ''
+      shell: bash
+      working-directory: agentflow
+      run: |
+        printf '%s\n' 'Native fixture credential is unavailable.'
+        exit 1
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.11'
+    - name: Install fixture validation dependency
+      shell: bash
+      working-directory: agentflow
+      run: python3 -m pip install 'jsonschema>=4.23,<5'
+    - name: Check out immutable native input
+      uses: actions/checkout@v6
+      with:
+        repository: TOTALLYMAJOR/PROOFLOOM
+        ref: 34ed5877b2a92c3b65081ad13b19803d44d8096d
+        path: native-fixtures/native
+        ssh-key: ${{ inputs.native-read-key }}
+        ssh-strict: true
+        persist-credentials: false
+        show-progress: false
+    - name: Check out immutable portable bundle
+      uses: actions/checkout@v6
+      with:
+        repository: TOTALLYMAJOR/PROOFLOOM
+        ref: 1540ec475827926204b739a28ec0d6c02c967472
+        path: native-fixtures/bundle
+        ssh-key: ${{ inputs.native-read-key }}
+        ssh-strict: true
+        persist-credentials: false
+        show-progress: false
+    - name: Prepare private fixture environment
+      shell: bash
+      working-directory: agentflow
+      run: |
+        umask 077
+        private_dir="$(mktemp -d "$RUNNER_TEMP/native-fixtures-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB.XXXXXX")"
+        status=0
+        python3 scripts/prepare-native-fixtures.py \
+          --native-root "$GITHUB_WORKSPACE/native-fixtures/native" \
+          --bundle-root "$GITHUB_WORKSPACE/native-fixtures/bundle" \
+          --output-root "$private_dir/qa" \
+          --env-file "$private_dir/fixtures.env" >"$private_dir/preparation.log" 2>&1 || status=$?
+        if [ "$status" -ne 0 ]; then
+          printf '%s\n' 'Native fixture preparation failed; private diagnostics retained on the runner.'
+          exit "$status"
+        fi
+        cat "$private_dir/fixtures.env" >> "$GITHUB_ENV" 2>>"$private_dir/preparation.log" || status=$?
+        if [ "$status" -ne 0 ]; then
+          printf '%s\n' 'Native fixture environment export failed; private diagnostics retained on the runner.'
+          exit "$status"
+        fi
+        printf '%s\n' 'Native fixtures prepared.'

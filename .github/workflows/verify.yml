@@ -13,15 +13,32 @@ jobs:
     name: AgentFlow native verify
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: wale-native-ci
+    defaults:
+      run:
+        working-directory: agentflow
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+        with:
+          path: agentflow
+          persist-credentials: false
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: agentflow/package-lock.json
       - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test -- --maxWorkers=1 --no-file-parallelism
-      - run: npm run test:integration -- --maxWorkers=1 --no-file-parallelism
-      - run: npm run build
+      - uses: ./agentflow/.github/actions/native-fixtures
+        with:
+          native-read-key: ${{ secrets.WALE_NATIVE_READ_KEY }}
+      - name: Verify with private native fixtures
+        run: |
+          umask 077
+          private_dir="$(mktemp -d "$RUNNER_TEMP/native-verify-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB.XXXXXX")"
+          status=0
+          npm run verify >"$private_dir/verify.log" 2>&1 || status=$?
+          if [ "$status" -ne 0 ]; then
+            printf '%s\n' 'Native verification failed; private diagnostics retained on the runner.'
+            exit "$status"
+          fi
+          printf '%s\n' 'Native verification passed.'
