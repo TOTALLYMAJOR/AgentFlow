@@ -36,6 +36,130 @@ describe("Traffic Control telemetry projection", () => {
   });
 });
 
+describe("Traffic Control impact facts", () => {
+  const options = { correlation, recordedAt: "2026-09-17T12:00:01Z", environment: "local" as const };
+
+  it("preserves the supplied impact facts instead of discarding catalog-required fields", () => {
+    const event = projectTrafficControlTelemetry({
+      ...source, type: "impact.assessed",
+      payload: { impactedPaths: ["src/app.ts"], activeTaskCollisions: ["TASK-OTHER"], expanded: false },
+    }, options);
+
+    expect(event.payload).toEqual({
+      environment: "local", impactedPaths: ["src/app.ts"], activeTaskCollisions: ["TASK-OTHER"], expanded: false,
+    });
+  });
+
+  it("preserves empty impact lists and an explicit false expansion fact", () => {
+    const event = projectTrafficControlTelemetry({
+      ...source, type: "impact.assessed", payload: { impactedPaths: [], activeTaskCollisions: [], expanded: false },
+    }, options);
+    expect(event.payload).toEqual({ environment: "local", impactedPaths: [], activeTaskCollisions: [], expanded: false });
+  });
+
+  it("preserves literal string facts without introducing a path or task-ID policy", () => {
+    const event = projectTrafficControlTelemetry({
+      ...source, type: "impact.assessed", payload: { impactedPaths: [""], activeTaskCollisions: [""], expanded: false },
+    }, options);
+    expect(event.payload).toEqual({ environment: "local", impactedPaths: [""], activeTaskCollisions: [""], expanded: false });
+  });
+
+  it("selects only the impact facts without mutating or copying unrelated raw data", () => {
+    const input = {
+      ...source, type: "impact.assessed",
+      payload: { impactedPaths: ["src/app.ts"], activeTaskCollisions: [], expanded: true, reason: "unselected", rawLog: "x".repeat(100_000) },
+    };
+    const before = structuredClone(input);
+    const event = projectTrafficControlTelemetry(input, options);
+    expect(event.payload).toEqual({ environment: "local", impactedPaths: ["src/app.ts"], activeTaskCollisions: [], expanded: true });
+    expect(input).toEqual(before);
+  });
+
+  it("detaches both retained lists from mutable source arrays", () => {
+    const impactedPaths = ["src/app.ts"];
+    const activeTaskCollisions = ["TASK-OTHER"];
+    const event = projectTrafficControlTelemetry({
+      ...source, type: "impact.assessed", payload: { impactedPaths, activeTaskCollisions, expanded: false },
+    }, options);
+    impactedPaths.push("src/later.ts");
+    activeTaskCollisions.push("TASK-LATER");
+    expect(event.payload).toEqual({ environment: "local", impactedPaths: ["src/app.ts"], activeTaskCollisions: ["TASK-OTHER"], expanded: false });
+  });
+
+  it.each(["impactedPaths", "activeTaskCollisions"])("ignores caller-owned every when validating %s elements", (field) => {
+    const invalid = [1];
+    Object.defineProperty(invalid, "every", { value: () => true });
+    const payload = { impactedPaths: [], activeTaskCollisions: [], expanded: false, [field]: invalid };
+    expect(() => projectTrafficControlTelemetry({ ...source, type: "impact.assessed", payload }, options)).toThrow(TypeError);
+  });
+
+  it("reads indexed facts instead of a caller-owned custom iterator", () => {
+    const impactedPaths = ["src/app.ts"];
+    Object.defineProperty(impactedPaths, Symbol.iterator, { value: function* () { yield 1; } });
+    const event = projectTrafficControlTelemetry({
+      ...source, type: "impact.assessed", payload: { impactedPaths, activeTaskCollisions: [], expanded: false },
+    }, options);
+    expect(event.payload.impactedPaths).toEqual(["src/app.ts"]);
+  });
+
+  it("preserves the array byte budget when a custom iterator hides actual entries", () => {
+    const impactedPaths = Array<string>(32 * 1024 + 1).fill("src/app.ts");
+    Object.defineProperty(impactedPaths, Symbol.iterator, { value: () => [][Symbol.iterator]() });
+    expect(() => projectTrafficControlTelemetry({
+      ...source, type: "impact.assessed", payload: { impactedPaths, activeTaskCollisions: [], expanded: false },
+    }, options)).toThrow(/bounded size/u);
+  });
+
+  it.each([
+    ["impactedPaths", { activeTaskCollisions: [], expanded: false }],
+    ["activeTaskCollisions", { impactedPaths: [], expanded: false }],
+    ["expanded", { impactedPaths: [], activeTaskCollisions: [] }],
+  ])("refuses an impact event missing %s instead of supplying a default", (_field, payload) => {
+    expect(() => projectTrafficControlTelemetry({ ...source, type: "impact.assessed", payload }, options)).toThrow(TypeError);
+  });
+
+  const malformedFacts: Array<[string, string, unknown]> = [
+    ["null impacted paths", "impactedPaths", null],
+    ["null collisions", "activeTaskCollisions", null],
+    ["null expansion", "expanded", null],
+    ["object instead of paths", "impactedPaths", {}],
+    ["string instead of collisions", "activeTaskCollisions", "TASK-OTHER"],
+    ["string instead of expansion", "expanded", "false"],
+    ["non-string path", "impactedPaths", ["src/app.ts", 1]],
+    ["non-string collision", "activeTaskCollisions", ["TASK-OTHER", {}]],
+    ["sparse paths", "impactedPaths", Array<string>(1)],
+  ];
+  it.each(malformedFacts)("refuses %s before publishing an impact fact", (_label, field, value) => {
+    const payload = { impactedPaths: [], activeTaskCollisions: [], expanded: false, [field]: value };
+    expect(() => projectTrafficControlTelemetry({ ...source, type: "impact.assessed", payload }, options)).toThrow(TypeError);
+  });
+
+  it("applies the existing size bound to selected impact facts", () => {
+    expect(() => projectTrafficControlTelemetry({
+      ...source, type: "impact.assessed", payload: { impactedPaths: ["x".repeat(100_000)], activeTaskCollisions: [], expanded: false },
+    }, options)).toThrow(/bounded size/u);
+  });
+
+  it("applies the existing recognized-credential guard to selected impact facts", () => {
+    expect(() => projectTrafficControlTelemetry({
+      ...source, type: "impact.assessed", payload: { impactedPaths: [], activeTaskCollisions: ["password=SYNTHETIC_ONLY_SENTINEL"], expanded: false },
+    }, options)).toThrow(/recognized credentials/u);
+  });
+
+  it.each([
+    { impactedPaths: ["src/other.ts"], activeTaskCollisions: ["TASK-OTHER"], expanded: false },
+    { impactedPaths: ["src/app.ts"], activeTaskCollisions: ["TASK-DIFFERENT"], expanded: false },
+    { impactedPaths: ["src/app.ts"], activeTaskCollisions: ["TASK-OTHER"], expanded: true },
+  ])("binds a change in each supplied impact fact to its source digest and event identity", (payload) => {
+    const first = projectTrafficControlTelemetry({
+      ...source, type: "impact.assessed", payload: { impactedPaths: ["src/app.ts"], activeTaskCollisions: ["TASK-OTHER"], expanded: false },
+    }, options);
+    const changed = projectTrafficControlTelemetry({ ...source, type: "impact.assessed", payload }, options);
+    expect(changed.source.sourceSha256).not.toBe(first.source.sourceSha256);
+    expect(changed.eventId).not.toBe(first.eventId);
+  });
+});
+
 describe("Traffic Control v1 boundary compatibility", () => {
   const options = { correlation, recordedAt: "2026-09-17T12:00:01Z", environment: "local" as const };
   const project = () => projectTrafficControlTelemetry(source, options);

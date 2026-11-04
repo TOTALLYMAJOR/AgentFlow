@@ -191,6 +191,26 @@ function boundedPayload(type: string, source: Record<string, unknown>, environme
   if (type === "outcome.reviewed") {
     return { environment, correctDisposition: source.correctDisposition ?? null, invalidEscape: source.invalidEscape ?? null, outcomeClass: source.outcomeClass ?? null, reviewerAuthority: source.reviewerAuthority ?? null, reviewedAt: source.reviewedAt ?? null };
   }
+  if (type === "impact.assessed") {
+    const { impactedPaths, activeTaskCollisions, expanded } = source;
+    requireBoundedPayload({ environment, impactedPaths, activeTaskCollisions, expanded });
+    if (typeof expanded !== "boolean") throw new TypeError("Impact telemetry requires a supplied expansion fact");
+    const copyStrings = (value: unknown): string[] => {
+      if (!Array.isArray(value)) throw new TypeError("Impact telemetry requires supplied string-array facts");
+      const length = value.length;
+      // A caller-owned iterator cannot hide more entries than the existing
+      // byte budget could represent, or select different values for the copy.
+      if (length > MAX_PAYLOAD_BYTES) throw new TypeError("Product telemetry payload exceeds its bounded size");
+      const copy: string[] = [];
+      for (let index = 0; index < length; index += 1) {
+        const item: unknown = value[index];
+        if (typeof item !== "string") throw new TypeError("Impact telemetry requires supplied string-array facts");
+        copy.push(item);
+      }
+      return copy;
+    };
+    return { environment, impactedPaths: copyStrings(impactedPaths), activeTaskCollisions: copyStrings(activeTaskCollisions), expanded };
+  }
   const allowed = ["result", "violationCode", "maxAttempts", "attempt", "taskId", "paths", "commit", "status", "evidenceId", "action", "triggerRecordHash", "integrationCommit", "reason"];
   const payload: Record<string, unknown> = { environment };
   for (const key of allowed) if (source[key] !== undefined) payload[key] = source[key];
