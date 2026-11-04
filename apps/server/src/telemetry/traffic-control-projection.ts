@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { canonicalJsonSha256 } from "../integration/design-intelligence.js";
 import { createRedactor } from "../workers/redaction.js";
 
@@ -12,18 +13,64 @@ export interface TrafficControlTelemetryEvent {
   payload: Record<string, unknown>;
 }
 
+// Runtime validation mirrors the published v1 envelope; parsed copies never
+// replace source values or turn caller-supplied correlation into authority.
+const eventTypes = z.enum([
+  "contract.verification_completed", "execution.started", "attempt.started", "files.changed", "impact.assessed",
+  "validation.completed", "evidence.recorded", "governor.decision", "intervention.completed", "integration.completed",
+  "integration.blocked", "receipt.audit_completed", "structural.concern_recorded", "contract.superseded", "outcome.reviewed",
+]);
+const digest = z.string().regex(/^[0-9a-f]{64}$/u);
+const identifier = z.string().min(1);
+const isoTimestamp = z.iso.datetime({ offset: true });
+const timestamp = z.string().refine((value) => {
+  const upper = value.toUpperCase();
+  const leapSecond = /T\d{2}:\d{2}:60(?=\.|Z|[+-])/u.test(upper);
+  const comparable = leapSecond ? upper.replace(/(T\d{2}:\d{2}):60(?=\.|Z|[+-])/u, "$1:59") : upper;
+  if (!isoTimestamp.safeParse(comparable).success) return false;
+  if (!leapSecond) return true;
+  // RFC3339 leap-second examples include numeric offsets. This checks their
+  // UTC month-end position, not an authoritative leap schedule or clock window.
+  const utc = new Date(comparable);
+  const next = new Date(utc);
+  next.setUTCDate(next.getUTCDate() + 1);
+  return utc.getUTCHours() === 23 && utc.getUTCMinutes() === 59 && next.getUTCDate() === 1;
+});
+const correlationFields = z.object({
+  repositoryId: identifier, runId: identifier, buildId: identifier.optional(), taskId: identifier.optional(),
+  handoffId: identifier, contractSha256: digest, policyVersion: identifier.optional(), analysisRunId: identifier.optional(),
+}).strict();
+const envelope = z.object({
+  schemaVersion: z.literal("1.0.0"), kind: z.literal("traffic-control/telemetry-event"), eventId: identifier.max(200), eventType: eventTypes,
+  occurredAt: timestamp, recordedAt: timestamp, sequence: z.number().refine((value) => Number.isInteger(value) && value >= 1),
+  source: z.object({
+    system: z.enum(["proofloom", "agentflow", "traffic-control-governor", "decision-intelligence", "repository-authority"]),
+    component: identifier, sourceRecordId: identifier, sourceSha256: digest.optional(),
+  }).strict(),
+  correlation: correlationFields,
+  proofBoundary: z.enum(["CONTRACT_AND_AUTHORITY", "LOCAL_EXECUTION", "LOCAL_EXECUTION_AND_INTEGRATION", "HOSTED_RUNTIME", "REVIEWED_OUTCOME"]),
+  payload: z.record(z.string(), z.unknown()),
+  correctionOfEventId: identifier.optional(), correctionReason: identifier.optional(),
+}).refine((event) => (event.correctionOfEventId === undefined) === (event.correctionReason === undefined)).strict();
+
 export function projectTrafficControlTelemetry(
   source: SourceBuildEvent,
   options: { correlation: TelemetryCorrelation; recordedAt: string; environment: ProofEnvironment },
 ): TrafficControlTelemetryEvent {
   if (!Number.isSafeInteger(source.sequence) || source.sequence < 1 || !source.buildId || !source.occurredAt) throw new TypeError("Authoritative source event identity is required");
-  if (!options.correlation.repositoryId || !options.correlation.runId || !options.correlation.handoffId || !/^[0-9a-f]{64}$/.test(options.correlation.contractSha256)) throw new TypeError("Governed telemetry correlation is incomplete");
+  if (!eventTypes.safeParse(source.type).success) throw new TypeError("Unsupported selected telemetry event type");
+  if (!correlationFields.safeParse(options.correlation).success) throw new TypeError("Governed telemetry correlation does not match v1");
+  if (!isEnvironment(options.environment)) throw new TypeError("Telemetry proof environment is required");
+  requireBoundedPayload({ buildId: source.buildId, taskId: source.taskId, occurredAt: source.occurredAt, recordedAt: options.recordedAt });
+  requireBoundedPayload(options.correlation);
+  if (typeof source.buildId !== "string" || options.correlation.buildId !== undefined && options.correlation.buildId !== source.buildId) throw new TypeError("Telemetry build correlation disagrees with native source");
+  if (typeof source.taskId === "string" && source.taskId.length > 0 && options.correlation.taskId !== undefined && options.correlation.taskId !== source.taskId) throw new TypeError("Telemetry task correlation disagrees with native source");
   const payload = boundedPayload(source.type, source.payload, options.environment);
   requireBoundedPayload(payload);
   const sourceRecordId = `${source.buildId}:${source.sequence}`;
   const sourceSha256 = canonicalJsonSha256({ sourceRecordId, type: source.type, occurredAt: source.occurredAt, payload });
   const eventId = canonicalJsonSha256({ system: "agentflow", component: "build-events", sourceRecordId, sourceSha256, runId: options.correlation.runId });
-  return {
+  const event: TrafficControlTelemetryEvent = {
     schemaVersion: "1.0.0", kind: "traffic-control/telemetry-event", eventId, eventType: source.type,
     occurredAt: source.occurredAt, recordedAt: options.recordedAt, sequence: source.sequence,
     source: { system: source.type === "governor.decision" ? "traffic-control-governor" : "agentflow", component: "build-events", sourceRecordId, sourceSha256 },
@@ -31,6 +78,8 @@ export function projectTrafficControlTelemetry(
     proofBoundary: options.environment === "reviewed-outcome" ? "REVIEWED_OUTCOME" : ["hosted", "production"].includes(options.environment) ? "HOSTED_RUNTIME" : "LOCAL_EXECUTION",
     payload,
   };
+  requireTelemetryEnvelope(event);
+  return event;
 }
 
 export function summarizeTrafficControlMetrics(events: readonly TrafficControlTelemetryEvent[]): {
@@ -40,7 +89,7 @@ export function summarizeTrafficControlMetrics(events: readonly TrafficControlTe
   const sourceFacts = new Map<string, string>();
   const eventFacts = new Map<string, string>();
   for (const event of events) {
-    requireBoundedPayload(event.payload);
+    requireTelemetryEnvelope(event);
     const { recordedAt, ...stableFact } = event;
     void recordedAt;
     const factHash = canonicalJsonSha256(stableFact);
@@ -76,11 +125,20 @@ export function summarizeTrafficControlMetrics(events: readonly TrafficControlTe
   return { populations };
 }
 
+function requireTelemetryEnvelope(event: TrafficControlTelemetryEvent): void {
+  const { payload, ...metadata } = event;
+  requireBoundedPayload(metadata);
+  requireBoundedPayload(payload);
+  if (!envelope.safeParse(event).success) throw new TypeError("Telemetry event does not match the published v1 envelope");
+  // A v1 sourceRecordId is opaque. Raw identity agreement is checked only
+  // by the projector while the original native SourceBuildEvent is available.
+}
+
 const MAX_PAYLOAD_BYTES = 32 * 1024;
 const rejectCredential = createRedactor();
 const SENSITIVE_FIELDS = new Set(["apikey", "accesstoken", "authtoken", "password", "credential", "credentials", "privatekey", "secret", "secrets", "token", "tokens", "prompt", "prompts", "sourcecode", "rawlog", "rawlogs", "environmentvalues", "envvalues", "environmentvariables", "envvars"]);
 
-function requireBoundedPayload(payload: Record<string, unknown>): void {
+function requireBoundedPayload(payload: unknown): void {
   let remaining = MAX_PAYLOAD_BYTES;
   const ancestors = new Set<object>();
   const consume = (bytes: number): void => {
@@ -140,4 +198,4 @@ function boundedPayload(type: string, source: Record<string, unknown>, environme
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
-function isEnvironment(value: unknown): value is ProofEnvironment { return ["synthetic", "local", "ci", "hosted", "production", "reviewed-outcome"].includes(String(value)); }
+function isEnvironment(value: unknown): value is ProofEnvironment { return typeof value === "string" && ["synthetic", "local", "ci", "hosted", "production", "reviewed-outcome"].includes(value); }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { projectTrafficControlTelemetry, summarizeTrafficControlMetrics } from "../src/telemetry/traffic-control-projection.js";
+import type { TrafficControlTelemetryEvent } from "../src/telemetry/traffic-control-projection.js";
 
 const source = {
   sequence: 7, buildId: "build-1", taskId: null, type: "governor.decision",
@@ -35,6 +36,114 @@ describe("Traffic Control telemetry projection", () => {
   });
 });
 
+describe("Traffic Control v1 boundary compatibility", () => {
+  const options = { correlation, recordedAt: "2026-09-17T12:00:01Z", environment: "local" as const };
+  const project = () => projectTrafficControlTelemetry(source, options);
+  const asEvent = (value: unknown) => value as TrafficControlTelemetryEvent;
+  const nativeFailure = {
+    ...source, sequence: 8, type: "governor.evaluation_failed",
+    payload: {
+      decisionRecordHash: "a".repeat(64), action: "PAUSE_FOR_REVIEW", acknowledged: false,
+      details: { runtimeApplyInvoked: true, acknowledgementAvailable: false, receiptPersistAttempted: false, observedBuildStatusAfter: "paused" },
+    },
+  };
+
+  it("refuses an explicitly selected unsupported native failure without changing it", () => {
+    const before = structuredClone(nativeFailure);
+    expect(() => projectTrafficControlTelemetry(nativeFailure, options)).toThrow();
+    expect(nativeFailure).toEqual(before);
+  });
+
+  it("refuses to count an unsupported failure as a v1 telemetry event", () => {
+    const event = asEvent({ ...project(), eventType: nativeFailure.type, payload: { environment: "local", action: "PAUSE_FOR_REVIEW" } });
+    expect(() => summarizeTrafficControlMetrics([event])).toThrow();
+  });
+
+  it("refuses unknown correlation fields before they can leave the projector", () => {
+    const invalid = { ...correlation, secret: "INERT_QA_SENTINEL" };
+    expect(() => projectTrafficControlTelemetry(source, { ...options, correlation: invalid })).toThrow();
+  });
+
+  it("refuses known native build and nonempty task disagreements", () => {
+    expect(() => projectTrafficControlTelemetry(source, { ...options, correlation: { ...correlation, buildId: "different-build" } })).toThrow();
+    expect(() => projectTrafficControlTelemetry({ ...source, taskId: "native-task" }, { ...options, correlation: { ...correlation, taskId: "different-task" } })).toThrow();
+  });
+
+  it("does not infer raw native identity from a schema-valid opaque source record", () => {
+    const event = { ...project(), source: { ...project().source, sourceRecordId: "opaque-foreign-record:7" }, correlation: { ...correlation, buildId: "declared-context-only" } };
+    expect(summarizeTrafficControlMetrics([event]).populations.local?.metrics["M-01"]).toMatchObject({ status: "UNAVAILABLE" });
+  });
+
+  it("preserves caller task context when the native event has no task identity", () => {
+    const event = projectTrafficControlTelemetry({ ...source, type: "attempt.started", payload: { attempt: 1, taskId: "payload-context-only" } }, { ...options, correlation: { ...correlation, taskId: "caller-context-only" } });
+    expect(event.correlation.taskId).toBe("caller-context-only");
+    expect(summarizeTrafficControlMetrics([event]).populations.local?.metrics["M-01"]).toMatchObject({ status: "UNAVAILABLE" });
+  });
+
+  const invalidHeaders: Array<[string, (event: Record<string, unknown>) => void]> = [
+    ["schema version", (event) => { event.schemaVersion = "2.0.0"; }],
+    ["kind", (event) => { event.kind = "other/event"; }],
+    ["additional header", (event) => { event.rawLog = "INERT_QA_SENTINEL"; }],
+    ["missing header", (event) => { delete event.recordedAt; }],
+    ["empty event identity", (event) => { event.eventId = ""; }],
+    ["invalid sequence", (event) => { event.sequence = 0; }],
+    ["unknown proof boundary", (event) => { event.proofBoundary = "AUTOMATIC_SUCCESS"; }],
+    ["additional source field", (event) => { (event.source as Record<string, unknown>).rawLog = "INERT_QA_SENTINEL"; }],
+    ["invalid source digest", (event) => { (event.source as Record<string, unknown>).sourceSha256 = "not-a-digest"; }],
+    ["additional correlation field", (event) => { (event.correlation as Record<string, unknown>).secret = "INERT_QA_SENTINEL"; }],
+    ["missing governed correlation", (event) => { delete (event.correlation as Record<string, unknown>).handoffId; }],
+    ["null optional correlation", (event) => { (event.correlation as Record<string, unknown>).taskId = null; }],
+    ["unpaired correction", (event) => { event.correctionOfEventId = "prior-event"; }],
+  ];
+  it.each(invalidHeaders)("refuses an invalid %s before summarization", (_label, mutate) => {
+    const event = structuredClone(project()) as unknown as Record<string, unknown>;
+    mutate(event);
+    expect(() => summarizeTrafficControlMetrics([asEvent(event)])).toThrow();
+  });
+
+  it.each(["September 17, 2026", "2026-02-30T12:00:00Z", "2026-09-17T24:00:00Z", "2026-09-17T12:00:00", "2026-09-17T12:00:00+24:00"])("refuses malformed date-time %s without a clock-window policy", (timestamp) => {
+    expect(() => projectTrafficControlTelemetry({ ...source, occurredAt: timestamp }, options)).toThrow();
+    expect(() => projectTrafficControlTelemetry(source, { ...options, recordedAt: timestamp })).toThrow();
+    expect(() => summarizeTrafficControlMetrics([{ ...project(), recordedAt: timestamp }])).toThrow();
+  });
+
+  it("requires an explicit supported environment without substituting a default", () => {
+    const invalid = { ...options, environment: undefined } as unknown as Parameters<typeof projectTrafficControlTelemetry>[1];
+    expect(() => projectTrafficControlTelemetry(source, invalid)).toThrow();
+  });
+
+  it("preserves optional IDs/digest and the existing null-task caller context", () => {
+    const requiredCorrelation = { repositoryId: correlation.repositoryId, runId: correlation.runId, handoffId: correlation.handoffId, contractSha256: correlation.contractSha256 };
+    const noOptionalId = projectTrafficControlTelemetry(source, { ...options, correlation: requiredCorrelation });
+    const event = structuredClone(noOptionalId) as unknown as Record<string, unknown>;
+    delete (event.source as Record<string, unknown>).sourceSha256;
+    expect(summarizeTrafficControlMetrics([asEvent(event)]).populations.local?.sourceEventCount).toBe(1);
+    const context = projectTrafficControlTelemetry(source, { ...options, correlation: { ...correlation, taskId: "caller-context-only" } });
+    expect(context.correlation.taskId).toBe("caller-context-only");
+    expect(summarizeTrafficControlMetrics([context]).populations.local?.metrics["M-01"]).toMatchObject({ status: "UNAVAILABLE" });
+  });
+
+  it("accepts all published proof boundaries and paired correction metadata without claiming outcomes", () => {
+    for (const proofBoundary of ["CONTRACT_AND_AUTHORITY", "LOCAL_EXECUTION", "LOCAL_EXECUTION_AND_INTEGRATION", "HOSTED_RUNTIME", "REVIEWED_OUTCOME"]) {
+      const event = asEvent({ ...project(), proofBoundary, correctionOfEventId: "prior-event", correctionReason: "Bounded fixture correction" });
+      expect(summarizeTrafficControlMetrics([event]).populations.local?.metrics["M-01"]).toEqual({ status: "UNAVAILABLE", reason: "No reviewed outcomes" });
+    }
+  });
+
+  it.each(["2026-09-17T14:30:00.123456+02:30", "2026-09-17t12:00:00z", "1990-12-31T23:59:60Z", "1990-12-31T15:59:60-08:00"])("preserves published date-time spelling %s", (timestamp) => {
+    const event = projectTrafficControlTelemetry({ ...source, occurredAt: timestamp }, { ...options, recordedAt: timestamp });
+    expect(event.occurredAt).toBe(timestamp);
+    expect(event.recordedAt).toBe(timestamp);
+    expect(summarizeTrafficControlMetrics([event]).populations.local?.sourceEventCount).toBe(1);
+  });
+
+  it("keeps the original valid projected-fact digest and event identity", () => {
+    const event = project();
+    expect(event.source.sourceSha256).toBe("6afca2cfd973c728bf860325bfd825e0939cc4eac5c31fcbbf93aac49abce93e");
+    expect(event.eventId).toBe("b848598630e2ac935743a97d02cf80b223cbe2af06529b7e4e8cc0183e554c9a");
+  });
+});
+
 describe("Traffic Control telemetry evidence limits", () => {
   const reviewedSource = (sequence: number, correctDisposition: boolean, runId = "run-1") => ({
     sequence, buildId: `build-${runId}`, taskId: null, type: "outcome.reviewed",
@@ -58,8 +167,9 @@ describe("Traffic Control telemetry evidence limits", () => {
   });
 
   it("does not convert a review lacking authority into adjudicated correctness", () => {
-    const event = projectTrafficControlTelemetry({ ...reviewedSource(1, true), payload: { correctDisposition: true } }, {
-      correlation, recordedAt: "2026-09-17T12:00:01Z", environment: "local",
+    const nativeReview = reviewedSource(1, true);
+    const event = projectTrafficControlTelemetry({ ...nativeReview, payload: { correctDisposition: true } }, {
+      correlation: { ...correlation, buildId: nativeReview.buildId }, recordedAt: "2026-09-17T12:00:01Z", environment: "local",
     });
     expect(summarizeTrafficControlMetrics([event]).populations.local?.metrics["M-01"]).toMatchObject({ status: "UNAVAILABLE", reason: expect.any(String) as unknown });
   });
