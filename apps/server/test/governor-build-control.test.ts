@@ -580,6 +580,22 @@ describe("current native Governor failure attribution", () => {
     expect(getProvider).not.toHaveBeenCalled();
   });
 
+  it("refuses governed coordinator recovery without mutating the native history used for correspondence", async () => {
+    const { store, dependencies } = await setup(true, true);
+    const getProvider = vi.fn(() => { throw new Error("Correspondence qualification must not dispatch a provider"); });
+    coordinator = new BuildCoordinator({ ...dependencies, handoffService: new HandoffManifestService(store, dependencies.environment.artifactsPath), agentProviders: { get: getProvider } } as unknown as ConstructorParameters<typeof BuildCoordinator>[0]);
+    const native = coordinator as unknown as { failTask(taskId: string, eventType: string, code: string, message: string): unknown };
+    store.tasks.updateAttempt("task", 1, { status: "failed", errorCode: "PROVIDER_UNAVAILABLE", errorMessage: "inert governed retry refusal" });
+    native.failTask("task", "task.worker_failed", "PROVIDER_UNAVAILABLE", "inert governed retry refusal");
+    const snapshot = () => ({ build: store.builds.getById("build"), task: store.tasks.getById("task"), attempts: store.tasks.listAttempts("task"), events: store.events.listForBuild("build"), validations: store.validations.listForBuild("build"), artifacts: store.artifacts.listForBuild("build") });
+    const before = snapshot();
+    await expect(coordinator.retry("build", "task")).rejects.toMatchObject({ code: "GOVERNED_RECOVERY_NOT_AUTHORIZED" });
+    expect(snapshot()).toEqual(before);
+    expect(getProvider).not.toHaveBeenCalled();
+    // Tests that subsequently create attempts through the record repository
+    // qualify native input normalization, not this forbidden runtime operation.
+  });
+
   it.each(["VALIDATION_FAILED", "PROVIDER_UNAVAILABLE"])("retains %s history after successful retry without reviving repair/retry", async (code) => {
     const { store, dependencies, observed } = await setup();
     store.tasks.transition("task", "failed", { errorCode: code, errorMessage: "old failure" });

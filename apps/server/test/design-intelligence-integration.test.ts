@@ -10,6 +10,7 @@ import { HandoffManifestService } from "../src/artifacts/index.js";
 import { TaskCommitService } from "../src/orchestration/task-commit.js";
 import { BuildCoordinator } from "../src/orchestration/coordinator.js";
 import { IntegrationManager } from "../src/integration/manager.js";
+import { DEFAULT_RETRYABLE_FAILURE_CODES } from "../src/orchestration/retry-policy.js";
 import { validateTask } from "../src/validation/index.js";
 import { publishNativeValidationEvidence, readVerifiedNativeValidationEvidence, evaluateGovernedBuild } from "../src/governor/build-control.js";
 import { makeDesignIntelligenceReceipt } from "../src/integration/design-intelligence-receipt.js";
@@ -746,7 +747,19 @@ async function admissionGit(root: string, arguments_: string[]): Promise<string>
 
 // This fixture executes native validation/commit/manifest producers, then exercises
 // the evidence seam. It does not claim HTTP admission or a provider journey.
-async function nativeEvidenceFixture(capability = false, defect?: "wrong-task" | "unknown-check", integration = false) {
+type NativePrefixFixture = {
+  store: ReturnType<typeof createDatabaseRepositories>;
+  environment: ReturnType<typeof resolveEnvironment>;
+  context: AgentFlowContext;
+  root: string;
+  handoff: ReturnType<typeof GovernedTaskHandoffSchema.parse>;
+  taskId: string;
+  buildId: string;
+  executionBase: string;
+};
+type NativePrefixObserver = (label: string, fixture: NativePrefixFixture) => Promise<void>;
+
+async function nativeEvidenceFixture(capability = false, defect?: "wrong-task" | "unknown-check", integration = false, onPrefix?: NativePrefixObserver) {
   const database = createDatabaseFixture();
   const root = path.join(database.directory, "repository");
   const environment = resolveEnvironment({ AGENTFLOW_HOME: path.join(database.directory, "runtime") });
@@ -778,11 +791,25 @@ const result=spawnSync('python3',['-B','-c',${JSON.stringify("import json,sys;sy
     const plan = planBacklogMarkdown(renderBacklog(handoff, "handoff.json", "BACKLOG.md")).plan;
     if (plan === undefined) throw new Error("Expected native fixture plan");
     store.repositories.create({ id: "evidence-repo", name: "evidence fixture", localPath: root, configPath: ".agentflow.yaml", baseBranch: "main" });
-    store.builds.create({ id: "evidence-build", repositoryId: "evidence-repo", backlogPath: "BACKLOG.md", baseCommit: executionBase, integrationBranch: "fixture-integration", status: "running", ...(integration ? { integrationWorktree: root, repositoryConfig: { version: 1, repository: { name: "evidence fixture", base_branch: "main" }, backlog: { path: "BACKLOG.md" }, workers: { maximum: 1 }, contracts: { roots: [] }, validation: { task_default: ["npm test"], integration: ["npm test"] }, docker: { enabled: false, compose_file: "compose.yaml" }, git: { remote: "origin", push_task_branches: false, push_integration_branch: false } } } : {}), normalizedPlan: { ...plan, createdAt: new Date().toISOString(), governedHandoff: { id: handoff.handoffId, programId: handoff.programId, sha256: canonicalJsonSha256(handoff), path: "handoff.json", governedBaseCommit: baseCommit, executionBaseCommit: executionBase, carrierPaths: ["handoff.json", "BACKLOG.md"], proofBoundary: handoff.proof.claimBoundary } }, tasks: [{ id: "evidence-task", backlogTaskId: "AF-001", title: "Implement", description: "Synthetic native validation fixture", acceptanceCriteria: ["Tests pass"], state: "ready", attempt: 1, branchName: "main", worktreePath: root, baseCommit: executionBase, ownedPaths: ["src/"], validationCommands: commands }] });
+    // Qualification retains the immutable native plan row as well as the
+    // planner output. Ordinary fixtures keep their existing setup unchanged.
+    const normalizedPlan = { ...plan, createdAt: new Date().toISOString(), governedHandoff: { id: handoff.handoffId, ...(handoff.programId === undefined ? {} : { programId: handoff.programId }), sha256: canonicalJsonSha256(handoff), path: "handoff.json", governedBaseCommit: baseCommit, executionBaseCommit: executionBase, carrierPaths: ["handoff.json", "BACKLOG.md"], proofBoundary: handoff.proof.claimBoundary } };
+    const backlogContents = renderBacklog(handoff, "handoff.json", "BACKLOG.md");
+    const persistedPlan = { ...normalizedPlan, id: "native-parity-plan", repositoryId: "evidence-repo", backlogPath: "BACKLOG.md", backlogSha256: createHash("sha256").update(backlogContents).digest("hex") };
+    if (onPrefix !== undefined) {
+      store.plans.create({ id: persistedPlan.id, repositoryId: persistedPlan.repositoryId, backlogPath: persistedPlan.backlogPath, backlogSha256: persistedPlan.backlogSha256, backlogContents, repositoryConfig: { version: 1, repository: { name: "evidence fixture", base_branch: "main" }, backlog: { path: "BACKLOG.md" }, workers: { maximum: 1 }, contracts: { roots: [] }, validation: { task_default: ["npm test"], integration: ["npm test"] }, docker: { enabled: false, compose_file: "compose.yaml" }, git: { remote: "origin", push_task_branches: false, push_integration_branch: false } }, normalizedPlan: persistedPlan });
+      store.plans.lock("native-parity-plan");
+    }
+    store.builds.create({ id: "evidence-build", repositoryId: "evidence-repo", backlogPath: "BACKLOG.md", baseCommit: executionBase, integrationBranch: "fixture-integration", status: "running", ...(integration ? { integrationWorktree: root, repositoryConfig: { version: 1, repository: { name: "evidence fixture", base_branch: "main" }, backlog: { path: "BACKLOG.md" }, workers: { maximum: 1 }, contracts: { roots: [] }, validation: { task_default: ["npm test"], integration: ["npm test"] }, docker: { enabled: false, compose_file: "compose.yaml" }, git: { remote: "origin", push_task_branches: false, push_integration_branch: false } } } : {}), normalizedPlan: onPrefix === undefined ? normalizedPlan : persistedPlan, ...(onPrefix === undefined ? {} : { planId: "native-parity-plan" }), tasks: [{ id: "evidence-task", backlogTaskId: "AF-001", title: "Implement", description: "Synthetic native validation fixture", acceptanceCriteria: ["Tests pass"], state: "ready", attempt: 1, branchName: "main", worktreePath: root, baseCommit: executionBase, ownedPaths: ["src/"], validationCommands: commands }] });
     const taskId = "evidence-task"; const buildId = "evidence-build";
+    const dependencies = { store, environment };
+    const context = { ...dependencies, repositoryService: { get: async () => store.repositories.getById("evidence-repo") }, organizationPolicy: DEFAULT_ORGANIZATION_POLICY } as unknown as AgentFlowContext;
+    const prefixFixture = { ...dependencies, context, root, handoff, taskId, buildId, executionBase };
     const attemptStartedAt = new Date().toISOString();
     store.tasks.createAttempt({ id: "evidence-attempt", taskId, buildId, attempt: 1, status: "running", startedAt: attemptStartedAt });
+    await onPrefix?.("initial-ready", prefixFixture);
     store.tasks.transition(taskId, "running");
+    await onPrefix?.("running", prefixFixture);
     await writeFile(path.join(root, "src", "index.js"), "export const ready = true;\n");
     const capabilityDocuments = capability ? fixtureCapabilityDocuments(handoff, commands, defect) : undefined;
     if (capabilityDocuments !== undefined) {
@@ -790,6 +817,7 @@ const result=spawnSync('python3',['-B','-c',${JSON.stringify("import json,sys;sy
       await writeFile(path.join(root, "src", "capability-binding.json"), `${JSON.stringify(capabilityDocuments.binding, null, 2)}\n`);
     }
     store.tasks.transition(taskId, "validating");
+    await onPrefix?.("validating", prefixFixture);
     const validation = await validateTask({ buildId, taskId, attempt: 1, worktreePath: root, baseCommit: executionBase, ownedPaths: ["src/"], commands, workerCompletedSuccessfully: true });
     expect(validation.readyForCommit, JSON.stringify(validation)).toBe(true);
     const directory = path.join(environment.runsPath, buildId, taskId, "attempt-1");
@@ -803,12 +831,12 @@ const result=spawnSync('python3',['-B','-c',${JSON.stringify("import json,sys;sy
     }
     const committed = await new TaskCommitService().commit({ worktreePath: root, baseCommit: executionBase, branchName: "main", backlogTaskId: "AF-001", title: "Implement", changedFiles: validation.ownership.changedFiles, allowNoChanges: false });
     store.tasks.recordChangedFiles(taskId, 1, committed.changedFiles);
+    await onPrefix?.("validation-recorded", prefixFixture);
     const manifests = new HandoffManifestService(store, environment.artifactsPath);
     const publication = await manifests.publish({ buildId, taskId, backlogTaskId: "AF-001", attempt: 1, status: "validated", baseCommit: executionBase, resultCommit: committed.resultCommit, branch: "main", worktreePath: root, changedFiles: committed.changedFiles.map((item) => item.path), consumes: [], produces: handoff.tasks[0]?.produces.map(({ name, type, version, path: artifactPath }) => ({ name, type, version, ...(artifactPath === undefined ? {} : { path: artifactPath }) })) ?? [] });
     store.tasks.transition(taskId, "validated", { resultCommit: committed.resultCommit });
     store.tasks.updateAttempt(taskId, 1, { status: "succeeded", resultCommit: committed.resultCommit, completedAt: new Date().toISOString() });
-    const dependencies = { store, environment };
-    const context = { ...dependencies, repositoryService: { get: async () => store.repositories.getById("evidence-repo") }, organizationPolicy: DEFAULT_ORGANIZATION_POLICY } as unknown as AgentFlowContext;
+    await onPrefix?.("validated-without-certificate", prefixFixture);
     return { ...dependencies, context, root, handoff, taskId, buildId, logs, publication, manifests, committed, executionBase, capabilityDocuments, cleanup: database.cleanup };
   } catch (error) { database.cleanup(); throw error; }
 }
@@ -834,10 +862,12 @@ function fixtureCapabilityDocuments(handoff: ReturnType<typeof GovernedTaskHando
   return { plan, binding: { ...bindingBody, bindingSha256: canonicalJsonSha256(bindingBody) } };
 }
 
-async function retryCapabilityFixture(f: Awaited<ReturnType<typeof nativeEvidenceFixture>>, change: "none" | "format" | "malformed" = "none") {
+async function retryCapabilityFixture(f: Awaited<ReturnType<typeof nativeEvidenceFixture>>, change: "none" | "format" | "malformed" = "none", onPrefix?: NativePrefixObserver) {
   if (f.store.tasks.getById(f.taskId).state !== "failed") f.store.tasks.transition(f.taskId, "failed", { eventType: "unit.fixture_retry_requested", errorCode: "UNIT_RETRY" });
   f.store.tasks.retry(f.taskId); const attempt = f.store.tasks.getById(f.taskId).attempt;
+  await onPrefix?.("test-harness-created-native-attempt", f);
   f.store.tasks.updateAttempt(f.taskId, attempt, { status: "running", startedAt: new Date().toISOString() }); f.store.tasks.transition(f.taskId, "running");
+  await onPrefix?.("retry-running", f);
   await writeFile(path.join(f.root, "src/index.js"), `export const ready = true; // retry ${attempt}\n`);
   if (change !== "none") {
     if (f.capabilityDocuments === undefined) throw new Error("Missing retry capability documents");
@@ -857,6 +887,7 @@ async function retryCapabilityFixture(f: Awaited<ReturnType<typeof nativeEvidenc
     await writeFile(path.join(f.root, "src/capability-plan.json"), JSON.stringify(plan, null, 4));
   }
   f.store.tasks.transition(f.taskId, "validating");
+  await onPrefix?.("retry-validating", f);
   const commands = f.handoff.tasks[0]?.validate ?? [];
   const summary = await validateTask({ buildId: f.buildId, taskId: f.taskId, attempt, worktreePath: f.root, baseCommit: f.executionBase, ownedPaths: ["src/"], commands, workerCompletedSuccessfully: true });
   const directory = path.join(f.environment.runsPath, f.buildId, f.taskId, `attempt-${attempt}`); await mkdir(directory, { recursive: true });
@@ -879,8 +910,10 @@ async function retryCapabilityFixture(f: Awaited<ReturnType<typeof nativeEvidenc
   }
   const committed = await new TaskCommitService().commit({ worktreePath: f.root, baseCommit: f.executionBase, branchName: "main", backlogTaskId: "AF-001", title: "Retry fixture", changedFiles: summary.ownership.changedFiles, allowNoChanges: false });
   f.store.tasks.recordChangedFiles(f.taskId, attempt, committed.changedFiles);
+  await onPrefix?.("retry-validation-recorded", f);
   await f.manifests.publish({ buildId: f.buildId, taskId: f.taskId, backlogTaskId: "AF-001", attempt, status: "validated", baseCommit: f.executionBase, resultCommit: committed.resultCommit, branch: "main", worktreePath: f.root, changedFiles: committed.changedFiles.map((item) => item.path), consumes: [], produces: f.handoff.tasks[0]?.produces.map(({ name, type, version, path: artifactPath }) => ({ name, type, version, ...(artifactPath === undefined ? {} : { path: artifactPath }) })) ?? [] });
   f.store.tasks.transition(f.taskId, "validated", { resultCommit: committed.resultCommit }); f.store.tasks.updateAttempt(f.taskId, attempt, { status: "succeeded", resultCommit: committed.resultCommit, completedAt: new Date().toISOString(), errorCode: null, errorMessage: null });
+  await onPrefix?.("retry-validated-without-certificate", f);
   return summary;
 }
 
@@ -944,6 +977,239 @@ async function nativeIntegrationHistoryFixture(f: Awaited<ReturnType<typeof nati
   }
   return { certificates, frames, snapshots };
 }
+
+// Capture source rows and private fixture bytes BEFORE evaluating the native
+// projector. Neither its observation nor its decision is an adapter input.
+async function captureNativeParitySource(f: NativePrefixFixture) {
+  const records = () => {
+    const build = f.store.builds.getById(f.buildId);
+    return {
+      build,
+      plan: build.planId === null ? null : f.store.plans.getById(build.planId),
+      tasks: f.store.tasks.listForBuild(f.buildId).map((task) => ({ task, attempts: f.store.tasks.listAttempts(task.id).map((attempt) => ({ attempt, changedFiles: f.store.tasks.listChangedFiles(task.id, attempt.attempt) })) })),
+      validations: f.store.validations.listForBuild(f.buildId),
+      manifests: f.store.manifests.listForBuild(f.buildId),
+      artifacts: f.store.artifacts.listForBuild(f.buildId),
+      events: f.store.events.listForBuild(f.buildId, { limit: 10000 }),
+    };
+  };
+  const before = records();
+  const certificates = await readVerifiedNativeValidationEvidence(f, f.buildId, f.handoff);
+  const files = new Map<string, string>();
+  for (const row of before.validations) if (row.logPath !== null) files.set(row.logPath, await readFile(row.logPath, "utf8"));
+  for (const row of before.manifests) files.set(row.manifestPath, await readFile(row.manifestPath, "utf8"));
+  for (const certificate of certificates) files.set(certificate.sourcePath, await readFile(certificate.sourcePath, "utf8"));
+  for (const relative of ["AGENTS.md", "handoff.json", "package.json", "src/index.js"]) files.set(path.join(f.root, relative), await readFile(path.join(f.root, relative), "utf8"));
+  expect(records()).toEqual(before);
+  const events = before.events;
+  expect(events.length).toBeLessThan(10000);
+  expect(events.map((event) => event.sequence)).toEqual([...new Set(events.map((event) => event.sequence))].sort((a, b) => a - b));
+  return {
+    ...before,
+    handoff: f.handoff,
+    maxAttempts: Math.min(f.environment.retryMaximumAttempts, f.context.organizationPolicy.retries.maximum_attempts),
+    certificates,
+    sourceFiles: [...files].map(([sourcePath, bytes]) => ({ sourcePath, bytes, sha256: createHash("sha256").update(bytes).digest("hex") })),
+    sourceCutoff: { throughSequence: events.at(-1)?.sequence ?? 0, count: events.length, sha256: canonicalJsonSha256(events) },
+    gitHead: (await execFileAsync("git", ["-C", f.root, "rev-parse", "HEAD"])).stdout.trim(),
+  };
+}
+
+type NativeParitySource = Awaited<ReturnType<typeof captureNativeParitySource>>;
+
+// This adapter uses only retained native input records. Its normalized sequence
+// is observation order, with each event bound to an actual sampled source cut.
+// Low-level retry-created attempts are test inputs, not coordinator authority.
+function nativeParityEvents(sources: NativeParitySource[]) {
+  const events: Array<Record<string, unknown>> = [];
+  const bindings: Array<Record<string, unknown>> = [];
+  const seenEvents = new Set<number>();
+  const seenChanges = new Set<string>();
+  const seenAttempts = new Set<string>();
+  let priorState: string | undefined;
+  let completed = false;
+  let previousSource: NativeParitySource | undefined;
+  let proof = { items: [] as string[], satisfied: [] as string[] };
+  const contradictory: string[] = [];
+  const append = (type: string, data: Record<string, unknown>, source: NativeParitySource, nativeSequence: number | null = null) => {
+    const sequence = events.length + 1;
+    events.push({ sequence, type, ...data });
+    bindings.push({ sequence, type, sourceCutoff: source.sourceCutoff, nativeSequence });
+  };
+  const snapshot = (source: NativeParitySource, nativeSequence: number | null = null) => append("evidence.recorded", { ...proof, contradictory: [...new Set(contradictory)].sort() }, source, nativeSequence);
+  for (const source of sources) {
+    if (source.sourceCutoff.count !== source.events.length || source.sourceCutoff.sha256 !== canonicalJsonSha256(source.events) || source.sourceCutoff.throughSequence !== (source.events.at(-1)?.sequence ?? 0) || new Set(source.events.map((event) => event.sequence)).size !== source.events.length || source.events.some((event, index) => index > 0 && event.sequence <= (source.events[index - 1]?.sequence ?? 0))) throw new Error("Native parity source prefix is malformed");
+    if (previousSource !== undefined && canonicalJsonSha256(source.events.slice(0, previousSource.events.length)) !== canonicalJsonSha256(previousSource.events)) throw new Error("Native parity source prefix was omitted or rewritten");
+    if (source.plan === null || source.plan.lockedAt === null || source.plan.id !== source.build.planId || source.plan.repositoryId !== source.build.repositoryId || canonicalJsonSha256(source.plan.normalizedPlan) !== canonicalJsonSha256(source.build.normalizedPlan)) throw new Error("Native parity immutable plan source is missing");
+    const entry = source.tasks[0];
+    if (source.tasks.length !== 1 || entry === undefined || entry.task.buildId !== source.build.id || entry.task.backlogTaskId !== source.handoff.tasks[0]?.id) throw new Error("Native parity source attribution is incomplete");
+    const { task, attempts } = entry;
+    const current = attempts.find(({ attempt }) => attempt.attempt === task.attempt);
+    if (current === undefined || current.attempt.taskId !== task.id || current.attempt.buildId !== source.build.id) throw new Error("Native parity current attempt is missing");
+    if (previousSource !== undefined && task.attempt < (previousSource.tasks[0]?.task.attempt ?? 0)) throw new Error("Native parity attempt chronology moved backwards");
+    for (const certificate of source.certificates) {
+      const file = source.sourceFiles.find((item) => item.sourcePath === certificate.sourcePath);
+      const publication = source.events.filter((event) => event.type === "evidence.native_validation_certified" && event.payload.certificateId === certificate.id);
+      const producer = certificate.body.producer;
+      if (certificate.id !== canonicalJsonSha256(certificate.body) || file === undefined || createHash("sha256").update(file.bytes).digest("hex") !== certificate.sha256 || file.sha256 !== certificate.sha256 || file.bytes !== JSON.stringify({ id: certificate.id, ...certificate.body }, null, 2) + "\n" || publication.length !== 1 || publication[0]?.taskId !== task.id || producer.buildId !== source.build.id || producer.taskId !== task.id || producer.backlogTaskId !== task.backlogTaskId || producer.attempt !== task.attempt || producer.resultCommit !== task.resultCommit || current.attempt.status !== "succeeded" || !source.handoff.proof.requiredEvidence.includes(certificate.body.artifact.name)) throw new Error("Native parity verified certificate source is incomplete");
+    }
+    if (events.length === 0) {
+      const handoff = source.handoff;
+      append("authority.observed", { authority: { approvalAuthority: "HUMAN_OR_REPOSITORY", handoffId: handoff.handoffId, handoffSha256: canonicalJsonSha256(handoff), repositoryId: handoff.repository.remote ?? null, baseCommit: handoff.repository.baseCommit, snapshotSha256: handoff.repository.snapshotSha256, worktreeState: handoff.repository.worktreeState, authorityStateSha256: handoff.authority.stateSha256, governanceReportSha256: handoff.authority.governanceReportSha256, authoritySources: handoff.authority.sources } }, source);
+      append("execution.started", { buildId: source.build.id, maxAttempts: source.maxAttempts }, source);
+    }
+    if (!seenAttempts.has(current.attempt.id)) {
+      seenAttempts.add(current.attempt.id);
+      append("attempt.started", { attempt: current.attempt.attempt }, source);
+      proof = { items: [], satisfied: [] };
+    }
+    for (const item of attempts) {
+      if (item.attempt.taskId !== task.id || item.attempt.buildId !== source.build.id) throw new Error("Native parity foreign attempt");
+      const key = canonicalJsonSha256({ id: item.attempt.id, changedFiles: item.changedFiles });
+      if (!seenChanges.has(key) && item.changedFiles.length > 0) {
+        seenChanges.add(key);
+        append("files.changed", { taskId: task.backlogTaskId, paths: item.changedFiles.map((file) => file.path) }, source);
+      }
+    }
+    for (const event of source.events) {
+      if (seenEvents.has(event.sequence)) continue;
+      seenEvents.add(event.sequence);
+      if (event.buildId !== source.build.id) throw new Error("Native parity foreign build event");
+      if (event.type === "evidence.recorded") {
+        const values: unknown = event.payload.contradictory ?? [];
+        if (!Array.isArray(values) || values.some((value) => typeof value !== "string")) throw new Error("Native parity malformed contradiction source");
+        contradictory.push(...values as string[]);
+        snapshot(source, event.sequence);
+      }
+      if (event.payload.governorFailure !== undefined) {
+        const frame = event.payload.governorFailure as Record<string, unknown>;
+        const failed = attempts.find(({ attempt }) => attempt.id === frame.attemptId);
+        if (!["task.remote_worker_failed", "task.worker_failed", "task.execution_pipeline_failed", "task.validation_failed", "integration.failed"].includes(event.type) || failed === undefined || failed.attempt.status !== "failed" || failed.attempt.errorCode === null || event.taskId !== task.id || frame.attempt !== failed.attempt.attempt || event.payload.to !== "failed") throw new Error("Native parity failure chronology is incomplete");
+        if (event.type === "integration.failed" && proof.items.length !== source.handoff.proof.requiredEvidence.length) throw new Error("Native parity prior verified publication prefix is missing");
+        const retryable = DEFAULT_RETRYABLE_FAILURE_CODES.has(failed.attempt.errorCode);
+        append("validation.failed", { failure: { code: failed.attempt.errorCode, classification: retryable ? "transient" : "deterministic", retryable, signature: failed.attempt.errorMessage ?? failed.attempt.errorCode, files: failed.changedFiles.map((file) => file.path) } }, source, event.sequence);
+      }
+    }
+    if (["validated", "integrating", "integrated"].includes(task.state) && !["validated", "integrating", "integrated"].includes(priorState ?? "")) {
+      if (current.attempt.status !== "succeeded" || current.attempt.resultCommit !== task.resultCommit || !source.manifests.some((manifest) => manifest.taskId === task.id && manifest.attempt === task.attempt && manifest.status === "validated")) throw new Error("Native parity successful validation source is missing");
+      append("validation.passed", {}, source);
+    }
+    proof = { items: source.certificates.map((certificate) => certificate.id), satisfied: source.certificates.map((certificate) => certificate.body.artifact.name) };
+    snapshot(source);
+    if (source.build.status === "completed" && !completed) {
+      if (task.state !== "integrated" || task.integrationCommit === null) throw new Error("Native parity completion source is missing");
+      append("execution.integrated", {}, source);
+      completed = true;
+    }
+    priorState = task.state;
+    previousSource = source;
+  }
+  return { events, bindings };
+}
+
+describe("TCP-002 actual native source-prefix correspondence", () => {
+  it.runIf(Boolean(process.env.TCP002_REFERENCE_ROOT) || process.env.TCP002_NATIVE_PARITY_REQUIRED === "1")("compares whole observations and actions from the same retained native history", async () => {
+    const referenceRoot = process.env.TCP002_REFERENCE_ROOT;
+    if (!referenceRoot) throw new Error("TCP002_REFERENCE_ROOT is required for native parity qualification");
+    const outputParent = process.env.TCP002_EVIDENCE_OUTPUT_ROOT;
+    let retainedRoot: string | undefined;
+    if (outputParent !== undefined) {
+      await mkdir(outputParent, { recursive: true });
+      retainedRoot = await mkdtemp(path.join(outputParent, "native-prefix-"));
+    }
+    const sourceBindings = await Promise.all(["src/observations.js", "src/governor.js", "src/contracts.js"].map(async (relativePath) => ({ relativePath, sha256: createHash("sha256").update(await readFile(path.join(referenceRoot, relativePath))).digest("hex") })));
+    const prefixes: Array<{ label: string; source: NativeParitySource; native: { observation: unknown; decision: unknown } }> = [];
+    const observed = vi.spyOn(GovernorControlService.prototype, "evaluate");
+    const onPrefix: NativePrefixObserver = async (label, fixture) => {
+      const source = await captureNativeParitySource(fixture);
+      const native = await evaluateGovernedBuild(fixture.context, fixture.buildId);
+      const input = observed.mock.calls.at(-1)?.[0];
+      if (native === undefined || input === undefined) throw new Error("Missing actual native evaluation");
+      expect(input.nativeSources).toMatchObject({
+        build: { id: source.build.id, sha256: canonicalJsonSha256(source.build) },
+        events: source.sourceCutoff,
+        tasks: source.tasks.map(({ task, attempts }) => ({ id: task.id, sha256: canonicalJsonSha256(task), attempts: attempts.map(({ attempt, changedFiles }) => ({ id: attempt.id, sha256: canonicalJsonSha256(attempt), changedFilesSha256: canonicalJsonSha256(changedFiles) })) })),
+      });
+      prefixes.push({ label, source, native: { observation: structuredClone(input.observation), decision: native.decision } });
+    };
+    let f: Awaited<ReturnType<typeof nativeEvidenceFixture>> | undefined;
+    let reference: unknown;
+    let failure: string | null = null;
+    try {
+      f = await nativeEvidenceFixture(false, undefined, true, onPrefix);
+      f.store.events.append({ buildId: f.buildId, type: "evidence.recorded", payload: { items: ["arbitrary-unit-label"], satisfied: ["focused tests"] } });
+      await onPrefix("untrusted-positive-labels", f);
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        if (attempt > 1) expect((await retryCapabilityFixture(f, "none", onPrefix)).readyForCommit).toBe(true);
+        await publishNativeValidationEvidence(f, f.buildId, f.handoff);
+        await onPrefix(`certificate-${attempt}`, f);
+        if (attempt < 3) {
+          await failNativeIntegrationFixture(f);
+          await onPrefix(`integration-failure-${attempt}`, f);
+        }
+      }
+      f.store.tasks.transition(f.taskId, "integrating");
+      await onPrefix("integrating", f);
+      f.store.tasks.transition(f.taskId, "integrated", { integrationCommit: f.store.tasks.getById(f.taskId).resultCommit });
+      const artifact = f.store.artifacts.listForBuild(f.buildId)[0];
+      if (artifact === undefined) throw new Error("Missing actual native artifact");
+      f.store.artifacts.setStatus(artifact.id, "integrated");
+      f.store.builds.transition(f.buildId, "completed");
+      await onPrefix("completed", f);
+      const receipt = await makeDesignIntelligenceReceipt(f.context, f.buildId);
+      const current = await readVerifiedNativeValidationEvidence(f, f.buildId, f.handoff);
+      expect(receipt.receipt.tasks[0]?.validation[0]?.evidenceId).toBe(current[0]?.id);
+      f.store.events.append({ buildId: f.buildId, type: "evidence.recorded", payload: { contradictory: ["fixture diagnostic"] } });
+      await onPrefix("cumulative-contradiction-after-completion", f);
+      if (retainedRoot !== undefined) await execFileAsync("git", ["-C", f.root, "bundle", "create", path.join(retainedRoot, "disposable-repository.bundle"), "--all"]);
+      const sources = prefixes.map((prefix) => prefix.source);
+      const finalSource = sources.at(-1);
+      if (finalSource === undefined) throw new Error("Missing actual native source history");
+      const negativeCases: Array<{ defect: string; refused: boolean }> = [];
+      const refuses = (defect: string, corrupted: NativeParitySource[], expected?: RegExp) => {
+        expect(() => nativeParityEvents(corrupted), defect).toThrow(expected);
+        negativeCases.push({ defect, refused: true });
+      };
+      refuses("missing prior publication prefixes", [finalSource]);
+      const rewritten = structuredClone(sources);
+      const rewrittenSource = rewritten.at(-1);
+      const rewrittenEvent = rewrittenSource?.events[0];
+      if (rewrittenSource === undefined || rewrittenEvent === undefined) throw new Error("Missing fixture event for source refusal");
+      rewrittenEvent.type = "rewritten.history";
+      rewrittenSource.sourceCutoff.sha256 = canonicalJsonSha256(rewrittenSource.events);
+      refuses("rewritten source prefix", rewritten, /omitted or rewritten/);
+      const foreign = structuredClone(sources);
+      const foreignAttempt = foreign[0]?.tasks[0]?.attempts[0]?.attempt;
+      if (foreignAttempt === undefined) throw new Error("Missing fixture attempt for source refusal");
+      foreignAttempt.taskId = "foreign-native-task";
+      refuses("cross-task attempt source", foreign);
+      const missingBytes = structuredClone(sources);
+      const certified = missingBytes.find((source) => source.certificates.length > 0);
+      if (certified === undefined) throw new Error("Missing actual certificate prefix");
+      certified.sourceFiles = certified.sourceFiles.filter((file) => !certified.certificates.some((certificate) => certificate.sourcePath === file.sourcePath));
+      refuses("missing verified certificate bytes", missingBytes);
+      const batches = prefixes.map((_, index) => nativeParityEvents(prefixes.slice(0, index + 1).map((prefix) => prefix.source)));
+      const inputPath = path.join(f.root, "native-reference-input.json");
+      await writeFile(inputPath, JSON.stringify({ handoff: f.handoff, eventBatches: batches.map((batch) => batch.events) }));
+      const outputPath = path.join(f.root, "native-reference-output.json");
+      const runner = "import {readFile,writeFile} from 'node:fs/promises';import {pathToFileURL} from 'node:url';import path from 'node:path';const [root,input,output]=process.argv.slice(1);const {bindContract}=await import(pathToFileURL(path.join(root,'src/contracts.js')));const {reduceExecutionEvents}=await import(pathToFileURL(path.join(root,'src/observations.js')));const {evaluateGovernor,GOVERNOR_POLICY_V1}=await import(pathToFileURL(path.join(root,'src/governor.js')));const data=JSON.parse(await readFile(input,'utf8'));const contract=bindContract(data.handoff);await writeFile(output,JSON.stringify(data.eventBatches.map(events=>{const observation=reduceExecutionEvents(events,{contract});return {observation,decision:evaluateGovernor({contract,observation,policy:GOVERNOR_POLICY_V1})}})),{flag:'wx'});";
+      await execFileAsync(process.execPath, ["--input-type=module", "-e", runner, referenceRoot, inputPath, outputPath], { maxBuffer: 16 * 1024 * 1024 });
+      reference = JSON.parse(await readFile(outputPath, "utf8")) as unknown;
+      if (retainedRoot !== undefined) await writeFile(path.join(retainedRoot, "native-prefix-corpus.actual.json"), JSON.stringify({ classification: "ACTUAL_DISPOSABLE_NATIVE_RECORD_PREFIXES_TEST_HARNESS_CREATED_NATIVE_ATTEMPT", limitations: ["Inert integration Git/validation ports; task validation, SQLite, Git task commits, logs, manifests and certificates are actual", "Low-level retry-created attempts do not establish authorized governed coordinator recovery", "Complete sampled native event/row history and fixture evidence bytes retained; SQLite page files are not retained", "No provider, deployment or acceptance evidence"], sourceBindings, prefixes, batches, reference, negativeCases, receipt: receipt.receipt }, null, 2), { flag: "wx", mode: 0o600 });
+      if (!Array.isArray(reference)) throw new Error("Reference output is not a complete prefix array");
+      expect(reference).toHaveLength(prefixes.length);
+      for (const [index, prefix] of prefixes.entries()) expect(reference[index], "whole observation and decision at " + prefix.label).toEqual(prefix.native);
+      expect(await Promise.all(sourceBindings.map(async ({ relativePath }) => ({ relativePath, sha256: createHash("sha256").update(await readFile(path.join(referenceRoot, relativePath))).digest("hex") })))).toEqual(sourceBindings);
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+      throw error;
+    } finally {
+      if (retainedRoot !== undefined) await writeFile(path.join(retainedRoot, "result.actual.json"), JSON.stringify({ classification: "NATIVE_SOURCE_CORRESPONDENCE_NOT_AUTHORIZED_GOVERNED_RETRY_ACCEPTANCE", passed: failure === null, failure, sourceBindings, prefixes, reference }, null, 2), { flag: "wx", mode: 0o600 });
+      observed.mockRestore();
+      f?.cleanup();
+    }
+  });
+});
 
 describe("historical native publication context", () => {
   it.each([
