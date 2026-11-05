@@ -6,7 +6,7 @@ Orbit return loop against disposable records with an inert worker. Setting only
 fail qualification; they are not a reason to skip the test or replace its oracle.
 
 The two verification workflows and tag qualification reuse the same fixture
-setup. Public AgentFlow source lives in `agentflow/`; protected native checkouts
+setup. AgentFlow source lives in `agentflow/`; immutable native checkouts
 are siblings, outside the source archive and npm packaging tree. The existing
 `npm run verify` and `npm run release:verify` commands remain authoritative.
 
@@ -14,8 +14,8 @@ are siblings, outside the source archive and npm packaging tree. The existing
 
 | Input | Version |
 | --- | --- |
-| Native source, including tests and scripts | PROOFLOOM `34ed5877b2a92c3b65081ad13b19803d44d8096d` |
-| Existing private portable fixture package | PROOFLOOM `1540ec475827926204b739a28ec0d6c02c967472` |
+| Native source, including tests and scripts | Wale `34ed5877b2a92c3b65081ad13b19803d44d8096d` |
+| Existing portable fixture package | Wale `1540ec475827926204b739a28ec0d6c02c967472` |
 | AgentFlow source under qualification | The current Actions checkout, including the PR merge commit for PR runs |
 
 The package contains the retained Orbit API module and portable host/launcher.
@@ -32,38 +32,54 @@ storage, outside both versioned checkouts.
 
 ## Protected access
 
-Hosted native qualification requires an administrator-configured environment
-named `wale-native-ci`, with required owner review of the actual source and
-workflow revision. Referencing that environment in YAML does not establish that
-its protection rules or credentials have been configured. Configure protection
-before enabling the credential.
+The existing hosted route requires the `wale-native-ci` environment and owner
+review of the actual source and workflow revision. Referencing that environment
+in YAML does not establish its protection rules. GitHub's required human-reviewer
+feature is unavailable in the current private-repository configuration; it is
+not claimed configured, enforced or satisfied.
 
-Use a dedicated **read-only deploy key scoped to PROOFLOOM**, stored only as the
-environment secret `WALE_NATIVE_READ_KEY`. Pass it only to the private checkout
-steps, with `persist-credentials: false`. The ordinary Actions repository token
-is not cross-repository private-read authorization. Do not use an account SSH
-key, publish a private key, enable repository writes, or place the credential
-in a job-wide environment variable.
+Both pinned inputs are now public in `TOTALLYMAJOR/Wale` (repository ID
+1341131707, formerly named PROOFLOOM). The two checkout steps use ordinary
+Actions checkout access, with `persist-credentials: false`; no separate private
+read key or environment secret is required. Keep the old deploy key and
+`WALE_NATIVE_READ_KEY` revoked/absent. Do not recreate them as a CI prerequisite.
+The immutable source revisions and preparation helper's content checks remain
+unchanged.
 
-The native-input preflight also refuses fork and Dependabot execution and
-unexpected repositories, actors or refs. It does not make unreviewed code safe:
-the protected environment's exact-source review is the trust boundary. A failed
-or unapproved preflight must not produce a successful qualification check.
+### Proposed delegated review for the public-input route
 
-Deploy keys do not expire automatically. Record the key's owner and purpose,
-rotate it as needed, and revoke it and the environment secret when this access
-is no longer required. Creating the credential or changing its trust scope
-requires the repository owner's authorization.
+This amendment is proposed until an actual owner reply authorizes it. Without
+that authorization, keep hosted native qualification blocked. Routine PR/merge
+delegation and public input visibility alone do not authorize this amendment.
+
+The proposed route delegates exact-source and workflow review to the coordinator
+and an independent reviewer. Before permitting a run, both must review the exact
+AgentFlow head, main base and proposed merge tree, workflow/action/helper content,
+the two frozen public input revisions and their content bindings, and retained
+local qualification. Record that review against those exact identities and the
+actual owner authorization; agent-written approval text is not owner consent.
+Source, input or workflow drift requires renewed exact-source review before use.
+
+This route is limited to the existing trusted
+`codex/af-release-backlog-20261103` pull-request source and owner-originated main
+updates. It grants no tag/release activation or future private-input access.
+The two input snapshots must remain public and pinned as above; stop on access
+denial, identity/pin drift, failed review, privacy failure or failed checks.
+
+Retain `wale-native-ci`, the existing actor/event/repository/ref refusals,
+verification jobs' `contents: read`, immutable input checks, private diagnostics
+and release gates. Do not remove the environment, change repository protection
+or approver fields, restore a key, or imply that delegated review satisfies an
+unavailable GitHub human-reviewer feature. Owner authorization changes only this
+bounded review model; it does not waive product authority or native acceptance.
 
 ## Public evidence and private diagnostics
 
-Private checkout actions can expose the private repository name, pinned commit
-hashes and subjects, filesystem paths and ordinary Git diagnostics. The owner
-must authorize that limited metadata disclosure before hosted activation.
-`show-progress: false` reduces progress output; it does not silence checkout.
-This exception does not authorize disclosure of private file contents.
+The pinned source snapshots and their checkout metadata are public. This does
+not make runtime records, generated fixture data, private operational evidence
+or raw native diagnostics approved public artifacts.
 
-Code under test can read its private inputs. Capture both output streams of
+Code under test can read its native inputs. Capture both output streams of
 native preparation and qualification only in private runner-temporary logs;
 do not stream raw errors, stacks, fixture contents or private source into public
 Actions logs. Emit only bounded status information. Do not upload or cache the

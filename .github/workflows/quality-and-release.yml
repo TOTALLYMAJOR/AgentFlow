@@ -32,8 +32,6 @@ jobs:
           cache-dependency-path: agentflow/package-lock.json
       - run: npm ci
       - uses: ./agentflow/.github/actions/native-fixtures
-        with:
-          native-read-key: ${{ secrets.WALE_NATIVE_READ_KEY }}
       - name: Verify with private native fixtures
         run: |
           umask 077
@@ -69,8 +67,6 @@ jobs:
           cache-dependency-path: agentflow/package-lock.json
       - run: npm ci
       - uses: ./agentflow/.github/actions/native-fixtures
-        with:
-          native-read-key: ${{ secrets.WALE_NATIVE_READ_KEY }}
       - name: Qualify tagged release
         id: qualify
         run: |

@@ -208,6 +208,25 @@ describe('public release artifact boundary', () => {
 });
 
 describe('native fixture access preflight', () => {
+  it('uses the two immutable public snapshots without a private fixture credential', () => {
+    const actionPath = resolve(repositoryRoot, '.github/actions/native-fixtures/action.yml');
+    const actionText = readFileSync(actionPath, 'utf8');
+    const action = parse(actionText) as { inputs?: unknown };
+    expect(action.inputs).toBeUndefined();
+    expect(actionText).not.toContain('ssh-key:');
+    expect(actionText).not.toContain('native-read-key');
+    const checkouts = nativeActionSteps().filter((step) => step.uses === 'actions/checkout@v6');
+    expect(checkouts.map((step) => step.with?.repository)).toEqual(['TOTALLYMAJOR/Wale', 'TOTALLYMAJOR/Wale']);
+    expect(checkouts.map((step) => step.with?.ref)).toEqual([
+      '34ed5877b2a92c3b65081ad13b19803d44d8096d',
+      '1540ec475827926204b739a28ec0d6c02c967472',
+    ]);
+    for (const step of checkouts) expect(step.with?.['persist-credentials']).toBe(false);
+    for (const path of ['.github/workflows/verify.yml', '.github/workflows/quality-and-release.yml']) {
+      expect(readFileSync(resolve(repositoryRoot, path), 'utf8')).not.toContain('WALE_NATIVE_READ_KEY');
+    }
+  });
+
   const trustedPullRequest = {
     NATIVE_EVENT_NAME: 'pull_request',
     NATIVE_REPOSITORY: 'TOTALLYMAJOR/AgentFlow',
@@ -234,10 +253,10 @@ describe('native fixture access preflight', () => {
     it(`${accepted ? 'accepts' : 'refuses'} ${name} before private access`, () => {
       // Weakening the event/actor/source guard must expose a rejected execution here.
       const steps = nativeActionSteps();
-      const firstPrivateCheckout = steps.findIndex((step) => step.with?.repository === 'TOTALLYMAJOR/PROOFLOOM');
+      const firstNativeCheckout = steps.findIndex((step) => step.with?.repository === 'TOTALLYMAJOR/Wale');
       const guardIndex = steps.findIndex((step) => step.name === 'Authorize native fixture access');
       expect(guardIndex).toBeGreaterThanOrEqual(0);
-      expect(firstPrivateCheckout).toBeGreaterThan(guardIndex);
+      expect(firstNativeCheckout).toBeGreaterThan(guardIndex);
       const guard = steps[guardIndex];
       const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', `${scriptFor(guard)}\nprintf 'private-access-reached\\n'`], {
         encoding: 'utf8',

@@ -1,9 +1,5 @@
 name: Prepare immutable native fixtures
-description: Prepare the reviewed private fixtures without publishing their diagnostics.
-inputs:
-  native-read-key:
-    description: Read-only PROOFLOOM deploy key from the protected wale-native-ci environment.
-    required: true
+description: Prepare immutable public Wale inputs without publishing native diagnostics.
 runs:
   using: composite
   steps:
@@ -38,13 +34,6 @@ runs:
           exit 1
         fi
         printf '%s\n' 'Native fixture access preflight passed; protected source review is still required.'
-    - name: Require protected fixture credential
-      if: inputs.native-read-key == ''
-      shell: bash
-      working-directory: agentflow
-      run: |
-        printf '%s\n' 'Native fixture credential is unavailable.'
-        exit 1
     - uses: actions/setup-python@v6
       with:
         python-version: '3.11'
@@ -55,21 +44,17 @@ runs:
     - name: Check out immutable native input
       uses: actions/checkout@v6
       with:
-        repository: TOTALLYMAJOR/PROOFLOOM
+        repository: TOTALLYMAJOR/Wale
         ref: 34ed5877b2a92c3b65081ad13b19803d44d8096d
         path: native-fixtures/native
-        ssh-key: ${{ inputs.native-read-key }}
-        ssh-strict: true
         persist-credentials: false
         show-progress: false
     - name: Check out immutable portable bundle
       uses: actions/checkout@v6
       with:
-        repository: TOTALLYMAJOR/PROOFLOOM
+        repository: TOTALLYMAJOR/Wale
         ref: 1540ec475827926204b739a28ec0d6c02c967472
         path: native-fixtures/bundle
-        ssh-key: ${{ inputs.native-read-key }}
-        ssh-strict: true
         persist-credentials: false
         show-progress: false
     - name: Prepare private fixture environment
