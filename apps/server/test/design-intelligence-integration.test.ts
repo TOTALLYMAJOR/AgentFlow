@@ -675,6 +675,106 @@ describe("ordinary governed execution admission", () => {
     });
   });
 
+  it.each(["failed", "cancelled"] as const)("admits a fresh separately approved build after a %s build without rewriting its history", async (terminalStatus) => {
+    await withAdmissionFixture(true, async ({ root, app, context, buildId }) => {
+      // Admission qualification only: construct real native runtimes, but never
+      // dispatch work or invoke a provider. Failure/attempt rows below are an
+      // explicit test-harness setup, not evidence of a real worker failure.
+      const scheduling = vi.spyOn(context.coordinator, "requestTick").mockImplementation(() => undefined);
+      const provider = vi.spyOn(context.agentProviders, "get").mockImplementation(() => { throw new Error("TEST_PROVIDER_MUST_NOT_RUN"); });
+      const initial = context.store.builds.getById(buildId);
+      const initialTask = context.store.tasks.listForBuild(buildId)[0];
+      if (initial.planId === null || initialTask === undefined) throw new Error("Expected the original native plan/task");
+      const initialPlan = context.store.plans.getById(initial.planId);
+      const firstApproval = GovernedTaskHandoffSchema.parse(JSON.parse(await readFile(path.join(root, "handoff.json"), "utf8")));
+      const firstStart = await app.inject({ method: "POST", url: `/api/builds/${buildId}/start` });
+      expect(firstStart.statusCode, firstStart.body).toBe(200);
+      context.store.tasks.createAttempt({ id: `test-harness-${randomUUID()}`, taskId: initialTask.id, buildId, attempt: initialTask.attempt, status: "running", startedAt: new Date().toISOString() });
+      context.store.tasks.transition(initialTask.id, "running", { eventType: "unit.fixture_task_running" });
+      context.store.tasks.updateAttempt(initialTask.id, initialTask.attempt, { status: "failed", completedAt: new Date().toISOString(), errorCode: "TEST_HARNESS_FAILURE", errorMessage: "Synthetic admission fixture only" });
+      context.store.tasks.transition(initialTask.id, "failed", { eventType: "unit.fixture_task_failed", errorCode: "TEST_HARNESS_FAILURE", errorMessage: "Synthetic admission fixture only" });
+      if (terminalStatus === "cancelled") {
+        const cancelled = await app.inject({ method: "POST", url: `/api/builds/${buildId}/cancel` });
+        expect(cancelled.statusCode, cancelled.body).toBe(200);
+      } else {
+        context.store.builds.transition(buildId, "failed", { eventType: "unit.fixture_build_failed" });
+      }
+      expect(context.store.builds.getById(buildId).status).toBe(terminalStatus);
+      const retry = await app.inject({ method: "POST", url: `/api/builds/${buildId}/tasks/${initialTask.id}/retry` });
+      expect(retry.statusCode, retry.body).toBe(409);
+      expect(retry.json()).toMatchObject({ error: { code: "GOVERNED_RECOVERY_NOT_AUTHORIZED" } });
+      const priorDetail = await app.inject({ method: "GET", url: `/api/builds/${buildId}/tasks/${initialTask.id}` });
+      expect(priorDetail.statusCode, priorDetail.body).toBe(200);
+      const retained = {
+        build: context.store.builds.getById(buildId),
+        plan: context.store.plans.getById(initial.planId),
+        tasks: context.store.tasks.listForBuild(buildId),
+        detail: priorDetail.json<Record<string, unknown>>(),
+        events: context.store.events.listForBuild(buildId),
+      };
+      expect(retained.detail.attempts).toEqual([expect.objectContaining({ taskId: initialTask.id, buildId, status: "failed", errorCode: "TEST_HARNESS_FAILURE" })]);
+
+      // The first fixture approval has iterationCeiling=1. Create a distinct
+      // synthetic approval for this exact new base; do not infer permission for
+      // another iteration from the original receipt or the terminal build.
+      const freshBase = await admissionGit(root, ["rev-parse", "HEAD"]);
+      const authority = await readFile(path.join(root, "AGENTS.md"));
+      const freshApproval = GovernedTaskHandoffSchema.parse(approvedHandoff(freshBase, createHash("sha256").update(authority).digest("hex")));
+      expect(freshApproval.authority.approvalReceipt.receiptId).not.toBe(firstApproval.authority.approvalReceipt.receiptId);
+      expect(freshApproval.authority.approvalReceipt.repositoryRevision).toBe(freshBase);
+      expect(freshApproval.authority.approvalReceipt.constraints.iterationCeiling).toBe(1);
+      expect(freshApproval.authority.approvalReceipt.supersedes).toBeNull();
+      await writeFile(path.join(root, "handoff.json"), JSON.stringify(freshApproval));
+      await writeFile(path.join(root, "BACKLOG.md"), renderBacklog(freshApproval, "handoff.json", "BACKLOG.md"));
+      await admissionGit(root, ["add", "handoff.json", "BACKLOG.md"]);
+      await admissionGit(root, ["commit", "-m", "fixture separately approved fresh execution packet"]);
+      const executionBase = await admissionGit(root, ["rev-parse", "HEAD"]);
+      expect(executionBase).not.toBe(initial.baseCommit);
+      expect(await admissionGit(root, ["status", "--porcelain=v1"])).toBe("");
+      const planned = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId: initial.repositoryId } });
+      expect(planned.statusCode, planned.body).toBe(201);
+      const planId = planned.json<{ id: string }>().id;
+      expect(planId).not.toBe(initial.planId);
+      const created = await app.inject({ method: "POST", url: "/api/builds", payload: { planId } });
+      expect(created.statusCode, created.body).toBe(201);
+      const freshBuildId = created.json<{ id: string }>().id;
+      expect(freshBuildId).not.toBe(buildId);
+      const freshBuild = context.store.builds.getById(freshBuildId);
+      expect(freshBuild).toMatchObject({ repositoryId: initial.repositoryId, planId, baseCommit: executionBase, status: "ready" });
+      expect(freshBuild.integrationBranch).not.toBe(initial.integrationBranch);
+      const freshPlan = context.store.plans.getById(planId);
+      expect(freshPlan.lockedAt).not.toBeNull();
+      expect(freshPlan.normalizedPlan.governedHandoff).toMatchObject({ id: freshApproval.handoffId, sha256: canonicalJsonSha256(freshApproval), governedBaseCommit: freshBase, executionBaseCommit: executionBase });
+      expect(freshBuild.normalizedPlan).toEqual(freshPlan.normalizedPlan);
+      const freshTask = context.store.tasks.listForBuild(freshBuildId)[0];
+      if (freshTask === undefined) throw new Error("Expected a fresh native task");
+      expect(freshTask.id).not.toBe(initialTask.id);
+      expect(freshTask).toMatchObject({ buildId: freshBuildId, backlogTaskId: initialTask.backlogTaskId, state: "ready", resultCommit: null, integrationCommit: null });
+      const freshStart = await app.inject({ method: "POST", url: `/api/builds/${freshBuildId}/start` });
+      expect(freshStart.statusCode, freshStart.body).toBe(200);
+      expect(context.store.builds.getById(freshBuildId).status).toBe("running");
+      expect(context.store.builds.findActive(initial.repositoryId)?.id).toBe(freshBuildId);
+      const freshDetail = await app.inject({ method: "GET", url: `/api/builds/${freshBuildId}/tasks/${freshTask.id}` });
+      expect(freshDetail.statusCode, freshDetail.body).toBe(200);
+      expect(freshDetail.json()).toMatchObject({ id: freshTask.id, state: "ready", attempts: [] });
+      const freshEvents = context.store.events.listForBuild(freshBuildId);
+      expect(freshEvents.some((event) => event.type === "build.started")).toBe(true);
+      expect(freshEvents.some((event) => event.type === "task.started" || event.type === "evidence.native_validation_certified" || event.type === "integration.completed")).toBe(false);
+      expect(scheduling.mock.calls).toEqual([[buildId], [freshBuildId]]);
+      expect(provider).not.toHaveBeenCalled();
+      expect(await admissionGit(root, ["rev-parse", "HEAD"])).toBe(executionBase);
+      expect(await admissionGit(root, ["status", "--porcelain=v1"])).toBe("");
+      expect(context.store.builds.getById(buildId)).toEqual(retained.build);
+      expect(context.store.plans.getById(initial.planId)).toEqual(initialPlan);
+      expect(context.store.plans.getById(initial.planId)).toEqual(retained.plan);
+      expect(context.store.tasks.listForBuild(buildId)).toEqual(retained.tasks);
+      expect(context.store.events.listForBuild(buildId)).toEqual(retained.events);
+      const priorReadback = await app.inject({ method: "GET", url: `/api/builds/${buildId}/tasks/${initialTask.id}` });
+      expect(priorReadback.statusCode, priorReadback.body).toBe(200);
+      expect(priorReadback.json()).toEqual(retained.detail);
+    });
+  });
+
   it.each([
     { name: "governed", governed: true },
     { name: "ungoverned", governed: false },
