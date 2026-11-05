@@ -65,8 +65,28 @@ export function registerDesignIntelligenceRoutes(app: FastifyInstance, context: 
         proposeReplan: async () => ({ acknowledged: false, details: { requiresApproval: true } }),
         cancel: async () => { context.coordinator.cancel(id); return { acknowledged: true, details: { state: "cancelled" } }; },
       });
+      let observedBuildStatusAfter: string | undefined;
+      try { observedBuildStatusAfter = context.store.builds.getById(id).status; }
+      catch { /* Optional readback cannot erase an acknowledgement or prove an effect. */ }
       receiptPersistAttempted = true;
-      context.store.events.append({ buildId: id, type: "governor.intervention_acknowledged", payload: { decisionRecordHash: evaluated.record.recordHash, action: evaluated.decision.action, ...acknowledgement } });
+      context.store.events.append({
+        buildId: id,
+        type: "governor.intervention_acknowledged",
+        payload: {
+          invocationSource: "local-http-api",
+          decisionRecordHash: evaluated.record.recordHash,
+          action: evaluated.decision.action,
+          ...acknowledgement,
+          details: {
+            ...acknowledgement.details,
+            runtimeApplyInvoked,
+            acknowledgementAvailable: true,
+            receiptPersistAttempted,
+            observedBuildStatusBefore,
+            observedBuildStatusAfter,
+          },
+        },
+      });
       return { ...evaluated, acknowledgement };
     } catch (error) {
       let observedBuildStatusAfter: string | undefined;
@@ -76,6 +96,7 @@ export function registerDesignIntelligenceRoutes(app: FastifyInstance, context: 
         buildId: id,
         type: "governor.evaluation_failed",
         payload: {
+          invocationSource: "local-http-api",
           decisionRecordHash: evaluated.record.recordHash,
           action: evaluated.decision.action,
           message: error instanceof Error ? error.message : String(error),

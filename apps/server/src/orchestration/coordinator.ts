@@ -151,15 +151,26 @@ export class BuildCoordinator {
         }
       }
       acknowledgement = acknowledged;
+      let observedBuildStatusAfter: string | undefined;
+      try { observedBuildStatusAfter = this.store.builds.getById(buildId).status; }
+      catch { /* Optional readback cannot erase an acknowledgement or prove an effect. */ }
       receiptPersistAttempted = true;
       this.store.events.append({
         buildId,
         type: "governor.intervention_acknowledged",
         payload: {
+          invocationSource: "agentflow-coordinator",
           decisionRecordHash: evaluated.record.recordHash,
           action,
           acknowledged,
           delegatedTo: delegateRetry ? "agentflow-existing-retry-policy" : null,
+          details: {
+            runtimeApplyInvoked,
+            acknowledgementAvailable: true,
+            receiptPersistAttempted,
+            observedBuildStatusBefore,
+            observedBuildStatusAfter,
+          },
         },
       });
       return { continue: allow, delegateRetry };
@@ -171,6 +182,7 @@ export class BuildCoordinator {
         buildId,
         type: "governor.evaluation_failed",
         payload: {
+          invocationSource: "agentflow-coordinator",
           message: errorMessage(error),
           ...(evaluated === undefined ? {} : {
             decisionRecordHash: evaluated.record.recordHash,

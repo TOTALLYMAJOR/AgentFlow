@@ -103,6 +103,115 @@ describe("current native Governor failure attribution", () => {
   }
 
 
+
+  describe("AFI-002 native intervention provenance", () => {
+    const scenarios = ["continue", "repair", "retry", "exhausted", "missing-proof", "replan"] as const;
+    const cases = (["http", "coordinator"] as const).flatMap((boundary) =>
+      scenarios.map((scenario) => ({ boundary, scenario })),
+    );
+
+    async function exerciseProvenance(
+      boundary: "http" | "coordinator",
+      scenario: typeof scenarios[number],
+      loseReadback = false,
+    ) {
+      const { store, dependencies } = await setup(true);
+      if (scenario === "missing-proof") {
+        store.tasks.transition("task", "validating");
+        store.tasks.transition("task", "validated", { resultCommit: "b".repeat(40) });
+        store.tasks.updateAttempt("task", 1, { status: "succeeded", resultCommit: "b".repeat(40) });
+      } else if (scenario !== "continue") {
+        const code = scenario === "retry" || scenario === "exhausted" ? "PROVIDER_UNAVAILABLE" : "VALIDATION_FAILED";
+        const attempts = scenario === "replan" ? 3 : 1;
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+          store.tasks.transition("task", "failed", { errorCode: code, errorMessage: "same inert failure" });
+          store.tasks.updateAttempt("task", attempt, { status: "failed", errorCode: code, errorMessage: "same inert failure" });
+          if (attempt < attempts) { store.tasks.retry("task"); store.tasks.transition("task", "running"); }
+        }
+        if (scenario === "exhausted") dependencies.environment.retryMaximumAttempts = 1;
+      }
+      const getProvider = vi.fn(() => { throw new Error("Provenance qualification must not dispatch"); });
+      coordinator = new BuildCoordinator({
+        ...dependencies,
+        handoffService: new HandoffManifestService(store, dependencies.environment.artifactsPath),
+        agentProviders: { get: getProvider },
+      } as unknown as ConstructorParameters<typeof BuildCoordinator>[0]);
+      if (loseReadback) {
+        let pendingReadback = false;
+        const nativeGet = store.builds.getById.bind(store.builds);
+        vi.spyOn(store.builds, "getById").mockImplementation((...args) => {
+          if (pendingReadback) { pendingReadback = false; throw new Error("inert post-action readback unavailable"); }
+          return nativeGet(...args);
+        });
+        const nativePause = coordinator.pause.bind(coordinator);
+        vi.spyOn(coordinator, "pause").mockImplementation((id) => {
+          const result = nativePause(id);
+          pendingReadback = true;
+          return result;
+        });
+      }
+      const app = Fastify({ logger: false });
+      registerErrorHandling(app);
+      registerDesignIntelligenceRoutes(app, { ...dependencies, coordinator } as unknown as AgentFlowContext);
+      try {
+        if (boundary === "http") {
+          const response = await app.inject({ method: "POST", url: "/api/builds/build/governor/evaluate" });
+          expect(response.statusCode).toBe(200);
+        } else {
+          const native = coordinator as unknown as { governBuild(id: string): Promise<unknown> };
+          await native.governBuild("build");
+        }
+        const actions = {
+          continue: "CONTINUE", repair: "REQUEST_REPAIR", retry: "DELEGATE_RETRY",
+          exhausted: "PAUSE_FOR_REVIEW", "missing-proof": "BLOCK_INTEGRATION", replan: "PROPOSE_REPLAN",
+        };
+        const shouldPause = !["continue", "retry"].includes(scenario) && !(boundary === "http" && scenario === "replan");
+        const expectedState = shouldPause ? "paused" : "running";
+        const expectedAck = boundary === "coordinator" || !["retry", "replan"].includes(scenario);
+        const events = store.events.listForBuild("build");
+        const decision = events.find((event) => event.type === "governor.decision");
+        const outcomes = events.filter((event) => event.type === "governor.intervention_acknowledged");
+        const outcome = outcomes[0];
+        if (decision === undefined || outcome === undefined) throw new Error("Expected native decision and acknowledgement");
+        expect(outcomes).toHaveLength(1);
+        expect(events.some((event) => event.type === "governor.evaluation_failed")).toBe(false);
+        expect(decision.payload.decision).toMatchObject({ action: actions[scenario] });
+        expect(outcome.payload).toMatchObject({
+          invocationSource: boundary === "http" ? "local-http-api" : "agentflow-coordinator",
+          decisionRecordHash: decision.payload.recordHash,
+          action: actions[scenario],
+          acknowledged: expectedAck,
+          details: {
+            runtimeApplyInvoked: boundary === "http" || shouldPause,
+            acknowledgementAvailable: true,
+            receiptPersistAttempted: true,
+            observedBuildStatusBefore: "running",
+          },
+        });
+        const details = outcome.payload.details as Record<string, unknown>;
+        if (loseReadback) expect(details).not.toHaveProperty("observedBuildStatusAfter");
+        else expect(details.observedBuildStatusAfter).toBe(expectedState);
+        expect(outcome.sequence).toBeGreaterThan(decision.sequence);
+        expect(Number.isFinite(Date.parse(outcome.occurredAt))).toBe(true);
+        expect(store.builds.getById("build").status).toBe(expectedState);
+        expect(store.tasks.listAttempts("task")).toHaveLength(scenario === "replan" ? 3 : 1);
+        expect(store.retrySchedules.list()).toEqual([]);
+        expect(getProvider).not.toHaveBeenCalled();
+        // A service entry point is not an authenticated human or causal proof.
+        expect(outcome.payload).not.toHaveProperty("actor");
+        expect(details).not.toHaveProperty("appliedEffect");
+      } finally { await app.close(); }
+    }
+
+    it.each(cases)("$boundary records native $scenario source and observed state", async ({ boundary, scenario }) => {
+      await exerciseProvenance(boundary, scenario);
+    });
+
+    it.each(["http", "coordinator"] as const)("%s keeps returned acknowledgement when optional post-action readback fails", async (boundary) => {
+      await exerciseProvenance(boundary, "repair", true);
+    });
+  });
+
   describe("TCP-003 durable intervention errors", () => {
     type Boundary = "http" | "coordinator";
 
@@ -199,7 +308,7 @@ describe("current native Governor failure attribution", () => {
         // This catches an omitted durable result for a persisted decision.
         // It does not equate an exception with no effect or invent an outcome enum.
         expect(outcomes, "first persisted decision needs a hash-correlated durable handler outcome").toHaveLength(1);
-        expect(outcomes[0]?.payload).toMatchObject({ decisionRecordHash: firstHash, action: "REQUEST_REPAIR", acknowledged: receiptFailure });
+        expect(outcomes[0]?.payload).toMatchObject({ invocationSource: boundary === "http" ? "local-http-api" : "agentflow-coordinator", decisionRecordHash: firstHash, action: "REQUEST_REPAIR", acknowledged: receiptFailure });
         if (commitsEffect && !readbackFailure) {
           expect(outcomes[0]?.payload.details).toMatchObject({ acknowledgementAvailable: receiptFailure, receiptPersistAttempted: receiptFailure, observedBuildStatusBefore: "running", observedBuildStatusAfter: "paused" });
         } else if (readbackFailure) {
