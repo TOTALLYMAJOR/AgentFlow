@@ -42,6 +42,13 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     || canonicalJsonSha256(handoff) !== binding.data.sha256
   ) throw new Error("GOVERNED_HANDOFF_DRIFT: build handoff no longer matches its immutable binding");
   const tasks = dependencies.store.tasks.listForBuild(buildId);
+  const governedTaskIds = new Set(handoff.tasks.map((task) => task.id));
+  if (
+    tasks.length !== governedTaskIds.size
+    || new Set(tasks.map((task) => task.backlogTaskId)).size !== tasks.length
+    || new Set(tasks.map((task) => task.id)).size !== tasks.length
+    || tasks.some((task) => !task.id || task.buildId !== buildId || !governedTaskIds.has(task.backlogTaskId))
+  ) throw new Error("GOVERNED_OBSERVATION_ATTRIBUTION_INVALID: native tasks do not match the governed build task set");
   // Keep the actual attempt/changed-file reads used by the projection. Looking
   // them up again just to describe provenance could name a later native state.
   const readTaskSources = (sourceTasks = dependencies.store.tasks.listForBuild(buildId)) => sourceTasks.map((task) => ({
@@ -52,6 +59,9 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     })),
   }));
   const taskSources = readTaskSources(tasks);
+  if (taskSources.some(({ task, attempts }) => attempts.some(({ attempt }) => attempt.taskId !== task.id || attempt.buildId !== buildId))) {
+    throw new Error("GOVERNED_OBSERVATION_ATTRIBUTION_INVALID: native attempt does not belong to its build task");
+  }
   const changes = taskSources.map(({ task, attempts }) => ({
     taskId: task.backlogTaskId,
     paths: attempts.flatMap(({ changedFiles }) => changedFiles.map((file) => file.path)),
@@ -123,10 +133,10 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     requireHistoricalContext(equalNativeEvidence(current.map((item) => item.id), certificates.map((item) => item.id)) && equalNativeEvidence(historyInputs, historicalProjectionInputs(dependencies, buildId)));
     // No await after this full native record/event fence before projection.
   }
-  // Current-certificate reads can yield while attempt or changed-file records
-  // change without a task-state transition. Do not persist a decision from the
-  // earlier mixed input set. No await occurs between this fence and append.
-  if (!equalNativeEvidence(taskSources, readTaskSources())) throw new Error("GOVERNED_OBSERVATION_SOURCE_CHANGED: native task, attempt or changed-file inputs changed during evaluation");
+  // Repository and certificate reads can yield while build, attempt or
+  // changed-file records change without a task-state transition. Do not persist
+  // a decision from earlier inputs. No await occurs between this fence and append.
+  if (!equalNativeEvidence(build, dependencies.store.builds.getById(buildId)) || !equalNativeEvidence(taskSources, readTaskSources())) throw new Error("GOVERNED_OBSERVATION_SOURCE_CHANGED: native build, task, attempt or changed-file inputs changed during evaluation");
   const changedOwners = new Map<string, Set<string>>();
   for (const change of changes) for (const changedPath of change.paths) {
     const owners = changedOwners.get(changedPath) ?? new Set<string>();

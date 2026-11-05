@@ -115,6 +115,38 @@ describe("current native Governor failure attribution", () => {
     expect(store.tasks.getById("task").state).toBe("running");
   });
 
+  it.each([false, true])("refuses a native pause during an awaited repository read (strict=%s)", async (strict) => {
+    const { store, dependencies, observed } = await setup(true, strict);
+    vi.spyOn(dependencies.repositoryService, "get").mockImplementation(async () => {
+      store.builds.transition("build", "paused");
+      return store.repositories.getById("repo");
+    });
+    await expect(evaluateGovernedBuild(dependencies, "build")).rejects.toThrow(/GOVERNED_OBSERVATION_SOURCE_CHANGED|NATIVE_VALIDATION_EVIDENCE_INVALID/);
+    expect(observed).not.toHaveBeenCalled();
+    expect(store.events.listForBuild("build").filter((event) => event.type === "governor.decision")).toEqual([]);
+    expect(store.builds.getById("build").status).toBe("paused");
+    expect(store.tasks.getById("task").state).toBe("running");
+  });
+
+  it.each(["missing", "unknown", "duplicate", "foreign-build", "foreign-attempt"])("refuses %s native task attribution before retaining a decision", async (defect) => {
+    const { store, dependencies, observed } = await setup(true);
+    const task = store.tasks.getById("task");
+    if (defect === "foreign-attempt") {
+      const attempt = store.tasks.getAttempt("task", 1);
+      vi.spyOn(store.tasks, "listAttempts").mockReturnValue([{ ...attempt, taskId: "foreign-task" }]);
+    } else {
+      const tasks = defect === "missing" ? []
+        : defect === "duplicate" ? [task, { ...task, id: "duplicate-task" }]
+        : [{ ...task, ...(defect === "unknown" ? { backlogTaskId: "UNDECLARED" } : { buildId: "foreign-build" }) }];
+      vi.spyOn(store.tasks, "listForBuild").mockReturnValue(tasks);
+    }
+    await expect(evaluateGovernedBuild(dependencies, "build")).rejects.toThrow("GOVERNED_OBSERVATION_ATTRIBUTION_INVALID");
+    expect(observed).not.toHaveBeenCalled();
+    expect(store.events.listForBuild("build").filter((event) => event.type === "governor.decision")).toEqual([]);
+    expect(store.builds.getById("build").status).toBe("running");
+    expect(store.tasks.getById("task").state).toBe("running");
+  });
+
   async function setup(withNativePlan = false, strictNativeEvidence = false, buildStatus: "running" | "ready" = "running") {
     fixture = createDatabaseFixture();
     const store = createDatabaseRepositories(fixture.database);
