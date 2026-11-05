@@ -25,6 +25,43 @@ describe("current native Governor failure attribution", () => {
   let coordinator: BuildCoordinator | undefined;
   afterEach(async () => { await coordinator?.shutdown(); vi.restoreAllMocks(); vi.useRealTimers(); fixture?.cleanup(); fixture = undefined; coordinator = undefined; });
 
+
+  it.each([false, true])("retains the original observation state across runtime limit changes (strict=%s)", async (strict) => {
+    const { store, dependencies, observed } = await setup(true, strict);
+    const originalLimit = dependencies.environment.retryMaximumAttempts;
+    try {
+      dependencies.environment.retryMaximumAttempts = 1;
+      const first = await evaluateGovernedBuild(dependencies, "build");
+      const firstInput = observed.mock.calls.at(-1)?.[0];
+      if (first === undefined || firstInput === undefined) throw new Error("First native evaluation was not observed");
+      const firstObservation = structuredClone(firstInput.observation);
+      dependencies.environment.retryMaximumAttempts = 2;
+      const second = await evaluateGovernedBuild(dependencies, "build");
+      const secondInput = observed.mock.calls.at(-1)?.[0];
+      if (second === undefined || secondInput === undefined) throw new Error("Second native evaluation was not observed");
+      const secondObservation = structuredClone(secondInput.observation);
+      const events = store.events.listForBuild("build").filter((event) => event.type === "governor.decision");
+      expect(events).toHaveLength(2);
+      const [firstEvent, secondEvent] = events;
+      if (firstEvent === undefined || secondEvent === undefined) throw new Error("Native decisions were not retained");
+      expect(first.decision).toEqual(second.decision);
+      expect(first.record.observationHash).not.toBe(second.record.observationHash);
+      expect(firstEvent.payload.observationState).toEqual({ phase: "RUNNING", attempt: 1, maxAttempts: 1 });
+      expect(secondEvent.payload.observationState).toEqual({ phase: "RUNNING", attempt: 1, maxAttempts: 2 });
+      const retainedFirst = firstEvent.payload.observationState as Record<string, unknown>;
+      expect(canonicalJsonSha256({ ...secondObservation, ...retainedFirst })).toBe(first.record.observationHash);
+      expect(canonicalJsonSha256(firstObservation)).toBe(first.record.observationHash);
+      expect(secondEvent.payload.previousRecordHash).toBe(first.record.recordHash);
+      // A digest match is required; the later live retry limit is not historical proof.
+      expect(canonicalJsonSha256({ ...firstObservation, maxAttempts: 2 })).not.toBe(first.record.observationHash);
+      expect(firstEvent.payload).not.toHaveProperty("observation");
+      expect(store.builds.getById("build").status).toBe("running");
+      expect(store.tasks.getById("task").state).toBe("running");
+    } finally {
+      dependencies.environment.retryMaximumAttempts = originalLimit;
+    }
+  });
+
   async function setup(withNativePlan = false, strictNativeEvidence = false, buildStatus: "running" | "ready" = "running") {
     fixture = createDatabaseFixture();
     const store = createDatabaseRepositories(fixture.database);

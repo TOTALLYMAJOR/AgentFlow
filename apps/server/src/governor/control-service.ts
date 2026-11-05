@@ -25,7 +25,18 @@ export class GovernorControlService {
       this.events.append({
         buildId: input.observation.buildId,
         type: "governor.decision",
-        payload: { ...record, authorityObservation: input.observation.authority },
+        payload: {
+          ...record,
+          authorityObservation: input.observation.authority,
+          // These inputs can change after this decision. Retain their exact
+          // values without copying raw failure text into exported provenance.
+          // This partial context is not a substitute for observationHash.
+          observationState: {
+            phase: input.observation.phase,
+            attempt: input.observation.attempt,
+            maxAttempts: input.observation.maxAttempts,
+          },
+        },
         occurredAt: input.recordedAt,
       });
     }

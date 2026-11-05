@@ -38,6 +38,31 @@ describe("Governor control service", () => {
     expect(append).toHaveBeenCalledWith(expect.objectContaining({ buildId: "build-1", type: "governor.decision" }));
   });
 
+  it("retains scalar observation state without altering hashes or exporting failure text", () => {
+    const append = vi.fn();
+    const service = new GovernorControlService({ append });
+    const input = observation({
+      phase: "INTEGRATING", attempt: 2, maxAttempts: 4,
+      failure: { code: "TEST_FAILED", classification: "deterministic", retryable: false, signature: "synthetic-private-failure-text", fingerprint: "f".repeat(64) },
+    });
+    const request = { contract, observation: input, recordedAt: "2026-09-17T12:00:00Z" };
+    const live = service.evaluate(request);
+    const replay = service.evaluate({ ...request, mode: "REPLAY" });
+    expect(live).toEqual(replay);
+    expect(append).toHaveBeenCalledOnce();
+    const event = append.mock.calls[0]?.[0] as { payload: Record<string, unknown> } | undefined;
+    if (event === undefined) throw new Error("Decision was not retained");
+    expect(event.payload.observationState).toEqual({ phase: "INTEGRATING", attempt: 2, maxAttempts: 4 });
+    expect(event.payload.observationHash).toBe(live.record.observationHash);
+    expect(event.payload.recordHash).toBe(live.record.recordHash);
+    expect(event.payload).not.toHaveProperty("observation");
+    expect(JSON.stringify(event)).not.toContain("synthetic-private-failure-text");
+    input.phase = "INTEGRATED";
+    input.attempt = 3;
+    input.maxAttempts = 8;
+    expect(event.payload.observationState).toEqual({ phase: "INTEGRATING", attempt: 2, maxAttempts: 4 });
+  });
+
   it("fails closed for missing proof at integration", () => {
     const service = new GovernorControlService({ append: vi.fn() });
     const result = service.evaluate({ contract, observation: observation({ phase: "INTEGRATING" }), recordedAt: "2026-09-17T12:00:00Z" });
