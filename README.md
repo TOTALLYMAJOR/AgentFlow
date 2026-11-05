@@ -138,13 +138,15 @@ Recover existing work using its build ID:
 agentflow launch <build-id>          # existing ready build
 agentflow pause <build-id>
 agentflow resume <build-id>          # paused/interrupted build
-agentflow retry <build-id> <task-id>
+agentflow retry <build-id> <task-id>  # non-governed builds only
 agentflow cancel <build-id>
 ```
 
-A failure is not completion. Inspect task evidence before retrying. If a request
-loses its response, run `status` before repeating a mutation; AgentFlow does not
-blindly retry requests that may already have succeeded.
+A failure is not completion. Inspect task evidence before retrying a non-governed
+build. Governed builds refuse task retry with HTTP 409
+`GOVERNED_RECOVERY_NOT_AUTHORIZED`; a handoff does not enable that command. If a
+request loses its response, run `status` before repeating a mutation; AgentFlow
+does not blindly retry requests that may already have succeeded.
 
 The lower-level `repo init`, `repo add`, `plan`, and `run` commands remain
 available. `repo remove` removes registry metadata only. Managed worktrees can
@@ -188,6 +190,12 @@ See [Installation and operations](docs/INSTALLATION.md#remote-runner-registratio
 for the runner protocol.
 
 ## Quality and release
+
+Use a current Node 22 release, at least 22.20.0, for source development and full
+release qualification. This covers the locked development, build and test
+toolchain, including its optional native packaging dependency. CI selects
+Node 22. The packaged CLI installation minimum above applies to
+its runtime dependencies; it is not the source toolchain minimum.
 
 ```bash
 npm run lint

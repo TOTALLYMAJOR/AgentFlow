@@ -15,7 +15,9 @@ import {
   runGit,
 } from "../../repositories/index.js";
 import { GitCommandRunner, GitWorktreeManager, isPathInside } from "../../git/index.js";
-import { canonicalJsonSha256, loadGovernedTaskHandoff, verifyGovernedHandoffForExecution } from "../../integration/design-intelligence.js";
+import { backlogHandoffErrors, canonicalJsonSha256, governedPlanSnapshotSha256, loadGovernedTaskHandoff, verifyGovernedHandoffForExecution } from "../../integration/design-intelligence.js";
+import { validateWaleExperimentAdmission, verifyWaleExperimentGitTree, type WaleRunLabExperiment } from "../../integration/wale-run-lab.js";
+import type { GovernedTaskHandoff } from "../../integration/design-intelligence.js";
 import { createId } from "../../util/ids.js";
 import { AgentFlowError } from "../errors.js";
 import type { AgentFlowContext } from "../context.js";
@@ -81,6 +83,16 @@ const terminalBuildStatuses: readonly BuildStatus[] = [
   "cancelled",
 ];
 
+const executionAuthorityReasons: Readonly<Record<string, string>> = {
+  GOVERNED_HANDOFF_DRIFT: "The recorded handoff no longer matches the immutable native plan.",
+  GOVERNED_HANDOFF_PATH_INVALID: "The governed handoff is outside the registered repository.",
+  GOVERNED_HANDOFF_NOT_EXECUTABLE: "The approved handoff no longer passes native authority checks.",
+  GOVERNED_EXECUTION_SNAPSHOT_STALE: "The repository no longer matches the exact execution snapshot.",
+  GOVERNED_PLAN_SNAPSHOT_DRIFT: "The captured build no longer matches its immutable native plan.",
+  GOVERNED_HANDOFF_SCOPE_DRIFT: "The native plan no longer matches the approved handoff scope.",
+  WALE_EXPERIMENT_REQUIRES_GOVERNED_PLAN: "The bound experiment requires a governed immutable native plan.",
+};
+
 export function registerBuildRoutes(
   app: FastifyInstance,
   context: AgentFlowContext,
@@ -116,6 +128,49 @@ export function registerBuildRoutes(
     const { id } = BuildIdParameters.parse(request.params);
     return serializeBuild(context, context.store.builds.getById(id));
   });
+
+  app.get("/api/builds/:id/execution-authority", async (request, reply) => {
+    const { id } = BuildIdParameters.parse(request.params);
+    reply.header("cache-control", "no-store");
+    const build = context.store.builds.getById(id);
+    const report = (
+      status: "passed" | "blocked" | "not_applicable" | "unknown",
+      details: { code?: string; message?: string } = {},
+    ) => ({ buildId: id, checkedAt: new Date().toISOString(), status, ...details });
+    const unavailable = () => report("unknown", { message: "No immutable native plan is available for this build." });
+    if (build.planId === null) return unavailable();
+    let plan;
+    try {
+      plan = context.store.plans.getById(build.planId);
+    } catch (cause) {
+      if (cause instanceof Error && cause.name === "EntityNotFoundError") return unavailable();
+      throw new Error("Execution-authority readback failed", { cause });
+    }
+    try {
+      // Reuse native checks even for ordinary plans: captured governed data or
+      // an experiment can make that apparent non-applicability a real refusal.
+      await context.coordinator.validateExecutionAuthority(build);
+    } catch (cause) {
+      if (cause instanceof AgentFlowError) {
+        if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(cause.code)) throw new Error("Execution-authority readback failed", { cause });
+        return report("blocked", {
+          code: cause.code,
+          message: executionAuthorityReasons[cause.code] ?? "Native execution-authority checks are blocked.",
+        });
+      }
+      // Typed schema/storage errors have richer global HTTP handlers. This
+      // reporting endpoint must keep their internal diagnostics unavailable.
+      throw new Error("Execution-authority readback failed", { cause });
+    }
+    const governed = plan.normalizedPlan.governedHandoff;
+    if (governed !== undefined && typeof governed.executionBaseCommit !== "string") {
+      return report("unknown", { message: "The native plan has no exact governed execution binding." });
+    }
+    // This is an as-of check result, not an execution capability or a human
+    // approval. Native execution controls continue to recheck independently.
+    return report(governed === undefined ? "not_applicable" : "passed");
+  });
+
   app.post("/api/builds/:id/start", async (request) => {
     const { id } = BuildIdParameters.parse(request.params);
     return serializeBuild(
@@ -360,6 +415,7 @@ export function registerBuildRoutes(
 export async function createBuildForPlan(
   context: AgentFlowContext,
   planId: string,
+  experiment?: WaleRunLabExperiment,
 ): Promise<BuildEntity> {
   const plan = context.store.plans.getById(planId);
   const activeBuild = context.store.builds.findActive(plan.repositoryId);
@@ -369,23 +425,39 @@ export async function createBuildForPlan(
   const repositoryConfig = AgentFlowRepositoryConfigSchema.parse(plan.repositoryConfig);
   const repository = await context.repositoryService.get(plan.repositoryId);
   const governed = plan.normalizedPlan.governedHandoff;
+  let admittedHandoff: GovernedTaskHandoff | undefined;
   if (governed !== undefined) {
     const canonicalRoot = await realpath(repository.localPath);
     const handoffPath = await realpath(path.resolve(canonicalRoot, governed.path));
     if (!isPathInside(canonicalRoot, handoffPath)) throw new AgentFlowError("GOVERNED_HANDOFF_PATH_INVALID", "The governed handoff path escapes the registered repository", 409);
     const handoff = await loadGovernedTaskHandoff(handoffPath);
+    admittedHandoff = handoff;
     if (handoff.handoffId !== governed.id || canonicalJsonSha256(handoff) !== governed.sha256) throw new AgentFlowError("GOVERNED_HANDOFF_DRIFT", "The immutable plan is not bound to the current governed handoff", 409);
     const verification = await verifyGovernedHandoffForExecution(repository.localPath, handoff, governed.carrierPaths);
     if (verification.errors.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_NOT_EXECUTABLE", "The governed handoff is not executable at the current repository snapshot", 409, verification.errors);
     if (governed.executionBaseCommit === undefined || verification.currentHead !== governed.executionBaseCommit) throw new AgentFlowError("GOVERNED_EXECUTION_SNAPSHOT_STALE", "The immutable plan no longer matches the exact execution snapshot", 409, { expected: governed.executionBaseCommit, actual: verification.currentHead });
+    const scopeDrift = backlogHandoffErrors(plan.normalizedPlan.tasks, handoff);
+    if (scopeDrift.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_SCOPE_DRIFT", "The plan differs from its approved handoff scope", 409, scopeDrift);
   }
   const baseCommit = (await runGit(repository.localPath, ["rev-parse", `${repository.baseBranch}^{commit}`])).stdout.trim();
+  const governedGitTree = experiment === undefined || admittedHandoff === undefined ? undefined : await verifyWaleExperimentGitTree(experiment, repository.localPath, admittedHandoff);
+  const boundExperiment = experiment === undefined ? undefined : validateWaleExperimentAdmission(experiment, { governedGitTree, plan, ...(admittedHandoff === undefined ? {} : { handoff: admittedHandoff }), buildBaseCommit: baseCommit });
+  return context.store.transaction(() => {
+    // Native build creation rereads this row. Compare inside the same existing
+    // transaction so the verified plan is exactly the snapshot it captures.
+    if (admittedHandoff !== undefined && governedPlanSnapshotSha256(context.store.plans.getById(planId)) !== governedPlanSnapshotSha256(plan)) {
+      throw new AgentFlowError("GOVERNED_PLAN_SNAPSHOT_DRIFT", "The plan changed during build admission; create a fresh reviewed plan", 409);
+    }
+  if (context.store.builds.findActive(plan.repositoryId) !== undefined) throw new AgentFlowError("ACTIVE_BUILD_EXISTS", "Repository already has an active build", 409);
+  if (boundExperiment !== undefined && context.store.events.findByExperimentId(boundExperiment.experimentId) !== undefined) throw new AgentFlowError("WALE_EXPERIMENT_ID_CONFLICT", "Experiment already bound", 409);
   const buildId = createId("build");
   const taskIds = new Map(plan.normalizedPlan.tasks.map((task) => [task.id, createId(`task_${safeId(task.id)}`)]));
   const build = context.store.builds.create({ id: buildId, repositoryId: repository.id, planId, backlogPath: plan.backlogPath, baseCommit, integrationBranch: `agent-integration/${buildId}`, status: "ready", workerLimit: repositoryConfig.workers.maximum, tasks: plan.normalizedPlan.tasks.map((task) => createTaskInput(task, taskIds)) });
   for (let slot = 1; slot <= build.workerLimit; slot += 1) context.store.workers.create({ id: `${buildId}:worker:${slot}`, buildId, providerId: context.environment.defaultAgentProvider, status: "idle" });
   for (const task of context.store.tasks.listForBuild(build.id)) if (task.requiresApproval) context.store.approvals.create({ id: createId("approval"), buildId: build.id, taskId: task.id, approvalType: "manual", reason: `Task ${task.backlogTaskId} requires approval before dispatch` });
+  if (boundExperiment !== undefined) context.store.events.appendExperimentBinding(build.id, boundExperiment);
   return build;
+  });
 }
 
 function createTaskInput(

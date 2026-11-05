@@ -1,0 +1,85 @@
+{
+  "schemaVersion": "1.0.0",
+  "kind": "proofloom-agentflow/wale-run-lab-contract-fixtures",
+  "contracts": {
+    "handoff": "2.1.0",
+    "receipt": "1.1.0"
+  },
+  "proofBoundary": "Public synthetic schema/canonicalization/refusal corpus only. Contains no approval or executable authority. Required journey cases remain unexecuted until native AFI-003 evidence exists.",
+  "canonicalVectors": [
+    {
+      "id": "C01-authority-order-unicode",
+      "input": {
+        "sources": [
+          {
+            "path": ".dev/authority.json",
+            "sha256": "9cb7610df44bb7c8007ed1e0d92599ca48838b0872a0f6941ef5dbbc1bad8a79"
+          },
+          {
+            "path": "AGENTS.md",
+            "sha256": "a54ff182c7e8acf56acfd6e4b9c3ff41e2c41a31c9b211b2deb9df75d9a478f9"
+          },
+          {
+            "path": "Zeta.md",
+            "sha256": "2c8969e5629758514bf4dec4833e973c843cb69c9ef2a5b902a2c5d13d4febd2"
+          },
+          {
+            "path": "adapters/a",
+            "sha256": "0e63c01227b7099fa8979db4fb1c7eb28b2f540a0f363be4fbaa728fb4c2ea55"
+          },
+          {
+            "path": "évidence.md",
+            "sha256": "0abd629173433684d5dd0e7d0a372b620d51222acd1f36f5e8e914de77f32780"
+          },
+          {
+            "path": "😀.md",
+            "sha256": "6acddbe4ef894ec08c68f6e664816fe9ed373b8781fb2a9249464901036def82"
+          }
+        ],
+        "governanceReportSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "authorityStateSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "worktreeState": "clean",
+        "baseCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "canonicalUtf8": "{\"authorityStateSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"baseCommit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"governanceReportSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"sources\":[{\"path\":\".dev/authority.json\",\"sha256\":\"9cb7610df44bb7c8007ed1e0d92599ca48838b0872a0f6941ef5dbbc1bad8a79\"},{\"path\":\"AGENTS.md\",\"sha256\":\"a54ff182c7e8acf56acfd6e4b9c3ff41e2c41a31c9b211b2deb9df75d9a478f9\"},{\"path\":\"Zeta.md\",\"sha256\":\"2c8969e5629758514bf4dec4833e973c843cb69c9ef2a5b902a2c5d13d4febd2\"},{\"path\":\"adapters/a\",\"sha256\":\"0e63c01227b7099fa8979db4fb1c7eb28b2f540a0f363be4fbaa728fb4c2ea55\"},{\"path\":\"évidence.md\",\"sha256\":\"0abd629173433684d5dd0e7d0a372b620d51222acd1f36f5e8e914de77f32780\"},{\"path\":\"😀.md\",\"sha256\":\"6acddbe4ef894ec08c68f6e664816fe9ed373b8781fb2a9249464901036def82\"}],\"worktreeState\":\"clean\"}",
+      "sha256": "61ff6d570079c269fef594dd85b19513e2537a58fed0b2bca8f22cbb4da2ea7f"
+    }
+  ],
+  "refusalMutations": [
+    {
+      "id": "C07-historical-runtime",
+      "target": "handoff",
+      "field": "taskValidationRuntime",
+      "value": {
+        "schemaVersion": "historical"
+      },
+      "expected": "REFUSE_STRICT_SCHEMA"
+    },
+    {
+      "id": "C07-unknown-runtime",
+      "target": "experiment",
+      "field": "runtime",
+      "value": true,
+      "expected": "REFUSE_STRICT_SCHEMA"
+    },
+    {
+      "id": "C03-unknown-experiment",
+      "target": "experiment",
+      "field": "extra",
+      "value": true,
+      "expected": "REFUSE_STRICT_SCHEMA"
+    }
+  ],
+  "requiredCases": {
+    "C01": "canonical bytes and digest",
+    "C02": "authority/snapshot/task drift refusal",
+    "C03": "disabled and token-before-parse",
+    "C04": "atomic binding/replay and explicit start",
+    "C05": "native Governor provenance retained",
+    "C06": "receipt/evidence identity and tamper refusal",
+    "C07": "runtime extensions refused",
+    "C08": "AFI-002 size proxy enforcement",
+    "C09": "AFI-003 native fixture-only provider return loop",
+    "C10": "combined candidate frozen Orbit qualification"
+  }
+}

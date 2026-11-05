@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   BuildEntity,
+  PlanEntity,
   DatabaseRepositories,
   TaskEntity,
   ValidationStatus,
@@ -53,12 +54,17 @@ import {
   workerResourceSnapshot,
 } from "./resources.js";
 import { TaskCommitService } from "./task-commit.js";
+import { canTransitionBuild } from "./state-machines.js";
 import {
   decideRetry,
   DEFAULT_RETRYABLE_FAILURE_CODES,
 } from "./retry-policy.js";
 import type { OrganizationPolicy } from "../governance/organization-policy.js";
-import { evaluateGovernedBuild } from "../governor/build-control.js";
+import { evaluateGovernedBuild, publishNativeValidationEvidence } from "../governor/build-control.js";
+
+import { backlogHandoffErrors, canonicalJsonSha256, governedPlanSnapshotSha256, loadGovernedTaskHandoff, verifyGovernedHandoffForExecution } from "../integration/design-intelligence.js";
+import { fingerprintFailure } from "../integration/traffic-control.js";
+import { loadBoundWaleExperiment, validateWaleExperimentAdmission, verifyWaleExperimentGitTree } from "../integration/wale-run-lab.js";
 
 interface ActiveWorker {
   buildId: string;
@@ -119,8 +125,13 @@ export class BuildCoordinator {
   }
 
   private async governBuild(buildId: string): Promise<{ continue: boolean; delegateRetry: boolean } | undefined> {
+    let evaluated: Awaited<ReturnType<typeof evaluateGovernedBuild>>;
+    let acknowledgement: boolean | undefined;
+    let observedBuildStatusBefore: string | undefined;
+    let runtimeApplyInvoked = false;
+    let receiptPersistAttempted = false;
     try {
-      const evaluated = await evaluateGovernedBuild({
+      evaluated = await evaluateGovernedBuild({
         store: this.store,
         repositoryService: this.repositoryService,
         environment: this.environment,
@@ -130,33 +141,66 @@ export class BuildCoordinator {
       const action = evaluated.decision.action;
       const allow = action === "CONTINUE";
       const delegateRetry = action === "DELEGATE_RETRY";
+      observedBuildStatusBefore = this.store.builds.getById(buildId).status;
       let acknowledged = allow || delegateRetry;
       if (!allow && !delegateRetry) {
-        const build = this.store.builds.getById(buildId);
-        if (["ready", "running", "interrupted"].includes(build.status)) {
+        if (canTransitionBuild(this.store.builds.getById(buildId).status, "paused")) {
+          runtimeApplyInvoked = true;
           this.pause(buildId);
           acknowledged = true;
         }
       }
+      acknowledgement = acknowledged;
+      let observedBuildStatusAfter: string | undefined;
+      try { observedBuildStatusAfter = this.store.builds.getById(buildId).status; }
+      catch { /* Optional readback cannot erase an acknowledgement or prove an effect. */ }
+      receiptPersistAttempted = true;
       this.store.events.append({
         buildId,
         type: "governor.intervention_acknowledged",
         payload: {
+          invocationSource: "agentflow-coordinator",
           decisionRecordHash: evaluated.record.recordHash,
           action,
           acknowledged,
           delegatedTo: delegateRetry ? "agentflow-existing-retry-policy" : null,
+          details: {
+            runtimeApplyInvoked,
+            acknowledgementAvailable: true,
+            receiptPersistAttempted,
+            observedBuildStatusBefore,
+            observedBuildStatusAfter,
+          },
         },
       });
       return { continue: allow, delegateRetry };
     } catch (error) {
+      let observedBuildStatusAfter: string | undefined;
+      try { observedBuildStatusAfter = this.store.builds.getById(buildId).status; }
+      catch { /* Failed readback cannot establish whether an effect occurred. */ }
       this.store.events.append({
         buildId,
         type: "governor.evaluation_failed",
-        payload: { message: errorMessage(error) },
+        payload: {
+          invocationSource: "agentflow-coordinator",
+          message: errorMessage(error),
+          ...(evaluated === undefined ? {} : {
+            decisionRecordHash: evaluated.record.recordHash,
+            action: evaluated.decision.action,
+            // Absence of an acknowledgement does not prove absence of effects.
+            acknowledged: acknowledgement ?? false,
+            details: {
+              runtimeApplyInvoked,
+              acknowledgementAvailable: acknowledgement !== undefined,
+              receiptPersistAttempted,
+              observedBuildStatusBefore,
+              observedBuildStatusAfter,
+            },
+          }),
+        },
       });
       const build = this.store.builds.getById(buildId);
-      if (["ready", "running", "interrupted"].includes(build.status)) this.pause(buildId);
+      if (canTransitionBuild(build.status, "paused")) this.pause(buildId);
       return { continue: false, delegateRetry: false };
     }
   }
@@ -173,12 +217,54 @@ export class BuildCoordinator {
     if (build.status !== "ready") {
       throw new Error(`Build ${buildId} cannot start from ${build.status}`);
     }
+    await this.validateExecutionAuthority(build);
     await this.ensureRuntime(build);
     const running = this.store.builds.transition(buildId, "running", {
       eventType: "build.started",
     });
     this.requestTick(buildId);
     return running;
+  }
+
+  async validateExecutionAuthority(build: BuildEntity): Promise<void> {
+    const experiment = loadBoundWaleExperiment(this.store.events, build.id);
+    const capturedPlan: unknown = build.normalizedPlan;
+    const plan = build.planId === null ? undefined : this.store.plans.getById(build.planId);
+    const governed = plan?.normalizedPlan.governedHandoff;
+    // Preserve only the native pre-snapshot build shape. A missing current
+    // executionBaseCommit alone must never select legacy compatibility, and
+    // clearing build data cannot erase the linked plan's current binding.
+    if (experiment === undefined && build.backlogSha256 === null && build.backlogContents === ""
+      && capturedPlan !== null && typeof capturedPlan === "object" && !Array.isArray(capturedPlan)
+      && Object.keys(capturedPlan).length === 0 && governed?.executionBaseCommit === undefined) return;
+    if (governed === undefined) {
+      if (experiment !== undefined) throw new AgentFlowError("WALE_EXPERIMENT_REQUIRES_GOVERNED_PLAN", "Experiment requires a governed immutable plan", 409);
+      if (capturedPlan !== null && typeof capturedPlan === "object"
+        && Object.hasOwn(capturedPlan, "governedHandoff")) {
+        throw new AgentFlowError("GOVERNED_HANDOFF_DRIFT", "Captured governed build no longer matches its immutable plan binding", 409);
+      }
+      return;
+    }
+    const repository = await this.repositoryService.get(build.repositoryId);
+    const root = await realpath(repository.localPath);
+    const handoffPath = await realpath(path.resolve(root, governed.path));
+    const relative = path.relative(root, handoffPath);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new AgentFlowError("GOVERNED_HANDOFF_PATH_INVALID", "Governed handoff escapes the repository", 409);
+    const handoff = await loadGovernedTaskHandoff(handoffPath);
+    if (handoff.handoffId !== governed.id || canonicalJsonSha256(handoff) !== governed.sha256) throw new AgentFlowError("GOVERNED_HANDOFF_DRIFT", "Governed handoff differs from immutable plan", 409);
+    const verification = await verifyGovernedHandoffForExecution(root, handoff, governed.carrierPaths);
+    if (verification.errors.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_NOT_EXECUTABLE", "Governed authority is no longer executable", 409);
+    if (governed.executionBaseCommit === undefined || verification.currentHead !== governed.executionBaseCommit || build.baseCommit !== governed.executionBaseCommit) throw new AgentFlowError("GOVERNED_EXECUTION_SNAPSHOT_STALE", "Exact execution snapshot changed", 409);
+    // Runtime construction and worker prompts consume the captured build
+    // snapshot. Rechecking only the current handoff does not bind that data
+    // to the immutable plan that the operator actually reviewed.
+    assertGovernedPlanSnapshot(build, plan);
+    const scopeDrift = backlogHandoffErrors(plan.normalizedPlan.tasks, handoff);
+    if (scopeDrift.length > 0) throw new AgentFlowError("GOVERNED_HANDOFF_SCOPE_DRIFT", "The immutable plan differs from its approved handoff scope", 409, scopeDrift);
+    if (experiment !== undefined) {
+      const governedGitTree = await verifyWaleExperimentGitTree(experiment, root, handoff);
+      validateWaleExperimentAdmission(experiment, { plan, handoff, buildBaseCommit: build.baseCommit, governedGitTree });
+    }
   }
 
   pause(buildId: string): BuildEntity {
@@ -192,6 +278,7 @@ export class BuildCoordinator {
     if (!["paused", "interrupted"].includes(build.status)) {
       throw new Error(`Build ${buildId} cannot resume from ${build.status}`);
     }
+    await this.validateExecutionAuthority(build);
     await this.ensureRuntime(build);
     for (const task of this.store.tasks.listForBuild(buildId)) {
       if (
@@ -369,9 +456,16 @@ export class BuildCoordinator {
 
   async queueIntegration(build: BuildEntity, task: TaskEntity): Promise<void> {
     await this.ensureRuntime(build);
-    this.startRecoveredTaskOperation(build.id, task.id, (signal) =>
-      this.integrateValidatedTask(build.id, task.id, signal),
-    );
+    this.startRecoveredTaskOperation(build.id, task.id, async (signal) => {
+      const currentBuild = this.store.builds.getById(build.id);
+      const currentTask = this.store.tasks.getById(task.id);
+      if (currentBuild.status !== "running" || currentTask.buildId !== currentBuild.id || currentTask.state !== "validated") return;
+      const governed = await this.governBuild(currentBuild.id);
+      if (governed !== undefined && !governed.continue) return;
+      const latestTask = this.store.tasks.getById(task.id);
+      if (this.store.builds.getById(build.id).status !== "running" || latestTask.state !== "validated" || latestTask.attempt !== currentTask.attempt || latestTask.resultCommit !== currentTask.resultCommit) return;
+      await this.integrateValidatedTask(build.id, task.id, signal);
+    });
   }
 
   private startRecoveredTaskOperation(
@@ -955,6 +1049,7 @@ export class BuildCoordinator {
     try {
       const build = this.store.builds.getById(buildId);
       const task = this.store.tasks.getById(taskId);
+      await this.validateExecutionAuthority(build);
       const manager = await this.ensureRuntime(build);
       const integrationHead = (
         await new GitCommandRunner().run(manager.integrationPath(), [
@@ -1025,6 +1120,7 @@ export class BuildCoordinator {
         this.stopAndRecycleWorker(workerId, false);
         return;
       }
+      await this.validateExecutionAuthority(this.store.builds.getById(buildId));
       const provider = this.agentProviders.get(
         this.environment.defaultAgentProvider,
       );
@@ -1051,11 +1147,7 @@ export class BuildCoordinator {
         this.stopAndRecycleWorker(workerId, remoteOutcome.success);
         if (!remoteOutcome.success) {
           const failureCode = remoteOutcome.failureCode ?? "REMOTE_WORKER_FAILED";
-          this.store.tasks.transition(taskId, "failed", {
-            eventType: "task.remote_worker_failed",
-            errorCode: failureCode,
-            errorMessage: remoteOutcome.failureMessage ?? "Remote worker failed",
-          });
+          this.failTask(taskId, "task.remote_worker_failed", failureCode, remoteOutcome.failureMessage ?? "Remote worker failed");
           const governed = await this.governBuild(buildId);
           if (governed === undefined || governed.delegateRetry) this.scheduleAutomaticRetry(buildId, taskId, failureCode);
           return;
@@ -1120,11 +1212,7 @@ export class BuildCoordinator {
       if (!outcome.success) {
         const failureCode = outcome.failureCode ?? "WORKER_FAILED";
         if (current.state === "running") {
-          this.store.tasks.transition(taskId, "failed", {
-            eventType: "task.worker_failed",
-            errorCode: failureCode,
-            errorMessage: outcome.failureMessage ?? "Worker execution failed",
-          });
+          this.failTask(taskId, "task.worker_failed", failureCode, outcome.failureMessage ?? "Worker execution failed");
         }
         const governed = await this.governBuild(buildId);
         if (governed === undefined || governed.delegateRetry) this.scheduleAutomaticRetry(buildId, taskId, failureCode);
@@ -1174,11 +1262,7 @@ export class BuildCoordinator {
           task.state,
         )
       ) {
-        this.store.tasks.transition(taskId, "failed", {
-          eventType: "task.execution_pipeline_failed",
-          errorCode: failureCode,
-          errorMessage: failureMessage,
-        });
+        this.failTask(taskId, "task.execution_pipeline_failed", failureCode, failureMessage);
       }
       if (assigned) {
         this.stopAndRecycleWorker(workerId, false);
@@ -1409,11 +1493,7 @@ export class BuildCoordinator {
         errorMessage: summary.errorMessage,
         completedAt: summary.completedAt,
       });
-      this.store.tasks.transition(taskId, "failed", {
-        eventType: "task.validation_failed",
-        errorCode: summary.errorCode,
-        errorMessage: summary.errorMessage,
-      });
+      this.failTask(taskId, "task.validation_failed", summary.errorCode, summary.errorMessage);
       const governed = await this.governBuild(buildId);
       if (governed?.delegateRetry) this.scheduleAutomaticRetry(buildId, taskId, summary.errorCode ?? "VALIDATION_FAILED");
       return;
@@ -1506,6 +1586,13 @@ export class BuildCoordinator {
         completedAt: new Date().toISOString(),
       });
       return;
+    }
+    const evidenceBinding = build.normalizedPlan.governedHandoff;
+    if (plannedTask.produces.some((artifact) => artifact.type === "agentflow/native-task-validation-evidence")) {
+      if (typeof evidenceBinding !== "object" || evidenceBinding === null || !("path" in evidenceBinding) || typeof evidenceBinding.path !== "string") throw new Error("NATIVE_VALIDATION_EVIDENCE_INVALID: missing immutable handoff");
+      const repository = await this.repositoryService.get(build.repositoryId);
+      const evidenceHandoff = await loadGovernedTaskHandoff(path.resolve(repository.localPath, evidenceBinding.path));
+      await publishNativeValidationEvidence({ store: this.store, environment: this.environment }, buildId, evidenceHandoff);
     }
     if (config.git.push_task_branches) {
       try {
@@ -1624,6 +1711,23 @@ export class BuildCoordinator {
   private async ensureRuntime(
     build: BuildEntity,
   ): Promise<GitWorktreeManager> {
+    // Recovery and scheduler callers may retain older BuildEntity objects.
+    // Check authoritative captured data before creating OR reusing runtime.
+    // This is a local snapshot comparison, not a Git audit on every tick.
+    build = this.store.builds.getById(build.id);
+    const plan = build.planId === null ? undefined : this.store.plans.getById(build.planId);
+    const governed = plan?.normalizedPlan.governedHandoff;
+    const captured: unknown = build.normalizedPlan;
+    const legacy = build.backlogSha256 === null && build.backlogContents === ""
+      && captured !== null && typeof captured === "object" && !Array.isArray(captured)
+      && Object.keys(captured).length === 0 && governed?.executionBaseCommit === undefined
+      && loadBoundWaleExperiment(this.store.events, build.id) === undefined;
+    if (!legacy) {
+      if (governed !== undefined) assertGovernedPlanSnapshot(build, plan);
+      else if (captured !== null && typeof captured === "object" && Object.hasOwn(captured, "governedHandoff")) {
+        throw new AgentFlowError("GOVERNED_HANDOFF_DRIFT", "Captured governed build no longer matches its immutable plan binding", 409);
+      }
+    }
     const existing = this.worktrees.get(build.id);
     if (existing !== undefined) {
       return existing;
@@ -1768,6 +1872,7 @@ export class BuildCoordinator {
         : this.store.tasks.getAttempt(task.id, task.attempt - 1);
     const contractKinds = /contract|openapi|schema|generated|ui-state/iu;
     const exampleKinds = /example|fixture|mock/iu;
+    const waleExperiment = loadBoundWaleExperiment(this.store.events, build.id);
     return {
       buildId: build.id,
       attempt: task.attempt,
@@ -1781,6 +1886,7 @@ export class BuildCoordinator {
           .listValidationCommands(task.id)
           .map((command) => command.command),
       },
+      ...(waleExperiment === undefined ? {} : { waleExperiment }),
       repositoryInstructions: await readRepositoryInstructions(
         (await this.repositoryService.get(build.repositoryId)).localPath,
       ),
@@ -1806,6 +1912,26 @@ export class BuildCoordinator {
         .filter((document) => exampleKinds.test(document.artifactType))
         .map(stripArtifactType),
     };
+  }
+
+  private failTask(taskId: string, eventType: string, errorCode: string | null, errorMessage: string | null): TaskEntity {
+    return this.store.transaction(() => {
+      const task = this.store.tasks.getById(taskId);
+      const build = this.store.builds.getById(task.buildId);
+      const attempt = this.store.tasks.listAttempts(taskId).find((item) => item.attempt === task.attempt);
+      const governed = build.normalizedPlan.governedHandoff;
+      const retryable = errorCode !== null && DEFAULT_RETRYABLE_FAILURE_CODES.has(errorCode);
+      // The existing event's native sequence is the evidence fence. Capture
+      // identity/fingerprint atomically with the failed state, not a guessed
+      // historical snapshot or raw error text in a second event store.
+      const payload = typeof governed === "object" && governed !== null && attempt !== undefined && attempt.buildId === task.buildId && errorCode !== null
+        ? { governorFailure: {
+            attempt: attempt.attempt, attemptId: attempt.id,
+            fingerprint: fingerprintFailure({ code: errorCode, classification: retryable ? "transient" : "deterministic", retryable, signature: errorMessage ?? errorCode, files: this.store.tasks.listChangedFiles(taskId, attempt.attempt).map((file) => file.path) }),
+          } }
+        : {};
+      return this.store.tasks.transition(taskId, "failed", { eventType, errorCode, errorMessage, payload });
+    });
   }
 
   private persistWorkerOutcome(
@@ -2315,6 +2441,13 @@ function isProcessAlive(processId: number | null): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function assertGovernedPlanSnapshot(build: BuildEntity, plan: PlanEntity | undefined): asserts plan is PlanEntity {
+  if (plan === undefined || plan.id !== build.planId || plan.lockedAt === null
+    || governedPlanSnapshotSha256(plan) !== governedPlanSnapshotSha256(build)) {
+    throw new AgentFlowError("GOVERNED_PLAN_SNAPSHOT_DRIFT", "Captured build data differs from its locked immutable plan", 409);
+  }
 }
 
 function isAbortRequested(signal: AbortSignal | undefined): boolean {

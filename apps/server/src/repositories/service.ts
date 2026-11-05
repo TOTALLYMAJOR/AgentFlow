@@ -14,6 +14,8 @@ import {
   repositoryConfigPath,
   type AgentFlowRepositoryConfig,
 } from "./config.js";
+import { commitReviewedBacklog, commitReviewedConfiguration, readReviewedBacklog, readReviewedConfiguration } from "./backlog-approval.js";
+import type { ReviewedBacklogExpectations, ReviewedBacklogSnapshot, ReviewedConfigurationSnapshot, ReviewedConfigurationExpectations, ReviewedConfigurationCommitResult } from "./types.js";
 import {
   errorFromRepositoryIssue,
   RepositoryServiceError,
@@ -28,8 +30,10 @@ import { detectRepositoryStack } from "./stack-detector.js";
 import type {
   InitializeRepositoryResult,
   LocalRepositoryInspection,
+  RepositoryPreflight,
   RegisterRepositoryOptions,
   RegisteredRepositoryInspection,
+  ReviewedBacklogCommitResult,
   RepositoryHealthChecks,
   RepositoryIssue,
   RepositoryIssueCode,
@@ -92,7 +96,7 @@ export class RepositoryService {
     localPath: string,
     options: RegisterRepositoryOptions = {},
   ): Promise<RepositoryRecord> {
-    const initializeIfMissing = options.initializeIfMissing ?? true;
+    const initializeIfMissing = options.initializeIfMissing ?? false;
     let canonicalPath: string;
     try {
       canonicalPath = await resolveGitRepositoryRoot(localPath);
@@ -141,6 +145,69 @@ export class RepositoryService {
       updatedAt: timestamp,
     };
     return this.persistence.create(record);
+  }
+
+  public async preflight(localPath: string): Promise<RepositoryPreflight> {
+    const inspection = await this.inspectLocal(localPath);
+    const requiresInitialization =
+      inspection.checks.gitRepository && !inspection.checks.configPresent;
+    return {
+      ...inspection,
+      canConnect: inspection.status === "ready",
+      requiresInitialization,
+      proposedChanges: requiresInitialization ? [".agentflow.yaml"] : [],
+      nextAction: inspection.status === "ready"
+        ? "Connect this configured repository."
+        : requiresInitialization
+          ? "Review and approve creation of .agentflow.yaml, then connect the repository."
+          : "Resolve the reported repository issues, then run preflight again.",
+    };
+  }
+
+  public async commitReviewedBacklog(
+    id: string,
+    expectations: ReviewedBacklogExpectations = {},
+  ): Promise<ReviewedBacklogCommitResult> {
+    const repository = await this.get(id);
+    const config = await loadRepositoryConfig(repository.localPath);
+    const evidence = await commitReviewedBacklog(
+      repository.localPath,
+      config,
+      expectations,
+    );
+    return {
+      repositoryId: repository.id,
+      ...evidence,
+      nextAction: evidence.requiresWorktreeReview
+        ? "A reviewed commit was saved, and newer file changes remain. Review those differences before planning."
+        : "Create and review an immutable AgentFlow plan from this committed backlog.",
+    };
+  }
+
+  public async reviewBacklog(id: string): Promise<ReviewedBacklogSnapshot> {
+    const repository = await this.get(id);
+    const config = await loadRepositoryConfig(repository.localPath);
+    return { repositoryId: id, ...await readReviewedBacklog(repository.localPath, config) };
+  }
+
+  public async reviewConfiguration(id: string): Promise<ReviewedConfigurationSnapshot> {
+    const repository = await this.get(id);
+    const config = await loadRepositoryConfig(repository.localPath);
+    return { repositoryId: id, ...await readReviewedConfiguration(repository.localPath, config) };
+  }
+
+  public async commitReviewedConfiguration(
+    id: string, expectations: ReviewedConfigurationExpectations,
+  ): Promise<ReviewedConfigurationCommitResult> {
+    const repository = await this.get(id);
+    const config = await loadRepositoryConfig(repository.localPath);
+    const evidence = await commitReviewedConfiguration(repository.localPath, config, expectations.expectedConfigurationSha256);
+    return { repositoryId: id, configurationPath: ".agentflow.yaml",
+      commitSha: evidence.commitSha, commitMessage: evidence.commitMessage, committedPaths: evidence.committedPaths,
+      requiresWorktreeReview: evidence.requiresWorktreeReview,
+      nextAction: evidence.requiresWorktreeReview
+        ? "Setup was saved, and newer changes remain. Review those changes before generating a backlog."
+        : "Refresh repository readiness, then explicitly generate or review a backlog." };
   }
 
   public list(): Promise<RepositoryRecord[]> {

@@ -647,6 +647,8 @@ require("node:fs").writeSync(
     expect(task).toBeDefined();
 
     try {
+      const ordinaryPlan = structuredClone(context.store.builds.getById(build.id).normalizedPlan);
+      expect(ordinaryPlan).not.toHaveProperty("governedHandoff");
       const started = await app.inject({
         method: "POST",
         url: `/api/builds/${build.id}/start`,
@@ -660,12 +662,15 @@ require("node:fs").writeSync(
         5_000,
       );
       expect(context.store.retrySchedules.get(task?.id ?? "")).toBeUndefined();
-      const eventTypes = context.store.events
-        .listForBuild(build.id)
-        .map((event) => event.type);
+      const events = context.store.events.listForBuild(build.id, { limit: 10_000 });
+      expect(events.at(-1)?.sequence).toBe(context.store.events.getLatestSequence(build.id));
+      const eventTypes = events.map((event) => event.type);
       expect(eventTypes).toContain("task.retry_scheduled");
       expect(eventTypes).toContain("task.automatic_retry_started");
       expect(eventTypes).toContain("task.retry_not_scheduled");
+      expect(eventTypes.some((type) => type.startsWith("governor."))).toBe(false);
+      expect(context.store.builds.getById(build.id).normalizedPlan).toEqual(ordinaryPlan);
+      expect(context.store.tasks.listAttempts(task?.id ?? "").map((attempt) => attempt.attempt)).toEqual([1, 2]);
     } finally {
       await app.close();
     }

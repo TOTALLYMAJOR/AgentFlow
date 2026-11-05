@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { canonicalJsonSha256 } from "../src/integration/design-intelligence.js";
-import { bindTrafficControlContract, projectAgentFlowObservation } from "../src/integration/traffic-control.js";
+import { evaluateGovernor } from "../src/governor/control-service.js";
+import { bindTrafficControlContract, fingerprintFailure, projectAgentFlowObservation, type AgentFlowObservationInput, type TrafficControlFailure } from "../src/integration/traffic-control.js";
 import { approvedGovernedHandoff } from "./helpers/governed-handoff.js";
 
 const handoff = approvedGovernedHandoff({
@@ -87,5 +88,183 @@ describe("AgentFlow Traffic Control observation adapter", () => {
       taskChanges: [], impactedPaths: [], activeTaskCollisions: [],
       evidence: { items: [], satisfied: [], contradictory: [] }, failures: [],
     })).toThrow("authoritative handoff digest");
+  });
+
+  const failure: TrafficControlFailure = { code: "TEST_FAILED", classification: "deterministic", retryable: false, signature: "same", fingerprint: "" };
+  function failureInput(): AgentFlowObservationInput {
+    return { contract: bindTrafficControlContract(handoff), buildId: "build", phase: "RUNNING", attempt: 2, maxAttempts: 3, authority, taskChanges: [], impactedPaths: [], activeTaskCollisions: [], evidence: { items: [], satisfied: [], contradictory: [] }, failures: [failure, failure] };
+  }
+
+  // TCP-002 reference fixture at Traffic Control 53488c8: volatile run paths and
+  // pointers describe one failure, while its HTTP status and semantic identity stay material.
+  const volatileFailures: TrafficControlFailure[] = [
+    "HTTP status 401 at /tmp/run-1/test.ts:42:9 pointer 0x1abc",
+    "HTTP status 401 at /tmp/run-2/test.ts:42:9 pointer 0x2abc",
+    "HTTP status 401 at /tmp/run-3/test.ts:42:9 pointer 0x3abc",
+  ].map((signature) => ({ ...failure, validation: "inert-check", signature, files: ["src/a/index.ts"], requirementId: "REQ-INERT" }));
+
+  it.each(volatileFailures)("matches the reference failure identity for $signature", (item) => {
+    expect(fingerprintFailure(item)).toBe("5923295a4ebabadd226cf218fd6575d35fbfa44bcfc834a8823f003595f62a30");
+  });
+
+  it("proposes reconsideration after three identical failures with volatile run paths and pointers", () => {
+    const input = { ...failureInput(), attempt: 3, maxAttempts: 4, failures: volatileFailures };
+    const observation = projectAgentFlowObservation(input);
+    expect(observation.failureRepeatCount).toBe(3);
+    expect(observation.failureHistory.map((item) => "signature" in item ? item.signature : undefined)).toEqual(volatileFailures.map((item) => item.signature));
+    expect(evaluateGovernor(input.contract, observation)).toMatchObject({
+      action: "PROPOSE_REPLAN", authorityEffect: "PROPOSAL_ONLY", requiresApproval: true,
+    });
+  });
+
+  it.each<{ name: string; change: Partial<TrafficControlFailure> }>([
+    { name: "HTTP status", change: { signature: "HTTP status 500 at /tmp/run-4/test.ts:42:9 pointer 0x4abc" } },
+    { name: "source file below the temporary run directory", change: { signature: "HTTP status 401 at /tmp/run-4/other.ts:42:9 pointer 0x4abc" } },
+    { name: "failure code", change: { code: "OTHER_FAILURE" } },
+    { name: "validation command", change: { validation: "other-check" } },
+    { name: "changed file identity", change: { files: ["src/b/index.ts"] } },
+    { name: "requirement identity", change: { requirementId: "REQ-OTHER" } },
+  ])("does not combine repeated failures with a different $name", ({ change }) => {
+    const currentFailure = { ...failure, validation: "inert-check", signature: "HTTP status 401 at /tmp/run-4/test.ts:42:9 pointer 0x4abc", files: ["src/a/index.ts"], requirementId: "REQ-INERT", ...change };
+    const input = { ...failureInput(), attempt: 3, maxAttempts: 4, failures: volatileFailures, currentFailure };
+    const observation = projectAgentFlowObservation(input);
+    expect(observation.failureRepeatCount).toBe(0);
+    expect(evaluateGovernor(input.contract, observation).action).toBe("REQUEST_REPAIR");
+  });
+
+  it.each(["omitted", "undefined", "null"] as const)("reports zero failure-relative progress before any failure when currentFailure is %s", (currentFailure) => {
+    const input: AgentFlowObservationInput = {
+      ...failureInput(), failures: [],
+      evidence: { items: ["inert-validation"], satisfied: ["inert-check"], contradictory: [] },
+    };
+    if (currentFailure === "null") input.currentFailure = null;
+    if (currentFailure === "undefined") input.currentFailure = undefined;
+    const observation = projectAgentFlowObservation(input);
+    expect(observation.evidence).toEqual(input.evidence);
+    expect(observation.failure).toBeNull();
+    expect(observation.failureHistory).toEqual([]);
+    expect(observation.evidenceDelta).toEqual({
+      newItems: [], newlySatisfied: [], newContradictions: [], score: 0, direction: "ZERO",
+    });
+    expect(evaluateGovernor(input.contract, observation).action).toBe("CONTINUE");
+  });
+
+  it("measures active-failure progress against supplied prior failure evidence", () => {
+    const input: AgentFlowObservationInput = {
+      ...failureInput(),
+      previousEvidence: { items: ["prior-fact"], satisfied: ["focused-tests"], contradictory: [] },
+      evidence: { items: ["prior-fact", "new-cause"], satisfied: ["focused-tests"], contradictory: [] },
+    };
+    const observation = projectAgentFlowObservation(input);
+    expect(observation.failureRepeatCount).toBe(2);
+    expect(observation.evidenceDelta).toEqual({
+      newItems: ["new-cause"], newlySatisfied: [], newContradictions: [], score: 1, direction: "POSITIVE",
+    });
+  });
+
+  it("explicit null means no active failure while preserving full normalized history", () => {
+    const observation = projectAgentFlowObservation({ ...failureInput(), currentFailure: null });
+    expect(observation.failure).toBeNull();
+    expect(observation.failureRepeatCount).toBe(0);
+    expect(observation.failureHistory).toHaveLength(2);
+    expect(observation.failureHistory[0]?.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("omitted and undefined current failure preserve legacy fallback", () => {
+    for (const input of [failureInput(), { ...failureInput(), currentFailure: undefined }]) {
+      const observation = projectAgentFlowObservation(input);
+      expect(observation.failure?.code).toBe("TEST_FAILED");
+      expect(observation.failureRepeatCount).toBe(2);
+    }
+  });
+
+  it("normalizes explicit current failure and counts matching history without replacing it", () => {
+    const observation = projectAgentFlowObservation({ ...failureInput(), currentFailure: { ...failure, code: "OTHER", signature: "new" } });
+    expect(observation.failure?.code).toBe("OTHER");
+    expect(observation.failure?.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(observation.failureRepeatCount).toBe(0);
+    expect(observation.failureHistory.map((item) => "code" in item ? item.code : undefined)).toEqual(["TEST_FAILED", "TEST_FAILED"]);
+    const repeated = projectAgentFlowObservation({ ...failureInput(), currentFailure: failure });
+    expect(repeated.failureRepeatCount).toBe(2);
+  });
+
+  it("projects explicit historical snapshots without replacing active failure details or current evidence", () => {
+    const fingerprint = "5923295a4ebabadd226cf218fd6575d35fbfa44bcfc834a8823f003595f62a30";
+    const input = {
+      ...failureInput(), failures: volatileFailures.slice(0, 2),
+      evidence: { items: ["current-proof"], satisfied: [], contradictory: [] },
+      failureSnapshots: [
+        { fingerprint, evidence: { items: ["z-proof", "a-proof", "z-proof"], satisfied: ["inert-check"], contradictory: [] } },
+        { fingerprint, evidence: { items: ["later-proof"], satisfied: [], contradictory: ["drift-b", "drift-a"] } },
+      ],
+    };
+    const observation = projectAgentFlowObservation(input);
+    expect(observation.failureHistory).toEqual([
+      { fingerprint, evidence: { items: ["a-proof", "z-proof"], satisfied: ["inert-check"], contradictory: [] } },
+      { fingerprint, evidence: { items: ["later-proof"], satisfied: [], contradictory: ["drift-a", "drift-b"] } },
+    ]);
+    expect(observation.failure).toMatchObject({ code: "TEST_FAILED", signature: "HTTP status 401 at /tmp/run-2/test.ts:42:9 pointer 0x2abc", fingerprint });
+    expect(observation.failureRepeatCount).toBe(2);
+    expect(observation.evidence).toEqual({ items: ["current-proof"], satisfied: [], contradictory: [] });
+    expect(input.failureSnapshots[0]?.evidence.items).toEqual(["z-proof", "a-proof", "z-proof"]);
+  });
+
+  it("keeps sourced historical snapshots after active failure clears without reviving it", () => {
+    const fingerprint = "5923295a4ebabadd226cf218fd6575d35fbfa44bcfc834a8823f003595f62a30";
+    const input = {
+      ...failureInput(), failures: volatileFailures.slice(0, 1), currentFailure: null,
+      failureSnapshots: [{ fingerprint, evidence: { items: ["past-proof"], satisfied: [], contradictory: [] } }],
+    };
+    const observation = projectAgentFlowObservation(input);
+    expect(observation.failureHistory).toEqual([{ fingerprint, evidence: { items: ["past-proof"], satisfied: [], contradictory: [] } }]);
+    expect(observation.failure).toBeNull();
+    expect(observation.failureRepeatCount).toBe(0);
+  });
+
+  const snapshotFingerprint = "5923295a4ebabadd226cf218fd6575d35fbfa44bcfc834a8823f003595f62a30";
+  const suppliedSnapshot = { fingerprint: snapshotFingerprint, evidence: { items: ["past-proof"], satisfied: [], contradictory: [] } };
+  const incompleteSnapshots = new Array<typeof suppliedSnapshot>(2);
+  incompleteSnapshots[0] = suppliedSnapshot;
+  const incompleteEvidence = new Array<string>(1);
+  it.each<{ name: string; snapshots: unknown }>([
+    { name: "null history", snapshots: null },
+    { name: "sparse history", snapshots: incompleteSnapshots },
+    ...(["items", "satisfied", "contradictory"] as const).map((field) => ({
+      name: `sparse ${field} evidence`,
+      snapshots: [{ ...suppliedSnapshot, evidence: { ...suppliedSnapshot.evidence, [field]: incompleteEvidence } }, suppliedSnapshot],
+    })),
+    { name: "missing entry", snapshots: [suppliedSnapshot] },
+    { name: "extra entry", snapshots: [suppliedSnapshot, suppliedSnapshot, suppliedSnapshot] },
+    { name: "unrelated fingerprint", snapshots: [suppliedSnapshot, { ...suppliedSnapshot, fingerprint: "a".repeat(64) }] },
+    { name: "malformed fingerprint", snapshots: [suppliedSnapshot, { ...suppliedSnapshot, fingerprint: "" }] },
+    { name: "missing evidence", snapshots: [{ fingerprint: snapshotFingerprint }, suppliedSnapshot] },
+    { name: "partial evidence", snapshots: [{ fingerprint: snapshotFingerprint, evidence: { items: [] } }, suppliedSnapshot] },
+    { name: "non-array evidence", snapshots: [{ fingerprint: snapshotFingerprint, evidence: { items: "past-proof", satisfied: [], contradictory: [] } }, suppliedSnapshot] },
+    { name: "non-string evidence", snapshots: [{ fingerprint: snapshotFingerprint, evidence: { items: [4], satisfied: [], contradictory: [] } }, suppliedSnapshot] },
+  ])("refuses explicit history with $name instead of inventing a fallback", ({ snapshots }) => {
+    const input = { ...failureInput(), failures: volatileFailures.slice(0, 2), failureSnapshots: snapshots };
+    expect(() => projectAgentFlowObservation(input as AgentFlowObservationInput)).toThrow("Authoritative failure history");
+  });
+
+  it("rejects history supplied in a different failure order", () => {
+    const original = volatileFailures[0];
+    if (original === undefined) throw new Error("Missing controlled failure fixture");
+    const input = {
+      ...failureInput(),
+      failures: [original, { ...original, signature: "Expected true, received false" }],
+      failureSnapshots: [
+        { ...suppliedSnapshot, fingerprint: "654c85f9d10fb81c8ec308382ca16df70de797fdc7d7d660ec4394b60c8692bc" },
+        suppliedSnapshot,
+      ],
+    };
+    expect(() => projectAgentFlowObservation(input)).toThrow("Authoritative failure history");
+  });
+
+  it("rejects a supplied raw fingerprint that disagrees with the canonical failure identity", () => {
+    const input = {
+      ...failureInput(), failures: volatileFailures.slice(0, 1).map((item) => ({ ...item, fingerprint: "a".repeat(64) })),
+      failureSnapshots: [{ ...suppliedSnapshot, fingerprint: "a".repeat(64) }],
+    };
+    expect(() => projectAgentFlowObservation(input)).toThrow("Authoritative failure history");
   });
 });

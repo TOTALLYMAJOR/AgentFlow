@@ -20,12 +20,7 @@ export async function apiFetch<T>(
   input: string,
   init?: RequestInit,
 ): Promise<T> {
-  const headers = new Headers(init?.headers);
-  headers.set("content-type", jsonHeaders["content-type"]);
-  const response = await fetch(input, {
-    ...init,
-    headers,
-  });
+  const response = await fetch(input, init);
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as
@@ -52,6 +47,6 @@ export function postJson<T>(
   const init: RequestInit =
     body === undefined
       ? { method: "POST" }
-      : { method: "POST", body: JSON.stringify(body) };
+      : { method: "POST", headers: jsonHeaders, body: JSON.stringify(body) };
   return apiFetch<T>(input, init);
 }

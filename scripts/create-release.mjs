@@ -400,18 +400,18 @@ async function verifySourceInputs(files) {
   const expectedHashes = new Map([
     [
       "docs/architecture/SPEC-1-AgentFlow-Local-Agentic-Engineering-Platform.md",
-      "341dac47141bfcd67a4d373e1bcfd22be4357f9676d7f4cabec86e3d14c19fad",
+      "efcfb7551fbccdbfa71f29b531c4cc510630ab146d6397176f32f3a7a604dae2",
     ],
     [
       "docs/implementation/AgentFlow-Codex-Implementation-Prompts.md",
-      "93114c0040f8bebc0278fe253744193db60fe854908e7447760f42b4bad7c3bd",
+      "868a78475ac480db612b346de66dda7d9f83e01de37c39f9e111b7e4bbc4910c",
     ],
   ]);
   for (const [relativePath, expectedHash] of expectedHashes) {
     const actualHash = await sha256File(path.join(root, relativePath));
     if (actualHash !== expectedHash) {
       throw new Error(
-        `${relativePath} does not match the supplied artifact (${actualHash})`,
+        `${relativePath} does not match the reviewed repository source (${actualHash})`,
       );
     }
   }

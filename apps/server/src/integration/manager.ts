@@ -1,3 +1,7 @@
+import { ConservativeTextChurnEvaluator } from "./delivery-size.js";
+import { loadBoundWaleExperiment } from "./wale-run-lab.js";
+import { fingerprintFailure } from "./traffic-control.js";
+import { DEFAULT_RETRYABLE_FAILURE_CODES } from "../orchestration/retry-policy.js";
 import { performance } from "node:perf_hooks";
 
 import {
@@ -62,6 +66,7 @@ export class IntegrationManager {
   async #integrateLocked(input: IntegrateTaskInput): Promise<IntegrationResult> {
     const build = this.#store.builds.getById(this.#worktrees.buildId);
     const task = this.#store.tasks.getById(input.taskId);
+    const experiment = loadBoundWaleExperiment(this.#store.events, build.id);
     this.#assertContext(build.id, build.integrationBranch, build.integrationWorktree, task);
 
     const taskBranch = task.branchName;
@@ -207,6 +212,73 @@ export class IntegrationManager {
         mergePerformed,
         validation,
       );
+    }
+    // This is inside the existing build mutex and before integration acceptance.
+    if (experiment !== undefined) {
+      let deliveryStatus: "delivery_size_exceeded" | "delivery_size_unmeasurable" | "persistence_failed" | undefined;
+      try {
+        const measurement = await new ConservativeTextChurnEvaluator().evaluate({
+          worktreePath: this.#git.integrationPath,
+          baseCommit: previousHead,
+          candidateCommit: integrationCommit,
+        });
+        let priorChurn = 0;
+        for (const priorTask of this.#store.tasks.listForBuild(build.id).filter((item) => item.state === "integrated")) {
+          const records = [];
+          let afterSequence = 0;
+          for (;;) {
+            const page = this.#store.events.listForBuild(build.id, { afterSequence, limit: 10_000 });
+            records.push(...page.filter((event) => event.type === "wale.delivery_size_evaluated" && event.taskId === priorTask.id));
+            if (page.length < 10_000) break;
+            const next = page.at(-1)?.sequence;
+            if (next === undefined || next <= afterSequence) throw new Error("Invalid delivery evidence cursor");
+            afterSequence = next;
+          }
+          const accepted = records.filter((record) => record.payload["candidateCommit"] === priorTask.integrationCommit && record.payload["accepted"] === true);
+          const retained = accepted[0];
+          if (accepted.length !== 1 || retained === undefined || retained.payload["experimentId"] !== experiment.experimentId || retained.payload["metric"] !== "CUMULATIVE_ALL_TEXT_CHURN_PROXY") throw new Error("Missing or ambiguous accepted delivery evidence");
+          const churn = retained.payload["incrementalTextChurn"];
+          if (typeof churn !== "number" || !Number.isSafeInteger(churn) || churn < 0) throw new Error("Invalid delivery evidence");
+          priorChurn += churn;
+          if (!Number.isSafeInteger(priorChurn)) throw new Error("Delivery measurement overflow");
+        }
+        const cumulativeTextChurn = priorChurn + measurement.totalChurn;
+        const measurable = measurement.binaryFileCount === 0 && Number.isSafeInteger(cumulativeTextChurn);
+        const accepted = measurable && cumulativeTextChurn <= experiment.parameters.deliverySize;
+        deliveryStatus = !measurable ? "delivery_size_unmeasurable" : accepted ? undefined : "delivery_size_exceeded";
+        try {
+          this.#store.events.append({ buildId: build.id, taskId: task.id, type: "wale.delivery_size_evaluated", payload: {
+            experimentId: experiment.experimentId, candidateCommit: integrationCommit, previousHead,
+            measurementVersion: measurement.measurementVersion,
+            metric: "CUMULATIVE_ALL_TEXT_CHURN_PROXY", eligibleSourceLoc: null,
+            incrementalTextChurn: measurement.totalChurn, priorTextChurn: priorChurn, cumulativeTextChurn,
+            binaryFileCount: measurement.binaryFileCount, ceiling: experiment.parameters.deliverySize, accepted,
+            overflowBehavior: "SPLIT_OR_REPLAN", profileExecution: "UNKNOWN", checkExecution: "UNKNOWN",
+          } });
+        } catch {
+          deliveryStatus = "persistence_failed";
+        }
+      } catch {
+        deliveryStatus = "delivery_size_unmeasurable";
+        try {
+          this.#store.events.append({ buildId: build.id, taskId: task.id, type: "wale.delivery_size_evaluated", payload: {
+            experimentId: experiment.experimentId, candidateCommit: integrationCommit, previousHead,
+            metric: "CUMULATIVE_ALL_TEXT_CHURN_PROXY", eligibleSourceLoc: null,
+            incrementalTextChurn: null, cumulativeTextChurn: null, accepted: false,
+            reason: "UNMEASURABLE", ceiling: experiment.parameters.deliverySize,
+          } });
+        } catch { deliveryStatus = "persistence_failed"; }
+      }
+      if (deliveryStatus !== undefined) {
+        const rollbackError = await this.#rollback(previousHead);
+        const errorCode = rollbackError !== null ? "INTEGRATION_ROLLBACK_FAILED" : deliveryStatus === "persistence_failed" ? "INTEGRATION_EVIDENCE_PERSISTENCE_FAILED" : deliveryStatus === "delivery_size_exceeded" ? "WALE_DELIVERY_SIZE_EXCEEDED" : "WALE_DELIVERY_SIZE_UNMEASURABLE";
+        const errorMessage = "Bound delivery ceiling could not be satisfied; separate split or replan authority is required";
+        this.#recordFailure(task.id, errorCode, errorMessage, { previousHead, attemptedCommit: integrationCommit });
+        return this.#result({ task, status: rollbackError === null ? deliveryStatus : "rollback_failed", previousHead, mergePerformed, validation, errorCode, errorMessage });
+      }
+    }
+    if (isAbortRequested(input.signal)) {
+      return this.#handleCancellation(task, previousHead, mergePerformed, validation);
     }
     let releasedTaskIds: string[];
     try {
@@ -498,11 +570,18 @@ export class IntegrationManager {
         errorCode,
         errorMessage,
       });
+      const build = store.builds.getById(task.buildId);
+      const attempt = store.tasks.listAttempts(taskId).find((item) => item.attempt === task.attempt);
+      const governed = build.normalizedPlan.governedHandoff;
+      const retryable = DEFAULT_RETRYABLE_FAILURE_CODES.has(errorCode);
+      const source = typeof governed === "object" && governed !== null && attempt !== undefined && attempt.buildId === task.buildId
+        ? { to: task.state, governorFailure: { attempt: attempt.attempt, attemptId: attempt.id, baseCommit: task.baseCommit, resultCommit: task.resultCommit, branch: task.branchName, fingerprint: fingerprintFailure({ code: errorCode, classification: retryable ? "transient" : "deterministic", retryable, signature: errorMessage, files: store.tasks.listChangedFiles(taskId, attempt.attempt).map((file) => file.path) }) } }
+        : {};
       store.events.append({
         buildId: task.buildId,
         taskId,
         type: "integration.failed",
-        payload: { errorCode, errorMessage, ...payload },
+        payload: { errorCode, errorMessage, ...payload, ...source },
       });
     });
   }

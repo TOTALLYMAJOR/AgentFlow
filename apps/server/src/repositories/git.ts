@@ -8,6 +8,8 @@ import { RepositoryServiceError } from "./errors.js";
 
 const execFileAsync = promisify(execFile);
 
+export const MAX_GIT_OUTPUT_BYTES = 10 * 1024 * 1024;
+
 export interface GitCommandResult {
   stdout: string;
   stderr: string;
@@ -177,14 +179,18 @@ export async function detectDefaultBranch(
 export async function runGit(
   repositoryRoot: string,
   arguments_: string[],
+  options: { environment?: NodeJS.ProcessEnv } = {},
 ): Promise<GitCommandResult> {
   const result = await execFileAsync(
     "git",
     ["-C", repositoryRoot, ...arguments_],
     {
       encoding: "utf8",
-      maxBuffer: 10 * 1024 * 1024,
+      maxBuffer: MAX_GIT_OUTPUT_BYTES,
       windowsHide: true,
+        env: options.environment === undefined
+          ? process.env
+          : { ...process.env, ...options.environment },
     },
   );
   return {

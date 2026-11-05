@@ -1,0 +1,175 @@
+[
+  {
+    "name": "http-after-effect",
+    "decision": {
+      "sequence": 4,
+      "buildId": "build",
+      "taskId": null,
+      "type": "governor.decision",
+      "payload": {
+        "schema": "traffic-control/governor-decision-record@1",
+        "recordedAt": "2026-11-03T22:25:51.753Z",
+        "contractHash": "747b5e4de8e487456be3f075ed2d4fa997217a7d7f506bbba55c19a0656c29ff",
+        "observationHash": "bfb7a77d2fbdda7b9e580f450a966acc62c11d3f5bd58a349b5ba799340752cb",
+        "previousRecordHash": null,
+        "policyVersion": "governor.v1",
+        "decision": {
+          "policyVersion": "governor.v1",
+          "action": "REQUEST_REPAIR",
+          "ruleId": "bounded-implementation-failure",
+          "authorityEffect": "NONE",
+          "requiresApproval": false,
+          "signals": {
+            "failureFingerprint": "b273652fea34fe8364643f0cf01d57bdd9c040a53d7bd9123fc4174b84162a5a"
+          }
+        },
+        "recordHash": "48022bdb7bef37166b4ee9239483b2d8aadf2c63fd78273f7b911d03fcfa5935",
+        "authorityObservation": {
+          "approvalAuthority": "HUMAN_OR_REPOSITORY",
+          "handoffSha256": "747b5e4de8e487456be3f075ed2d4fa997217a7d7f506bbba55c19a0656c29ff",
+          "baseCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "snapshotSha256": "8cd24e1109ee8ea4edbae0175a175db9b41d3d6debd13649bcf48fcbb4ff50da",
+          "authorityStateSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "governanceReportSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "occurredAt": "2026-11-03T22:25:51.753Z"
+    },
+    "outcome": {
+      "sequence": 6,
+      "buildId": "build",
+      "taskId": null,
+      "type": "governor.evaluation_failed",
+      "payload": {
+        "decisionRecordHash": "48022bdb7bef37166b4ee9239483b2d8aadf2c63fd78273f7b911d03fcfa5935",
+        "action": "REQUEST_REPAIR",
+        "message": "inert error after native pause committed",
+        "acknowledged": false,
+        "details": {
+          "runtimeApplyInvoked": true,
+          "acknowledgementAvailable": false,
+          "receiptPersistAttempted": false,
+          "observedBuildStatusBefore": "running",
+          "observedBuildStatusAfter": "paused"
+        }
+      },
+      "occurredAt": "2026-11-03T22:25:51.756Z"
+    },
+    "finalBuildStatus": "paused"
+  },
+  {
+    "name": "http-receipt-persistence",
+    "decision": {
+      "sequence": 4,
+      "buildId": "build",
+      "taskId": null,
+      "type": "governor.decision",
+      "payload": {
+        "schema": "traffic-control/governor-decision-record@1",
+        "recordedAt": "2026-11-03T22:25:51.945Z",
+        "contractHash": "8df41aa47420b2da8124ecbb5c06b07543486da90e0eead154d39acd05c3637f",
+        "observationHash": "ffac84bda6fd6ae67db3b8c094f040c86bb546ee93d1aa7cfb7bdf29ffb3cb0d",
+        "previousRecordHash": null,
+        "policyVersion": "governor.v1",
+        "decision": {
+          "policyVersion": "governor.v1",
+          "action": "REQUEST_REPAIR",
+          "ruleId": "bounded-implementation-failure",
+          "authorityEffect": "NONE",
+          "requiresApproval": false,
+          "signals": {
+            "failureFingerprint": "b273652fea34fe8364643f0cf01d57bdd9c040a53d7bd9123fc4174b84162a5a"
+          }
+        },
+        "recordHash": "cb7d968319780878189772b38e2747e64cc7a19b537ed4823edfe791a973bb06",
+        "authorityObservation": {
+          "approvalAuthority": "HUMAN_OR_REPOSITORY",
+          "handoffSha256": "8df41aa47420b2da8124ecbb5c06b07543486da90e0eead154d39acd05c3637f",
+          "baseCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "snapshotSha256": "8cd24e1109ee8ea4edbae0175a175db9b41d3d6debd13649bcf48fcbb4ff50da",
+          "authorityStateSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "governanceReportSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "occurredAt": "2026-11-03T22:25:51.945Z"
+    },
+    "outcome": {
+      "sequence": 6,
+      "buildId": "build",
+      "taskId": null,
+      "type": "governor.evaluation_failed",
+      "payload": {
+        "decisionRecordHash": "cb7d968319780878189772b38e2747e64cc7a19b537ed4823edfe791a973bb06",
+        "action": "REQUEST_REPAIR",
+        "message": "inert journal failure after runtime acknowledgement returned",
+        "acknowledged": true,
+        "details": {
+          "runtimeApplyInvoked": true,
+          "acknowledgementAvailable": true,
+          "receiptPersistAttempted": true,
+          "observedBuildStatusBefore": "running",
+          "observedBuildStatusAfter": "paused"
+        }
+      },
+      "occurredAt": "2026-11-03T22:25:51.948Z"
+    },
+    "finalBuildStatus": "paused"
+  },
+  {
+    "name": "coordinator-readback",
+    "decision": {
+      "sequence": 4,
+      "buildId": "build",
+      "taskId": null,
+      "type": "governor.decision",
+      "payload": {
+        "schema": "traffic-control/governor-decision-record@1",
+        "recordedAt": "2026-11-03T22:25:52.200Z",
+        "contractHash": "7094abf71023197f603c88bdc2f9af16debdc0e17d5fb6160f5f532895ff28fe",
+        "observationHash": "ccaa6d420b65596c437d28403c13bbf62109490bbe09366bf3a0aca69afee3ec",
+        "previousRecordHash": null,
+        "policyVersion": "governor.v1",
+        "decision": {
+          "policyVersion": "governor.v1",
+          "action": "REQUEST_REPAIR",
+          "ruleId": "bounded-implementation-failure",
+          "authorityEffect": "NONE",
+          "requiresApproval": false,
+          "signals": {
+            "failureFingerprint": "b273652fea34fe8364643f0cf01d57bdd9c040a53d7bd9123fc4174b84162a5a"
+          }
+        },
+        "recordHash": "2236330b38693c8f531cde3dc70e442106f5c985827cb55a4fe784d99c9f5906",
+        "authorityObservation": {
+          "approvalAuthority": "HUMAN_OR_REPOSITORY",
+          "handoffSha256": "7094abf71023197f603c88bdc2f9af16debdc0e17d5fb6160f5f532895ff28fe",
+          "baseCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "snapshotSha256": "8cd24e1109ee8ea4edbae0175a175db9b41d3d6debd13649bcf48fcbb4ff50da",
+          "authorityStateSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "governanceReportSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "occurredAt": "2026-11-03T22:25:52.200Z"
+    },
+    "outcome": {
+      "sequence": 5,
+      "buildId": "build",
+      "taskId": null,
+      "type": "governor.evaluation_failed",
+      "payload": {
+        "message": "inert native build readback failure before runtime apply",
+        "decisionRecordHash": "2236330b38693c8f531cde3dc70e442106f5c985827cb55a4fe784d99c9f5906",
+        "action": "REQUEST_REPAIR",
+        "acknowledged": false,
+        "details": {
+          "runtimeApplyInvoked": false,
+          "acknowledgementAvailable": false,
+          "receiptPersistAttempted": false,
+          "observedBuildStatusAfter": "running"
+        }
+      },
+      "occurredAt": "2026-11-03T22:25:52.201Z"
+    },
+    "finalBuildStatus": "paused"
+  }
+]

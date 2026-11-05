@@ -60,10 +60,17 @@ export interface RegisteredRepositoryInspection
   repository: RepositoryRecord;
 }
 
+export interface RepositoryPreflight extends LocalRepositoryInspection {
+  canConnect: boolean;
+  requiresInitialization: boolean;
+  proposedChanges: string[];
+  nextAction: string;
+}
+
 export interface RegisterRepositoryOptions {
   /**
-   * `repo add` can initialize the contract in a repository that does not have
-   * one yet. Set this to false for a read-only registration attempt.
+   * Initialization is opt-in. Omitting this option keeps registration
+   * read-only when the repository is not configured.
    */
   initializeIfMissing?: boolean;
 }
@@ -73,4 +80,57 @@ export interface InitializeRepositoryResult {
   configPath: string;
   created: boolean;
   config: AgentFlowRepositoryConfig;
+}
+
+export interface ReviewedBacklogCommitResult {
+  repositoryId: string;
+  commitSha: string;
+  commitMessage: string;
+  committedPaths: string[];
+  backlogPath: string;
+  requiresWorktreeReview: boolean;
+  nextAction: string;
+}
+
+export interface ReviewedBacklogExpectations {
+  expectedBacklogPath?: string | undefined;
+  expectedBacklogSha256?: string | undefined;
+  expectedConfigurationSha256?: string | undefined;
+}
+
+export interface ReviewedConfigurationExpectations {
+  expectedConfigurationSha256: string;
+}
+
+export interface ReviewedConfigurationSnapshot {
+  repositoryId: string;
+  configurationPath: string;
+  configurationContents: string;
+  configurationSha256: string;
+  valid: true;
+  nextAction: string;
+}
+
+export interface ReviewedBacklogSnapshot {
+  repositoryId: string;
+  backlogPath: string;
+  absoluteBacklogPath: string;
+  configurationPath: string;
+  backlogContents: string;
+  configurationContents: string;
+  backlogSha256: string;
+  configurationSha256: string;
+  valid: boolean;
+  validationErrors: string[];
+  nextAction: string;
+}
+
+export interface ReviewedConfigurationCommitResult {
+  repositoryId: string;
+  configurationPath: string;
+  commitSha: string;
+  commitMessage: string;
+  committedPaths: string[];
+  requiresWorktreeReview: boolean;
+  nextAction: string;
 }

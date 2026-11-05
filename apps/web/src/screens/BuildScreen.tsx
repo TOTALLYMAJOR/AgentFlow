@@ -12,6 +12,7 @@ import type {
   ApprovalSummary,
   ArtifactSummary,
   BuildSummary,
+  ExecutionAuthorityReadback,
   TaskManifest,
 } from "../api/types.js";
 import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
@@ -71,8 +72,21 @@ export function BuildScreen({
     apiFetch,
     { refreshInterval: 3_000 },
   );
+  const executionAuthority = useSWR<unknown, Error>(
+    active === null ? null : `/api/builds/${active.id}/execution-authority`,
+    apiFetch,
+    { refreshInterval: 4_000 },
+  );
+  const authorityCheck = {
+    readback: executionAuthority.error === undefined
+      ? validatedAuthorityReadback(executionAuthority.data, active?.id ?? null)
+      : null,
+    readFailed: executionAuthority.error !== undefined,
+    checking: executionAuthority.isValidating,
+  };
   const stream = useBuildEvents(active?.id ?? null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const technicalActivityRef = useRef<HTMLDetailsElement>(null);
   const focusReturnTargetRef = useRef<HTMLButtonElement | null>(null);
   const shouldRestoreFocusRef = useRef(false);
   const [pendingAction, setPendingAction] = useState<BuildAction | null>(null);
@@ -125,6 +139,12 @@ export function BuildScreen({
   }
 
   function closeTaskInspector(): void {
+    if (focusReturnTargetRef.current?.isConnected !== true) {
+      // Native readback can move a task to another queue and replace its trigger.
+      focusReturnTargetRef.current = technicalActivityRef.current?.querySelector<HTMLButtonElement>(
+        ".work-board button.task-row[aria-pressed='true']",
+      ) ?? null;
+    }
     shouldRestoreFocusRef.current = true;
     setSelectedTaskId(null);
   }
@@ -339,7 +359,10 @@ export function BuildScreen({
 
       <div className="build-state-strip" aria-live="polite">
         <StatusBadge status={active.status} />
-        <span className="mono">{active.id}</span>
+        <details>
+          <summary>View build identity</summary>
+          <code>{active.id}</code>
+        </details>
         <span>{stream.connected ? "Events live" : "Reconnecting events"}</span>
       </div>
 
@@ -355,7 +378,7 @@ export function BuildScreen({
             <p>
               {completedTasks.length} of {tasks.length} planned steps complete
               {blockedTasks.length === 0
-                ? ". No blockers need your attention."
+                  ? ". No task is marked failed or awaiting approval."
                 : blockedTasks.length === 1
                   ? ". 1 item needs attention."
                   : `. ${blockedTasks.length} items need attention.`}
@@ -400,7 +423,7 @@ export function BuildScreen({
         />
       ) : null}
 
-      <details className="technical-work-details">
+      <details ref={technicalActivityRef} className="technical-work-details">
         <summary>View technical activity and evidence</summary>
         <div className="technical-work-details__content">
       <section className="metrics-grid" aria-label="Active build summary">
@@ -457,7 +480,10 @@ export function BuildScreen({
 
       {effectiveSelectedTaskId === null ? null : (
         <TaskInspector
+          key={`${active.id}:${effectiveSelectedTaskId}`}
           buildId={active.id}
+          buildStatus={active.status}
+          governedBuild={active.normalizedPlan?.governedHandoff != null}
           taskId={effectiveSelectedTaskId}
           liveEvents={stream.events}
           onClose={closeTaskInspector}
@@ -485,13 +511,15 @@ export function BuildScreen({
         <EventTimeline
           events={stream.events}
           connected={stream.connected}
+          authorityCheck={authorityCheck}
           title="Recent durable events"
         />
         <EventTimeline
           events={recoveryEvents}
           connected={stream.connected}
+          authorityCheck={authorityCheck}
           title="Recovery and reconciliation"
-          emptyMessage="No recovery actions have been recorded for this build."
+            emptyMessage="No recovery events are present in this recent window."
         />
       </div>
         </div>
@@ -500,11 +528,36 @@ export function BuildScreen({
   );
 }
 
+function validatedAuthorityReadback(value: unknown, buildId: string | null): ExecutionAuthorityReadback | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || buildId === null) return null;
+  const input = value as Record<string, unknown>;
+  const status = input.status;
+  if (input.buildId !== buildId ||
+      (status !== "passed" && status !== "blocked" && status !== "not_applicable" && status !== "unknown") ||
+      typeof input.checkedAt !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u.test(input.checkedAt)) return null;
+  const date = new Date(input.checkedAt);
+  const canonical = input.checkedAt.replace(/(?:\.(\d{1,3}))?Z$/u,
+    (_match: string, fraction: string | undefined) => `.${(fraction ?? "").padEnd(3, "0")}Z`);
+  if (!Number.isFinite(date.getTime()) || date.toISOString() !== canonical) return null;
+  if (input.code !== undefined &&
+      (typeof input.code !== "string" || input.code.length > 160 || !/^[A-Z][A-Z0-9_]*$/u.test(input.code))) return null;
+  if (input.message !== undefined &&
+      (typeof input.message !== "string" || input.message.length > 2_000)) return null;
+  return {
+    buildId,
+    checkedAt: input.checkedAt,
+    status,
+    ...(input.code === undefined ? {} : { code: input.code }),
+    ...(input.message === undefined ? {} : { message: input.message }),
+  };
+}
+
 function plainBuildStatus(status: string): string {
   const labels: Record<string, string> = {
     ready: "Ready for your approval",
     running: "Work is moving forward",
-    paused: "Work is paused",
+    paused: "Paused",
     interrupted: "Work is waiting to resume",
     recovering: "AgentFlow is recovering safely",
   };
@@ -512,11 +565,11 @@ function plainBuildStatus(status: string): string {
 }
 
 function nextProgressMessage(status: string, taskCount: number): string {
+    if (status === "paused") {
+      return "Work is paused";
+    }
   if (taskCount === 0) {
     return "Preparing the first steps";
-  }
-  if (status === "paused") {
-    return "Ready when you are";
   }
   if (status === "ready") {
     return "The plan is ready to begin";
@@ -525,11 +578,11 @@ function nextProgressMessage(status: string, taskCount: number): string {
 }
 
 function nextActionMessage(status: string, blockedCount: number): string {
+    if (status === "paused") {
+      return "Review recorded decisions, evidence and native controls before continuing.";
+    }
   if (blockedCount > 0) {
     return "Review the approval or failed step below.";
-  }
-  if (status === "paused") {
-    return "Resume when you want AgentFlow to continue.";
   }
   if (status === "ready") {
     return "Start the approved work when you are ready.";

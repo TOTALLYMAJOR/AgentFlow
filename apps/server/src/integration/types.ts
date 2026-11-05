@@ -56,6 +56,8 @@ export type IntegrationResultStatus =
   | "merge_conflict"
   | "merge_failed"
   | "validation_failed"
+  | "delivery_size_exceeded"
+  | "delivery_size_unmeasurable"
   | "rollback_failed"
   | "persistence_failed";
 

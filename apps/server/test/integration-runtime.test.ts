@@ -1,3 +1,7 @@
+import { BuildCoordinator } from "../src/orchestration/coordinator.js";
+import * as governedAuthority from "../src/integration/design-intelligence.js";
+import type { GovernedTaskHandoff } from "../src/integration/design-intelligence.js";
+import type { WaleRunLabExperiment } from "../src/integration/wale-run-lab.js";
 import { execFile } from "node:child_process";
 import {
   access,
@@ -11,11 +15,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createDatabaseRepositories,
   openDatabase,
+  type BuildEntity,
   type DatabaseRepositories,
 } from "../src/db/index.js";
 import { GitWorktreeManager } from "../src/git/index.js";
@@ -30,6 +35,7 @@ const execFileAsync = promisify(execFile);
 const fixtures = new Set<IntegrationFixture>();
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     [...fixtures].map(async (fixture) => {
       if (fixture.store.database.open) {
@@ -41,7 +47,166 @@ afterEach(async () => {
   );
 });
 
+describe("Run Lab authority overlay compatibility", () => {
+  it("preserves unbound native governed legacy builds after reading their retained plan classification", async () => {
+    const fixture = await createFixture("unbound-legacy", []);
+    const getPlan = vi.fn(() => ({ normalizedPlan: { governedHandoff: { id: "legacy", path: "moved-away.json", carrierPaths: [], sha256: "a".repeat(64) } } }));
+    const getRepository = vi.fn(() => { throw new Error("must not recheck unbound native authority"); });
+    const coordinator = { store: { events: fixture.store.events, plans: { getById: getPlan } }, repositoryService: { get: getRepository } } as unknown as BuildCoordinator;
+    const build = { ...fixture.store.builds.getById(fixture.buildId), planId: "legacy-plan" };
+    await expect(BuildCoordinator.prototype.validateExecutionAuthority.call(coordinator, build)).resolves.toBeUndefined();
+    expect(getPlan).toHaveBeenCalledExactlyOnceWith("legacy-plan");
+    expect(getRepository).not.toHaveBeenCalled();
+  });
+
+  it("still refuses a bound experiment with no governed plan", async () => {
+    const fixture = await createFixture("bound-ungoverned", []);
+    fixture.store.events.appendExperimentBinding(fixture.buildId, boundExperiment());
+    const coordinator = { store: fixture.store } as unknown as BuildCoordinator;
+    await expect(BuildCoordinator.prototype.validateExecutionAuthority.call(coordinator, fixture.store.builds.getById(fixture.buildId))).rejects.toMatchObject({ code: "WALE_EXPERIMENT_REQUIRES_GOVERNED_PLAN" });
+  });
+
+  it("requires the exact execution snapshot for a bound legacy experiment after current handoff recheck", async () => {
+    const fixture = await createFixture("bound-legacy", []);
+    fixture.store.events.appendExperimentBinding(fixture.buildId, boundExperiment());
+    await writeFile(path.join(fixture.repository, "retained-handoff.json"), "fixture carrier");
+    const handoff = { handoffId: "legacy" } as unknown as GovernedTaskHandoff;
+    vi.spyOn(governedAuthority, "loadGovernedTaskHandoff").mockResolvedValue(handoff);
+    const verify = vi.spyOn(governedAuthority, "verifyGovernedHandoffForExecution").mockResolvedValue({ errors: [], currentHead: "a".repeat(40) });
+    const getPlan = vi.fn(() => ({ normalizedPlan: { governedHandoff: { id: "legacy", path: "retained-handoff.json", carrierPaths: [], sha256: governedAuthority.canonicalJsonSha256(handoff) } } }));
+    const coordinator = { store: { events: fixture.store.events, plans: { getById: getPlan } }, repositoryService: { get: async () => ({ localPath: fixture.repository }) } } as unknown as BuildCoordinator;
+    const build = { ...fixture.store.builds.getById(fixture.buildId), planId: "legacy-plan" };
+    await expect(BuildCoordinator.prototype.validateExecutionAuthority.call(coordinator, build)).rejects.toMatchObject({ code: "GOVERNED_EXECUTION_SNAPSHOT_STALE" });
+    expect(verify).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { name: "missing execution marker", execution: undefined, snapshot: "captured", digest: "current", contents: "" },
+    { name: "null execution marker", execution: null, snapshot: "captured", digest: "current", contents: "" },
+    { name: "malformed execution marker", execution: "not-a-commit", snapshot: "captured", digest: "current", contents: "" },
+    { name: "retained digest with an emptied plan snapshot", execution: undefined, snapshot: "empty", digest: "current", contents: "" },
+    { name: "retained plan snapshot without a backlog digest", execution: undefined, snapshot: "captured", digest: "null", contents: "" },
+    { name: "retained backlog contents with other snapshot markers lost", execution: undefined, snapshot: "empty", digest: "null", contents: "# Retained current backlog\n" },
+    { name: "an array instead of the legacy plan object", execution: undefined, snapshot: "array", digest: "null", contents: "" },
+    { name: "null instead of the legacy plan object", execution: undefined, snapshot: "null", digest: "null", contents: "" },
+    { name: "a missing digest instead of the exact legacy null", execution: undefined, snapshot: "empty", digest: "missing", contents: "" },
+  ])("does not reinterpret $name as an unsnapshotted legacy build", async ({ execution, snapshot, digest, contents }) => {
+    const fixture = await createFixture("current-binding-refusal", []);
+    await writeFile(path.join(fixture.repository, "retained-handoff.json"), "fixture carrier");
+    const handoff = { handoffId: "current" } as unknown as GovernedTaskHandoff;
+    vi.spyOn(governedAuthority, "loadGovernedTaskHandoff").mockResolvedValue(handoff);
+    const verify = vi.spyOn(governedAuthority, "verifyGovernedHandoffForExecution").mockResolvedValue({ errors: [], currentHead: "a".repeat(40) });
+    const binding = { id: "current", path: "retained-handoff.json", carrierPaths: [], sha256: governedAuthority.canonicalJsonSha256(handoff), ...(execution === undefined ? {} : { executionBaseCommit: execution }) };
+    const getPlan = vi.fn(() => ({ normalizedPlan: { governedHandoff: binding } }));
+    const coordinator = { store: { events: fixture.store.events, plans: { getById: getPlan } }, repositoryService: { get: async () => ({ localPath: fixture.repository }) } } as unknown as BuildCoordinator;
+    const normalizedPlan = snapshot === "captured" ? { governedHandoff: binding } : snapshot === "array" ? [] : snapshot === "null" ? null : {};
+    const build = {
+      ...fixture.store.builds.getById(fixture.buildId),
+      planId: "current-plan",
+      backlogSha256: digest === "current" ? "b".repeat(64) : digest === "null" ? null : undefined,
+      backlogContents: contents,
+      normalizedPlan,
+    } as unknown as BuildEntity;
+
+    await expect(BuildCoordinator.prototype.validateExecutionAuthority.call(coordinator, build)).rejects.toMatchObject({ code: "GOVERNED_EXECUTION_SNAPSHOT_STALE", statusCode: 409 });
+    expect(getPlan).toHaveBeenCalledExactlyOnceWith("current-plan");
+    expect(verify).toHaveBeenCalledOnce();
+  });
+
+  it.each(["current-plan", null])("refuses a missing immutable-plan binding when the build retains current governed authority (%s)", async (planId) => {
+    const fixture = await createFixture("missing-current-plan-binding", []);
+    const getPlan = vi.fn(() => ({ normalizedPlan: {} }));
+    const getRepository = vi.fn(() => { throw new Error("missing immutable binding must refuse before source inspection"); });
+    const coordinator = { store: { events: fixture.store.events, plans: { getById: getPlan } }, repositoryService: { get: getRepository } } as unknown as BuildCoordinator;
+    const build = {
+      ...fixture.store.builds.getById(fixture.buildId),
+      planId,
+      backlogSha256: "b".repeat(64),
+      backlogContents: "# Captured governed backlog\n",
+      normalizedPlan: { governedHandoff: { id: "current", executionBaseCommit: "a".repeat(40) } },
+    };
+
+    await expect(BuildCoordinator.prototype.validateExecutionAuthority.call(coordinator, build)).rejects.toMatchObject({ code: "GOVERNED_HANDOFF_DRIFT", statusCode: 409 });
+    if (planId === null) expect(getPlan).not.toHaveBeenCalled();
+    else expect(getPlan).toHaveBeenCalledExactlyOnceWith(planId);
+    expect(getRepository).not.toHaveBeenCalled();
+  });
+});
+
 describe("IntegrationManager", () => {
+
+  it("enforces cumulative churn under the mutex before acceptance and rolls back overflow", async () => {
+    const fixture = await createFixture("delivery-cumulative", [
+      { id: "A", files: { "a.txt": "one\ntwo\n" } },
+      { id: "B", files: { "b.txt": "three\n" } },
+    ]);
+    const experiment = boundExperiment();
+    experiment.parameters.deliverySize = 2;
+    fixture.store.events.appendExperimentBinding(fixture.buildId, experiment);
+    const manager = createIntegrationManager(fixture, passingRunner());
+    const [first, second] = await Promise.all([manager.integrate({ taskId: "A" }), manager.integrate({ taskId: "B" })]);
+    expect(first.status).toBe("integrated");
+    expect(second).toMatchObject({ status: "delivery_size_exceeded", errorCode: "WALE_DELIVERY_SIZE_EXCEEDED" });
+    expect(await gitOutput(fixture.integrationPath, ["rev-parse", "HEAD"])).toBe(first.integrationCommit);
+    expect(fixture.store.tasks.getById("B").state).toBe("failed");
+    const measurement = fixture.store.events.listForBuild(fixture.buildId).find((event) => event.type === "wale.delivery_size_evaluated" && event.taskId === "B");
+    expect(measurement?.payload).toMatchObject({ priorTextChurn: 2, incrementalTextChurn: 1, cumulativeTextChurn: 3, accepted: false, eligibleSourceLoc: null, metric: "CUMULATIVE_ALL_TEXT_CHURN_PROXY" });
+  });
+
+  it("does not hide earlier churn when a later delivery removes the earlier text", async () => {
+    const fixture = await createFixture("delivery-removal", [{ id: "A", files: { "a.txt": "one\ntwo\n" } }]);
+    const experiment = boundExperiment();
+    experiment.parameters.deliverySize = 3;
+    fixture.store.events.appendExperimentBinding(fixture.buildId, experiment);
+    const manager = createIntegrationManager(fixture, passingRunner());
+    const first = await manager.integrate({ taskId: "A" });
+    expect(first.status).toBe("integrated");
+    if (first.integrationCommit === null) throw new Error("Expected integration commit");
+    const worktree = await fixture.worktrees.createTaskWorktree({ taskId: "B", integrationCommit: first.integrationCommit });
+    await git(worktree.path, ["rm", "a.txt"]);
+    await git(worktree.path, ["commit", "-m", "fixture removal"]);
+    fixture.store.tasks.create({ id: "B", buildId: fixture.buildId, title: "Remove prior text", description: "Fixture", acceptanceCriteria: ["Removed"], state: "validated", branchName: worktree.branchName, worktreePath: worktree.path, baseCommit: first.integrationCommit, resultCommit: await gitOutput(worktree.path, ["rev-parse", "HEAD"]) });
+    const second = await manager.integrate({ taskId: "B" });
+    expect(second.status).toBe("delivery_size_exceeded");
+    expect(fixture.store.events.listForBuild(fixture.buildId).find((event) => event.type === "wale.delivery_size_evaluated" && event.taskId === "B")?.payload).toMatchObject({ incrementalTextChurn: 2, priorTextChurn: 2, cumulativeTextChurn: 4 });
+    expect(await readFile(path.join(fixture.integrationPath, "a.txt"), "utf8")).toBe("one\ntwo\n");
+  });
+
+  it("fails closed when a prior accepted delivery measurement is missing", async () => {
+    const fixture = await createFixture("delivery-missing", [{ id: "A", files: { "a.txt": "one\n" } }, { id: "B", files: { "b.txt": "two\n" } }]);
+    fixture.store.events.appendExperimentBinding(fixture.buildId, boundExperiment());
+    const manager = createIntegrationManager(fixture, passingRunner());
+    expect((await manager.integrate({ taskId: "A" })).status).toBe("integrated");
+    fixture.store.database.prepare("DELETE FROM build_events WHERE event_type = 'wale.delivery_size_evaluated'").run();
+    const second = await manager.integrate({ taskId: "B" });
+    expect(second.status).toBe("delivery_size_unmeasurable");
+    expect(fixture.store.events.listForBuild(fixture.buildId).find((event) => event.type === "wale.delivery_size_evaluated")?.payload).toMatchObject({ incrementalTextChurn: null, cumulativeTextChurn: null, accepted: false, reason: "UNMEASURABLE" });
+    expect(await gitOutput(fixture.integrationPath, ["rev-parse", "HEAD"])).toBe(second.previousHead);
+  });
+
+  it("refuses binary delivery and retains a failed evaluation", async () => {
+    const fixture = await createFixture("delivery-binary", [{ id: "A", files: { "binary.bin": "a\u0000b" } }]);
+    fixture.store.events.appendExperimentBinding(fixture.buildId, boundExperiment());
+    const result = await createIntegrationManager(fixture, passingRunner()).integrate({ taskId: "A" });
+    expect(result.status).toBe("delivery_size_unmeasurable");
+    expect(await gitOutput(fixture.integrationPath, ["rev-parse", "HEAD"])).toBe(result.previousHead);
+    expect(fixture.store.events.listForBuild(fixture.buildId).find((event) => event.type === "wale.delivery_size_evaluated")?.payload).toMatchObject({ accepted: false, binaryFileCount: 1 });
+  });
+
+  it("rolls back if delivery evidence persistence fails", async () => {
+    const fixture = await createFixture("delivery-persistence", [{ id: "A", files: { "a.txt": "one\n" } }]);
+    fixture.store.events.appendExperimentBinding(fixture.buildId, boundExperiment());
+    const append = fixture.store.events.append.bind(fixture.store.events);
+    vi.spyOn(fixture.store.events, "append").mockImplementation((input) => {
+      if (input.type === "wale.delivery_size_evaluated") throw new Error("fixture evidence failure");
+      return append(input);
+    });
+    const result = await createIntegrationManager(fixture, passingRunner()).integrate({ taskId: "A" });
+    expect(result).toMatchObject({ status: "persistence_failed", errorCode: "INTEGRATION_EVIDENCE_PERSISTENCE_FAILED" });
+    expect(await gitOutput(fixture.integrationPath, ["rev-parse", "HEAD"])).toBe(result.previousHead);
+    expect(fixture.store.tasks.getById("A").state).toBe("failed");
+  });
+
   it("creates a no-ff merge and transactionally integrates artifacts while releasing dependents", async () => {
     const fixture = await createFixture("success", [
       {
@@ -675,4 +840,55 @@ async function gitOutput(
     encoding: "utf8",
   });
   return result.stdout.trim();
+}
+
+function boundExperiment(): WaleRunLabExperiment {
+  return {
+    experimentId: `exp_${"2".repeat(64)}`,
+    runId: "run_A1",
+    repositorySnapshot: {
+      state: "VERIFIED",
+      commit: "a".repeat(40),
+      tree: "b".repeat(64),
+      reason: null,
+    },
+    frozenTask: {
+      state: "VERIFIED",
+      ids: ["sha256:" + "a".repeat(16)],
+      titleFingerprints: ["sha256:" + "b".repeat(16)],
+    },
+    frozenRequirements: {
+      state: "UNKNOWN",
+      items: [],
+      reason: "FROZEN_REQUIREMENTS_NOT_RETAINED_SEPARATELY",
+    },
+    acceptanceCriteria: {
+      state: "VERIFIED",
+      count: 1,
+      items: [{ id: "sha256:" + "a".repeat(16), fingerprint: "sha256:" + "b".repeat(16) }],
+    },
+    parameters: {
+      deliverySize: 100,
+      overflowBehavior: "SPLIT_OR_REPLAN",
+      humanInterruptionBudget: 0,
+      authorityEscalationRequired: true,
+      strategy: "MINIMUM_WORKING_STATE",
+      verificationProfile: "design-standard",
+      verificationProfileReference: "devctl-design-standard",
+      requiredCheckBindings: [{ id: "unit", retainedReference: "npm-test" }],
+      requiredChecksCannotBeBypassed: true,
+      agentModel: null,
+    },
+    authorityStateReference: "authority-" + "c".repeat(24),
+    strategy: "MINIMUM_WORKING_STATE",
+    executionResult: {
+      status: "UNKNOWN",
+      completionState: "UNKNOWN",
+      reason: "EXPERIMENT_NOT_EXECUTED",
+    },
+    verificationEvidence: { state: "UNKNOWN", reason: "EXPERIMENT_NOT_EXECUTED" },
+    comparisonEligibility: { state: "UNKNOWN", reason: "EXACT_CASE_COMPARISON_NOT_BOUND" },
+    candidateApplication: { authorized: false, reason: "SEPARATE_AUTHORITY_BOUND_STEP_REQUIRED" },
+    claimBoundary: "Result applies to this exact run.",
+  };
 }

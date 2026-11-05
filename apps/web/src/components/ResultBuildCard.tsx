@@ -4,6 +4,7 @@ import {
   ImageSquareIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { apiFetch } from "../api/client.js";
 import type {
@@ -16,6 +17,11 @@ import type {
 import { Metric } from "./Metric.js";
 import { StatusBadge } from "./StatusBadge.js";
 
+// Activity can cache these same URLs before durable terminal records exist.
+// Use explicit bound mutation below to bypass an earlier request's retained
+// deduplication promise without changing the shared canonical cache keys.
+const resultReadbackOptions = { revalidateOnMount: false };
+
 interface ResultBuildCardProps {
   build: BuildSummary;
 }
@@ -26,19 +32,40 @@ export function ResultBuildCard({
   const metrics = useSWR<BuildMetrics>(
     `/api/builds/${build.id}/metrics`,
     apiFetch,
+    resultReadbackOptions,
   );
   const events = useSWR<BuildEvent[]>(
     `/api/builds/${build.id}/events?limit=10000`,
     apiFetch,
+    resultReadbackOptions,
   );
   const artifacts = useSWR<ArtifactSummary[]>(
     `/api/builds/${build.id}/artifacts`,
     apiFetch,
+    resultReadbackOptions,
   );
   const manifests = useSWR<TaskManifest[]>(
     `/api/builds/${build.id}/manifests`,
     apiFetch,
+    resultReadbackOptions,
   );
+
+  const readbackKey = JSON.stringify([build.id, build.status, build.completedAt]);
+  const [completedReadbackKey, setCompletedReadbackKey] = useState<string | null>(null);
+  const refreshMetrics = metrics.mutate;
+  const refreshEvents = events.mutate;
+  const refreshArtifacts = artifacts.mutate;
+  const refreshManifests = manifests.mutate;
+
+  useEffect(() => {
+    let current = true;
+    void Promise.allSettled([
+      refreshMetrics(), refreshEvents(), refreshArtifacts(), refreshManifests(),
+    ]).then(() => {
+      if (current) setCompletedReadbackKey(readbackKey);
+    });
+    return () => { current = false; };
+  }, [readbackKey, refreshMetrics, refreshEvents, refreshArtifacts, refreshManifests]);
 
   const loadFailed = [
     metrics.error,
@@ -47,19 +74,29 @@ export function ResultBuildCard({
     manifests.error,
   ].some((error) => error !== undefined);
   const loading =
-    metrics.isLoading ||
-    events.isLoading ||
-    artifacts.isLoading ||
-    manifests.isLoading;
+    completedReadbackKey !== readbackKey ||
+    metrics.isLoading || metrics.isValidating ||
+    events.isLoading || events.isValidating ||
+    artifacts.isLoading || artifacts.isValidating ||
+    manifests.isLoading || manifests.isValidating;
   const failedValidationEvents = (events.data ?? []).filter(
     (event) =>
       /validation/i.test(event.type) &&
       (/fail/i.test(event.type) || event.payload.status === "failed"),
   );
-  const failedCheckCount = Math.max(
-    failedValidationEvents.length,
-    metrics.data?.failedTasks ?? 0,
-  );
+  const failedTaskCount = metrics.data?.failedTasks ?? 0;
+  const hasRecordedFailures = failedValidationEvents.length > 0 || failedTaskCount > 0;
+  const qualityEvidenceAvailable = metrics.data !== undefined && events.data !== undefined &&
+    metrics.error === undefined && events.error === undefined;
+  const integrationCount = metrics.data?.integratedTasks ??
+    (build.tasks === undefined ? null : build.tasks.filter((task) => task.state === "integrated").length);
+  const qualitySummary = failedValidationEvents.length > 0
+    ? `${failedValidationEvents.length} failed validation events recorded`
+    : failedTaskCount > 0
+      ? `${failedTaskCount} failed tasks recorded`
+      : qualityEvidenceAvailable
+        ? "No failures recorded; review checks"
+        : "Quality outcome unknown";
   const utilization =
     metrics.data?.workerUtilizationPercent ?? calculateUtilization(build);
   const pushStatus =
@@ -68,10 +105,6 @@ export function ResultBuildCard({
     inferPushStatus(events.data ?? []);
   const actualElapsedSeconds =
     metrics.data?.actualElapsedSeconds ?? build.actualElapsedSeconds ?? null;
-  const deliveredTasks =
-    build.tasks?.filter((task) =>
-      ["integrated", "completed"].includes(task.state),
-    ) ?? [];
   const visualEvidence = (artifacts.data ?? []).filter((artifact) =>
     /image|screenshot|visual|png/i.test(
       `${artifact.name} ${artifact.artifactType} ${artifact.repositoryPath ?? ""}`,
@@ -130,23 +163,22 @@ export function ResultBuildCard({
           <div>
             <span>
               {build.status === "completed"
-                ? "Work completed"
+                ? "Local build completed"
                 : "Work stopped before completion"}
             </span>
             <h2>
-              {deliveredTasks.length} of {build.tasks?.length ?? 0} planned
-              changes were delivered
+              {integrationCount === null
+                ? "Integration evidence is unavailable"
+                : `${integrationCount} planned step${integrationCount === 1 ? "" : "s"} integrated locally`}
             </h2>
-            <p>{resultRecommendation(build, failedCheckCount)}</p>
+            <p>{resultRecommendation(build, hasRecordedFailures, qualityEvidenceAvailable)}</p>
           </div>
         </div>
         <dl>
           <div>
             <dt>Quality checks</dt>
             <dd>
-              {failedCheckCount === 0
-                ? "No failed checks recorded"
-                : `${failedCheckCount} failed check${failedCheckCount === 1 ? "" : "s"}`}
+              {qualitySummary}
             </dd>
           </div>
           <div>
@@ -154,10 +186,20 @@ export function ResultBuildCard({
             <dd>{plainPushStatus(pushStatus)}</dd>
           </div>
           <div>
+            <dt>Deployment</dt>
+            <dd>Separate deployment evidence required</dd>
+          </div>
+          <div>
+            <dt>External operation</dt>
+            <dd>Separate operation evidence required</dd>
+          </div>
+          <div>
             <dt>Evidence</dt>
             <dd>
-              {(artifacts.data?.length ?? 0) + (manifests.data?.length ?? 0)}{" "}
-              confirmed records
+              {artifacts.error !== undefined || manifests.error !== undefined ||
+                artifacts.data === undefined || manifests.data === undefined
+                ? "Record count unavailable"
+                : `${artifacts.data.length + manifests.data.length} confirmed records`}
             </dd>
           </div>
         </dl>
@@ -194,10 +236,12 @@ export function ResultBuildCard({
           value={
             metrics.data?.actualSavingsPercent === null ||
             metrics.data?.actualSavingsPercent === undefined
-              ? `${build.estimates.expectedSavingsPercent ?? 0}% expected`
+              ? build.estimates.expectedSavingsPercent === null
+                ? "not recorded"
+                : `${build.estimates.expectedSavingsPercent}% expected`
               : `${metrics.data.actualSavingsPercent.toFixed(1)}% actual`
           }
-          detail="elapsed versus sequential estimate"
+          detail="elapsed versus sequential estimate, not product benefit"
         />
         <Metric
           label="Push status"
@@ -211,7 +255,7 @@ export function ResultBuildCard({
           <div className="subsection-heading">
             <div>
               <h3 id={`outcomes-${build.id}`}>What changed</h3>
-              <p>{build.tasks?.length ?? 0} reviewed steps</p>
+              <p>{build.tasks?.length ?? 0} tasks</p>
             </div>
           </div>
           {build.tasks?.length === 0 || build.tasks === undefined ? (
@@ -236,18 +280,21 @@ export function ResultBuildCard({
             <div>
               <h3 id={`validations-${build.id}`}>Quality checks</h3>
               <p>
-                {metrics.data?.failedTasks ?? 0} failed tasks ·{" "}
-                {metrics.data?.ownershipViolations ?? 0} ownership violations
+                {metrics.data === undefined
+                  ? "Quality counts are unavailable."
+                  : `${metrics.data.failedTasks} failed tasks · ${metrics.data.ownershipViolations} ownership violations`}
               </p>
             </div>
           </div>
-          {events.isLoading ? (
+          {events.error !== undefined ? (
+            <p className="panel-empty">Validation events could not be loaded; the quality outcome is unknown.</p>
+          ) : events.isLoading ? (
             <p className="panel-empty" aria-live="polite">
               Loading validation evidence…
             </p>
           ) : failedValidationEvents.length === 0 ? (
             <p className="panel-empty">
-              {failedCheckCount === 0
+              {!hasRecordedFailures
                 ? "No failed validation event was recorded."
                 : "Failed tasks were recorded, but no dedicated validation event was stored."}
             </p>
@@ -294,10 +341,10 @@ export function ResultBuildCard({
       )}
 
       <footer className="result-footer">
-        <span>{artifacts.data?.length ?? 0} artifacts</span>
-        <span>{manifests.data?.length ?? 0} manifests</span>
+        <span>{artifacts.error === undefined && artifacts.data !== undefined ? `${artifacts.data.length} artifacts` : "Artifacts unavailable"}</span>
+        <span>{manifests.error === undefined && manifests.data !== undefined ? `${manifests.data.length} manifests` : "Manifests unavailable"}</span>
         <span>
-          Completed{" "}
+          Ended{" "}
           {build.completedAt === null
             ? "without a completion timestamp"
             : new Date(build.completedAt).toLocaleString()}
@@ -309,12 +356,16 @@ export function ResultBuildCard({
 
 function resultRecommendation(
   build: BuildSummary,
-  failedCheckCount: number,
+  hasRecordedFailures: boolean,
+  qualityEvidenceAvailable: boolean,
 ): string {
-  if (build.status === "completed" && failedCheckCount === 0) {
-    return "The reviewed work finished with no failed validation event. Review the evidence before publishing.";
+  if (!qualityEvidenceAvailable) {
+    return "Some quality evidence is unavailable. Review the durable records before treating this work as ready.";
   }
-  if (failedCheckCount > 0) {
+  if (build.status === "completed" && !hasRecordedFailures) {
+    return "Review the recorded checks and task outcomes. Local completion does not establish publication, deployment, or external operation.";
+  }
+  if (hasRecordedFailures) {
     return "Review the failed quality checks before treating this work as ready.";
   }
   return "Review the delivered steps and remaining work before deciding what to do next.";
@@ -322,7 +373,7 @@ function resultRecommendation(
 
 function plainPushStatus(status: string): string {
   if (status === "not recorded") {
-    return "Not published";
+    return "Publication unknown; no record";
   }
   return status.replaceAll("_", " ");
 }

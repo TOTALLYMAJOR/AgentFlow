@@ -9,7 +9,7 @@ interface EventPort { append(input: { buildId: string; type: string; payload: Re
 export class GovernorControlService {
   constructor(private readonly events: EventPort) {}
 
-  evaluate(input: { contract: TrafficControlContract; observation: TrafficControlObservation; recordedAt: string; previousRecordHash?: string | null; mode?: "LIVE" | "REPLAY" }): { decision: GovernorDecision; record: GovernorDecisionRecord } {
+  evaluate(input: { contract: TrafficControlContract; observation: TrafficControlObservation; recordedAt: string; previousRecordHash?: string | null; mode?: "LIVE" | "REPLAY"; nativeSources?: Record<string, unknown> }): { decision: GovernorDecision; record: GovernorDecisionRecord } {
     const decision = evaluateGovernor(input.contract, input.observation);
     const payload = {
       schema: "traffic-control/governor-decision-record@1" as const,
@@ -25,7 +25,19 @@ export class GovernorControlService {
       this.events.append({
         buildId: input.observation.buildId,
         type: "governor.decision",
-        payload: { ...record, authorityObservation: input.observation.authority },
+        payload: {
+          ...record,
+          authorityObservation: input.observation.authority,
+          ...(input.nativeSources === undefined ? {} : { nativeSources: structuredClone(input.nativeSources) }),
+          // These inputs can change after this decision. Retain their exact
+          // values without copying raw failure text into exported provenance.
+          // This partial context is not a substitute for observationHash.
+          observationState: {
+            phase: input.observation.phase,
+            attempt: input.observation.attempt,
+            maxAttempts: input.observation.maxAttempts,
+          },
+        },
         occurredAt: input.recordedAt,
       });
     }

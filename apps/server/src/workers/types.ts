@@ -1,3 +1,5 @@
+import type { WaleRunLabExperiment } from "../integration/wale-run-lab.js";
+
 export type WorkerResultStatus = "completed" | "blocked" | "failed";
 
 export interface WorkerStructuredResult {
@@ -28,6 +30,7 @@ export interface WorkerPromptContext {
     validationCommands: string[];
   };
   repositoryInstructions: string;
+  waleExperiment?: WaleRunLabExperiment;
   previousAttempt?: WorkerContextDocument;
   dependencyManifests: WorkerContextDocument[];
   consumedContracts: WorkerContextDocument[];

@@ -664,6 +664,14 @@ describe("AgentFlow end-to-end acceptance", () => {
         });
         expect(createdBuild.tasks).toHaveLength(5);
 
+        // AFI-002: exercise the supported ordinary-plan path with the Governor
+        // inactive. Preserve this locked plan across restart, retries and merges.
+        const ordinaryPlan = structuredClone(runningApp.context.store.plans.getById(plan.id));
+        expect(ordinaryPlan.lockedAt).not.toBeNull();
+        expect(ordinaryPlan.normalizedPlan).not.toHaveProperty("governedHandoff");
+        expect(runningApp.context.store.builds.getById(createdBuild.id).normalizedPlan)
+          .not.toHaveProperty("governedHandoff");
+
         await requestJson<BuildResponse>(
           address,
           `/api/builds/${createdBuild.id}/start`,
@@ -726,6 +734,8 @@ describe("AgentFlow end-to-end acceptance", () => {
           address,
           `/api/builds/${createdBuild.id}/events?limit=10000`,
         );
+        expect(runningApp.context.store.plans.getById(plan.id)).toEqual(ordinaryPlan);
+        expect(recoveryEvents.some((event) => event.type.startsWith("governor."))).toBe(false);
         const interruptedTaskIds = new Set(
           ["BL-101", "BL-102", "BL-103"].map(
             (taskId) => taskByBacklogId(recovered, taskId).id,
@@ -863,6 +873,12 @@ describe("AgentFlow end-to-end acceptance", () => {
           address,
           `/api/builds/${createdBuild.id}/events?limit=10000`,
         );
+        // Check the complete captured journal, not just the default first page.
+        expect(events.at(-1)?.sequence).toBe(runningApp.context.store.events.getLatestSequence(createdBuild.id));
+        expect(events.some((event) => event.type.startsWith("governor."))).toBe(false);
+        expect(runningApp.context.store.plans.getById(plan.id)).toEqual(ordinaryPlan);
+        expect(runningApp.context.store.builds.getById(createdBuild.id).normalizedPlan)
+          .not.toHaveProperty("governedHandoff");
         const implementationTaskIds = new Set(
           completed.tasks
             .filter((task) =>

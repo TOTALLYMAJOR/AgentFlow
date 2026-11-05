@@ -26,8 +26,12 @@ describe("multi-repository lifecycle acceptance", () => {
     try {
       const members: Array<{ planId: string; baseCommit: string }> = [];
       for (const repositoryPath of repositoryPaths) {
-        const repository = (await first.app.inject({ method: "POST", url: "/api/repositories", payload: { path: repositoryPath } })).json<{ id: string }>();
-        const plan = (await first.app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId: repository.id } })).json<{ id: string }>();
+        const registration = await first.app.inject({ method: "POST", url: "/api/repositories", payload: { path: repositoryPath, initializeIfMissing: true } });
+        expect(registration.statusCode).toBe(201);
+        const repository = registration.json<{ id: string }>();
+        const planned = await first.app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId: repository.id } });
+        expect(planned.statusCode).toBe(201);
+        const plan = planned.json<{ id: string }>();
         members.push({ planId: plan.id, baseCommit: (await execFileAsync("git", ["-C", repositoryPath, "rev-parse", "HEAD"])).stdout.trim() });
       }
       const proposed = await first.app.inject({ method: "POST", url: "/api/initiatives", payload: { title: "Restart recovery", objective: "Preserve exact progress across process restart", members, dependencies: [{ producerPlanId: members[0]?.planId, consumerPlanId: members[1]?.planId, dependencyType: "hard" }] } });
@@ -61,8 +65,12 @@ describe("multi-repository lifecycle acceptance", () => {
     try {
       const members: Array<{ planId: string; baseCommit: string }> = [];
       for (const repositoryPath of repositoryPaths) {
-        const repository = (await app.inject({ method: "POST", url: "/api/repositories", payload: { path: repositoryPath } })).json<{ id: string }>();
-        const plan = (await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId: repository.id } })).json<{ id: string }>();
+        const registration = await app.inject({ method: "POST", url: "/api/repositories", payload: { path: repositoryPath, initializeIfMissing: true } });
+        expect(registration.statusCode).toBe(201);
+        const repository = registration.json<{ id: string }>();
+        const planned = await app.inject({ method: "POST", url: "/api/plans", payload: { repositoryId: repository.id } });
+        expect(planned.statusCode).toBe(201);
+        const plan = planned.json<{ id: string }>();
         members.push({ planId: plan.id, baseCommit: (await execFileAsync("git", ["-C", repositoryPath, "rev-parse", "HEAD"])).stdout.trim() });
       }
       const dependencies = members.slice(1).map((member, index) => ({ producerPlanId: members[index]?.planId, consumerPlanId: member.planId, dependencyType: "hard" }));

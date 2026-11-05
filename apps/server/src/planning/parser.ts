@@ -51,6 +51,10 @@ interface Fence {
 
 const TASK_HEADING =
   /^##[ \t]+([A-Za-z][A-Za-z0-9_-]*-\d+)(?:[ \t]*(?:—|–|:)[ \t]*|[ \t]+-[ \t]+)?(.*?)[ \t]*#*[ \t]*$/;
+// Governed handoffs also admit stable uppercase identities without a numeric
+// suffix. Require an explicit title separator so ordinary headings stay prose.
+const GOVERNED_TASK_HEADING =
+  /^##[ \t]+([A-Z0-9][A-Z0-9._-]*)[ \t]*(?:—|–|:)[ \t]*(.*?)[ \t]*#*[ \t]*$/;
 const ACCEPTANCE_HEADING =
   /^###[ \t]+Acceptance[ \t]+Criteria[ \t]*#*[ \t]*$/i;
 const ANY_SECTION_HEADING = /^#{1,3}[ \t]+\S/;
@@ -114,7 +118,7 @@ function findTaskSections(markdown: string): TaskSection[] {
       continue;
     }
 
-    const heading = line.text.match(TASK_HEADING);
+    const heading = line.text.match(TASK_HEADING) ?? line.text.match(GOVERNED_TASK_HEADING);
     if (heading === null) {
       continue;
     }

@@ -1,3 +1,8 @@
+import { createHash } from "node:crypto";
+import type { PlanResult } from "../src/domain/types.js";
+import { createDatabaseRepositories } from "../src/db/index.js";
+import { canonicalJsonSha256 } from "../src/integration/design-intelligence.js";
+import { createDatabaseFixture } from "./helpers/database-fixture.js";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -16,6 +21,41 @@ const acceptance = (text: string): string => `
 `;
 
 describe("Markdown backlog planning", () => {
+  it.each(["TASK-WALE-SKILLS-INTEGRATION", "TASK.PHASE_A", "9_PHASE"])(
+    "plans governed handoff task identity %s without renaming it",
+    (id) => {
+      const markdown = `
+# Governed execution packet
+
+## Notes: This heading is not a task identity
+
+The handoff owns the task identity; planning must preserve it.
+
+## ${id}: Verify delivered source
+
+\`\`\`yaml
+estimate_hours: 1
+depends_on: []
+owns:
+  - artifacts/qualification/
+validate:
+  - python3 -m unittest tests.test_qualification -q
+\`\`\`
+
+Inspect the declared source and retain genuine command results.
+${acceptance("The actual behavioral checks pass.")}
+`;
+      const result = planBacklogMarkdown(markdown, {
+        defaultValidation: ["git diff --check"],
+        workerMaximum: 1,
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+      expect(result.plan?.tasks.map((task) => task.id)).toEqual([id]);
+      expect(result.plan?.tasks[0]?.title).toBe("Verify delivered source");
+    },
+  );
+
   it("parses, normalizes, validates, and plans a valid artifact graph", () => {
     const markdown = `
 # Checkout backlog
@@ -495,4 +535,23 @@ ${acceptance("The task is complete.")}
       "INVALID_OWNERSHIP_PATH",
     );
   });
+});
+
+it("roundtrips exact governed tasks and digest through the locked immutable native plan", () => {
+  const fixture = createDatabaseFixture();
+  try {
+    const store = createDatabaseRepositories(fixture.database);
+    store.repositories.create({ id: "repository-1", name: "fixture", localPath: fixture.directory, configPath: ".agentflow.yaml", baseBranch: "main" });
+    const backlogContents = `# Fixture\n\n## AF-001 — Governed task\n\n\`\`\`yaml\nestimate_hours: 1\ndepends_on: []\nowns:\n  - src/\nvalidate:\n  - npm test\n\`\`\`\n${acceptance("Preserve exact criteria")}`;
+    const planned: PlanResult = { ...planBacklogOrThrow(backlogContents), id: "fixture-plan", repositoryId: "repository-1", backlogPath: "BACKLOG.md", backlogSha256: createHash("sha256").update(backlogContents, "utf8").digest("hex"), createdAt: "2026-10-29T00:00:00.000Z" };
+    const binding = { id: "fixture-handoff", path: "handoff.json", sha256: canonicalJsonSha256({ fixture: true }), governedBaseCommit: "a".repeat(40), executionBaseCommit: "b".repeat(40), carrierPaths: ["handoff.json"], proofBoundary: "Synthetic persistence only; no execution approval." };
+    planned.governedHandoff = binding;
+    store.plans.create({ id: planned.id, repositoryId: "repository-1", backlogPath: "BACKLOG.md", backlogSha256: planned.backlogSha256, backlogContents, repositoryConfig: {}, normalizedPlan: planned });
+    store.plans.lock(planned.id);
+    const loaded = store.plans.getById(planned.id);
+    expect(loaded.lockedAt).not.toBeNull();
+    expect(loaded.normalizedPlan.governedHandoff).toEqual(binding);
+    expect(loaded.normalizedPlan.tasks).toEqual(planned.tasks);
+    expect(loaded.normalizedPlan.tasks[0]?.acceptanceCriteria).toEqual(["Preserve exact criteria"]);
+  } finally { fixture.cleanup(); }
 });

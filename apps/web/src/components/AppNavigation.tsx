@@ -65,7 +65,7 @@ export function AppNavigation({
       </ul>
       <div className="trust-boundary">
         <strong>Loopback only</strong>
-        <span>127.0.0.1:4782</span>
+        <span>This device</span>
       </div>
     </nav>
   );
