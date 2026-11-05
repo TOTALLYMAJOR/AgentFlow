@@ -40,12 +40,12 @@
   "dependencies": {
     "@fastify/cors": "11.3.0",
     "@fastify/sensible": "6.0.4",
-    "@fastify/static": "10.1.2",
+    "@fastify/static": "10.1.10",
     "@phosphor-icons/react": "2.1.10",
     "@primer/react": "38.33.0",
     "better-sqlite3": "13.0.1",
     "commander": "15.0.0",
-    "fastify": "5.12.5",
+    "fastify": "5.12.6",
     "fastify-plugin": "6.0.0",
     "pixelmatch": "^7.2.0",
     "playwright": "^1.62.0",
@@ -74,6 +74,6 @@
     "typescript": "5.9.3",
     "typescript-eslint": "8.65.0",
     "vite": "8.3.5",
-    "vitest": "5.0.1"
+    "vitest": "5.1.0"
   }
 }
