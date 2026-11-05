@@ -46,13 +46,14 @@ read key or environment secret is required. Keep the old deploy key and
 The immutable source revisions and preparation helper's content checks remain
 unchanged.
 
-### Proposed delegated review for the public-input route
+### Authorized delegated review for the public-input route
 
-This amendment is proposed until an actual owner reply authorizes it. Without
-that authorization, keep hosted native qualification blocked. Routine PR/merge
-delegation and public input visibility alone do not authorize this amendment.
+The repository owner authorized this bounded delegated review model on
+2026-11-05. Hosted native qualification requires that authorization and every
+condition below; keep it blocked otherwise. Routine PR/merge delegation and
+public input visibility alone do not waive these conditions.
 
-The proposed route delegates exact-source and workflow review to the coordinator
+The authorized route delegates exact-source and workflow review to the coordinator
 and an independent reviewer. Before permitting a run, both must review the exact
 AgentFlow head, main base and proposed merge tree, workflow/action/helper content,
 the two frozen public input revisions and their content bindings, and retained
