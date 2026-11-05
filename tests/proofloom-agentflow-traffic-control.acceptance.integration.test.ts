@@ -5,7 +5,7 @@ import { mkdir, readFile, writeFile, chmod, access, copyFile, mkdtemp, open, rea
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../apps/server/src/http/app.js";
 import { resolveEnvironment } from "../apps/server/src/config/environment.js";
 import { makeDesignIntelligenceReceipt } from "../apps/server/src/integration/design-intelligence-receipt.js";
@@ -88,6 +88,7 @@ describe("AFI-003 genuine local native return loop", () => {
     const token = "afi003_fixture_only_token_" + "x".repeat(30);
     const environment = resolveEnvironment({ AGENTFLOW_HOME: path.join(control, "agentflow-home"), AGENTFLOW_CODEX_BIN: provider, AGENTFLOW_DEFAULT_AGENT_PROVIDER: "codex", AGENTFLOW_LOG_LEVEL: "silent", AGENTFLOW_WALE_BRIDGE_TOKEN_SHA256: createHash("sha256").update(token).digest("hex") });
     let built: Awaited<ReturnType<typeof buildApp>> | undefined;
+    let restoreDecisionCapture = () => {};
     try {
       type Fixture = {consumerRoot: string; executionRoot: string; evidenceRoot: string; handoffPath: string; receiptPath: string; b0: string};
       const fixture = await until(() => jsonFile<Fixture>(path.join(control, "fixture.json")), "native governed fixture");
@@ -140,6 +141,26 @@ describe("AFI-003 genuine local native return loop", () => {
       const sourceBuild = String(created.body.id);
       expect(context.store.builds.getById(sourceBuild).status).toBe("ready");
       await expect(access(sentinel)).rejects.toThrow(); // preparation never calls a worker
+      // Read actual native rows at the persistence seam. Final rows can change;
+      // never reconstruct a past source digest from the final integrated state.
+      const captureDecisionSources = () => ({
+        build: context.store.builds.getById(sourceBuild),
+        tasks: context.store.tasks.listForBuild(sourceBuild).map(task => ({
+          task, attempts: context.store.tasks.listAttempts(task.id).map(attempt => ({
+            attempt, changedFiles: context.store.tasks.listChangedFiles(task.id, attempt.attempt),
+          })),
+        })),
+        events: context.store.events.listForBuild(sourceBuild, {limit:10000}),
+      });
+      const decisionSamples = new Map<string, ReturnType<typeof captureDecisionSources>>();
+      const appendNativeEvent = context.store.events.append.bind(context.store.events);
+      const decisionCapture = vi.spyOn(context.store.events, "append").mockImplementation(input => {
+        if(input.buildId === sourceBuild && input.type === "governor.decision") {
+          decisionSamples.set(String(input.payload?.recordHash), captureDecisionSources());
+        }
+        return appendNativeEvent(input);
+      });
+      restoreDecisionCapture = () => decisionCapture.mockRestore();
       const governor = await http(`/api/builds/${sourceBuild}/governor/evaluate`,{});expect(governor.status).toBe(200);expect(governor.body.acknowledgement).toMatchObject({acknowledged:true});
       const start = await http(`/api/builds/${sourceBuild}/start`,{});expect(start.status,JSON.stringify(start.body)).toBe(200);
       await until(async()=>{const build=context.store.builds.getById(sourceBuild);if(build.status==="paused"){await writeFile(path.join(control,"source-native-paused-records.json"),JSON.stringify({build,tasks:context.store.tasks.listForBuild(sourceBuild),validations:context.store.validations.listForBuild(sourceBuild),events:context.store.events.listForBuild(sourceBuild,{limit:10000})},null,2));throw new Error("Native source build paused at a genuine authority/evidence gate; see retained source-native-paused-records.json");}return ["completed","failed","cancelled"].includes(build.status)?build:undefined;},"native source build terminal");
@@ -151,6 +172,69 @@ describe("AFI-003 genuine local native return loop", () => {
       const focusedArtifact=emitted.receipt.evidence.artifacts.find(artifact=>artifact.class==="focused tests");expect(focusedArtifact).toBeDefined();
       const focusedSource=emitted.sources.find(source=>source.relativePath===focusedArtifact?.path);if(focusedSource===undefined)throw new Error("Native focused tests certificate bytes missing");
       expect(JSON.parse(await readFile(focusedSource.sourcePath,"utf8"))).toMatchObject({kind:"agentflow/native-task-validation-evidence",schemaVersion:"1.0.0",handoffSha256:emitted.receipt.handoff.sha256,producer:{buildId:sourceBuild,backlogTaskId:"AF-001",attempt:1},artifact:{name:"focused tests",type:"agentflow/native-task-validation-evidence",version:"1.0.0"}});
+
+      // Join decision-time references to real persisted rows and current
+      // approval bytes, then join the retained export to those exact events.
+      const nativeBuild = context.store.builds.getById(sourceBuild);
+      if(nativeBuild.planId === null) throw new Error("Native source build has no immutable plan");
+      const nativePlan = context.store.plans.getById(nativeBuild.planId);
+      const approvedHandoff = GovernedTaskHandoffSchema.parse(approvedObject);
+      expect(nativePlan.lockedAt).not.toBeNull();
+      expect(nativePlan.normalizedPlan.governedHandoff).toMatchObject({id:approvedHandoff.handoffId,sha256:canonicalJsonSha256(approvedHandoff),governedBaseCommit:fixture.b0,executionBaseCommit:b1});
+      expect(nativeBuild.normalizedPlan).toEqual(nativePlan.normalizedPlan);
+      const decisions = sourceEvents.filter(event => event.type === "governor.decision");
+      const acknowledgements = sourceEvents.filter(event => event.type === "governor.intervention_acknowledged");
+      expect(decisions.length).toBeGreaterThanOrEqual(2);
+      expect(acknowledgements.map(event => event.payload.invocationSource)).toEqual(expect.arrayContaining(["local-http-api","agentflow-coordinator"]));
+      await writeFile(path.join(control,"source-decision-time-records.json"),JSON.stringify([...decisionSamples].map(([recordHash,snapshot])=>({recordHash,snapshot})),null,2));
+      for(const decision of decisions) {
+        const sample = decisionSamples.get(String(decision.payload.recordHash));
+        if(sample === undefined) throw new Error("Decision has no captured native source rows");
+        expect(decision.payload).toMatchObject({
+          authorityObservation:{handoffId:approvedHandoff.handoffId,handoffSha256:canonicalJsonSha256(approvedHandoff),baseCommit:approvedHandoff.repository.baseCommit,snapshotSha256:approvedHandoff.repository.snapshotSha256,authorityStateSha256:approvedHandoff.authority.stateSha256,governanceReportSha256:approvedHandoff.authority.governanceReportSha256,authoritySources:approvedHandoff.authority.sources},
+          nativeSources:{
+            build:{id:sourceBuild,repositoryId:nativeBuild.repositoryId,planId:nativePlan.id,baseCommit:b1,sha256:canonicalJsonSha256(sample.build)},
+            handoff:{id:approvedHandoff.handoffId,sha256:canonicalJsonSha256(approvedHandoff),governedBaseCommit:fixture.b0},
+            tasks:sample.tasks.map(({task,attempts})=>({id:task.id,buildId:task.buildId,backlogTaskId:task.backlogTaskId,baseCommit:task.baseCommit,resultCommit:task.resultCommit,integrationCommit:task.integrationCommit,sha256:canonicalJsonSha256(task),attempts:attempts.map(({attempt,changedFiles})=>({id:attempt.id,buildId:attempt.buildId,taskId:attempt.taskId,attempt:attempt.attempt,resultCommit:attempt.resultCommit,sha256:canonicalJsonSha256(attempt),changedFilesSha256:canonicalJsonSha256(changedFiles)}))})),
+            events:{throughSequence:sample.events.at(-1)?.sequence??0,count:sample.events.length,sha256:canonicalJsonSha256(sample.events)},
+          },
+        });
+        expect(sample.events).toEqual(sourceEvents.filter(event => event.sequence < decision.sequence));
+      }
+      const initialSample = decisionSamples.get(String(decisions[0]?.payload.recordHash));
+      expect(initialSample?.tasks[0]?.task).toMatchObject({baseCommit:null,resultCommit:null,integrationCommit:null});
+      const certificateBody = JSON.parse(await readFile(focusedSource.sourcePath,"utf8")) as {producer:{taskId:string;attempt:number;resultCommit:string}};
+      expect(certificateBody.producer).toMatchObject({taskId:tasks[0]?.id,attempt:tasks[0]?.attempt,resultCommit:tasks[0]?.resultCommit});
+      const certifiedDecision = decisions.find(event => ((event.payload.nativeSources as {certificates:unknown[]}).certificates).length > 0);
+      expect(certifiedDecision?.payload).toMatchObject({nativeSources:{certificates:[{id:focusedArtifact?.id,sha256:focusedArtifact?.sha256,...certificateBody.producer}]}});
+      for(const acknowledgement of acknowledgements) {
+        const decision = decisions.find(event => event.payload.recordHash === acknowledgement.payload.decisionRecordHash);
+        expect(decision).toBeDefined();
+        expect(acknowledgement.sequence).toBeGreaterThan(decision?.sequence ?? 0);
+        expect(acknowledgement.payload).toMatchObject({action:"CONTINUE",acknowledged:true,details:{acknowledgementAvailable:true,receiptPersistAttempted:true}});
+      }
+      // invocationSource identifies a service route, not an authenticated human.
+      // Acknowledgement and before/after readback do not establish causal effect.
+      const provenanceArtifact = emitted.receipt.evidence.artifacts.find(artifact => artifact.class === "agentflow:governor-provenance");
+      const provenanceSource = emitted.sources.find(source => source.relativePath === provenanceArtifact?.path);
+      if(provenanceArtifact === undefined || provenanceSource === undefined) throw new Error("Native Governor provenance bytes missing");
+      const provenanceBytes = await readFile(provenanceSource.sourcePath);
+      expect(createHash("sha256").update(provenanceBytes).digest("hex")).toBe(provenanceArtifact.sha256);
+      const provenance = JSON.parse(provenanceBytes.toString()) as {buildId:string;handoffSha256:string;sourceEventWatermark:number;events:typeof sourceEvents};
+      expect(provenance).toMatchObject({kind:"agentflow/governor-provenance",buildId:sourceBuild,handoffSha256:emitted.receipt.handoff.sha256,sourceEventWatermark:emitted.sourceEventWatermark});
+      expect(provenance.events).toEqual(sourceEvents.filter(event => event.type.startsWith("governor.")));
+      // Existing export validation authenticates these retained bytes. It does
+      // not independently certify every nativeSources semantic claim.
+      const substituted = structuredClone(provenance);
+      const substitutedDecision = substituted.events.find(event => event.type === "governor.decision");
+      if(substitutedDecision === undefined) throw new Error("Missing substitution subject");
+      ((substitutedDecision.payload.nativeSources as {build:{planId:string}}).build).planId = "plan_substituted";
+      try {
+        await writeFile(provenanceSource.sourcePath,JSON.stringify(substituted));
+        await expect(makeDesignIntelligenceReceipt(context,sourceBuild)).rejects.toMatchObject({code:"RECEIPT_EVIDENCE_CHANGED"});
+        await writeFile(path.join(control,"provenance-substitution-refusal.json"),JSON.stringify({classification:"RETAINED_BYTE_SUBSTITUTION_REFUSED_NOT_SEMANTIC_ATTESTATION",originalSha256:provenanceArtifact.sha256,substitutedSha256:createHash("sha256").update(JSON.stringify(substituted)).digest("hex"),code:"RECEIPT_EVIDENCE_CHANGED"},null,2));
+      } finally { await writeFile(provenanceSource.sourcePath,provenanceBytes); }
+      expect((await makeDesignIntelligenceReceipt(context,sourceBuild)).receipt).toEqual(emitted.receipt);
 
       expect(emitted.receipt).toMatchObject({schemaVersion:"1.1.0",build:{status:"completed",baseCommit:b1,governedBaseCommit:fixture.b0}});
       await writeFile(fixture.receiptPath,JSON.stringify(emitted.receipt));
@@ -255,6 +339,7 @@ describe("AFI-003 genuine local native return loop", () => {
       expect(GovernedTaskHandoffSchema.safeParse({...(JSON.parse(await readFile(fixture.handoffPath,"utf8")) as Record<string, unknown>),taskValidationRuntime:{enabled:true}}).success).toBe(false);
       await writeFile(path.join(control,"qualification.json"),JSON.stringify({sourceBuild,b0:fixture.b0,b1,sourceReceiptSha256:canonicalJsonSha256(emitted.receipt),fixtureProviderCalls:lines.length,realProviderExecutableCalls:0,sourceAudit:JSON.parse(audit.stdout) as unknown,mainBuild,mainExperiment,overflowBuild,overflowExperiment,mainAudit:JSON.parse(mainAudit.stdout) as unknown},null,2));
     } finally {
+      restoreDecisionCapture();
       await writeFile(path.join(control,"stop"),"");
       if(built) await built.app.close();
       await Promise.race([new Promise<void>(resolve=>host.once("exit",()=>resolve())),pause(3000)]);if(host.exitCode===null)host.kill("SIGTERM");
