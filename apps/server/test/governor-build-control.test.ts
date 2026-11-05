@@ -62,6 +62,59 @@ describe("current native Governor failure attribution", () => {
     }
   });
 
+  it.each([false, true])("retains exact native source lineage without inventing task revisions (strict=%s)", async (strict) => {
+    const { store, dependencies, observed, handoff } = await setup(true, strict);
+    const build = store.builds.getById("build");
+    const task = store.tasks.getById("task");
+    const attempt = store.tasks.getAttempt("task", 1);
+    const priorEvents = store.events.listForBuild("build");
+    const first = await evaluateGovernedBuild(dependencies, "build");
+    if (first === undefined) throw new Error("Expected native evaluation");
+    const firstEvent = store.events.listForBuild("build").find((event) => event.type === "governor.decision");
+    if (firstEvent === undefined) throw new Error("Expected retained native decision");
+    const sources = firstEvent.payload.nativeSources as Record<string, unknown>;
+    expect(sources).toMatchObject({
+      build: { id: "build", repositoryId: "repo", planId: "plan", baseCommit: build.baseCommit, sha256: canonicalJsonSha256(build) },
+      handoff: { id: handoff.handoffId, sha256: canonicalJsonSha256(handoff), governedBaseCommit: handoff.repository.baseCommit },
+      tasks: [{ id: "task", backlogTaskId: "AF-001", buildId: "build", baseCommit: null, resultCommit: null, integrationCommit: null, sha256: canonicalJsonSha256(task), attempts: [{ id: attempt.id, taskId: "task", buildId: "build", attempt: 1, resultCommit: null, sha256: canonicalJsonSha256(attempt), changedFilesSha256: canonicalJsonSha256([]) }] }],
+      events: { throughSequence: priorEvents.at(-1)?.sequence ?? 0, count: priorEvents.length, sha256: canonicalJsonSha256(priorEvents) },
+      certificates: [],
+    });
+    expect(firstEvent.payload.observationHash).toBe(first.record.observationHash);
+    expect(canonicalJsonSha256(observed.mock.calls.at(-1)?.[0].observation)).toBe(first.record.observationHash);
+    // A new attempt result must not rewrite the retained older source context.
+    store.tasks.updateAttempt("task", 1, { status: "running", resultCommit: "c".repeat(40), errorMessage: "private-lineage-sentinel" });
+    const second = await evaluateGovernedBuild(dependencies, "build");
+    const secondEvent = store.events.listForBuild("build").filter((event) => event.type === "governor.decision").at(-1);
+    if (second === undefined || secondEvent === undefined) throw new Error("Expected second native decision");
+    const secondSources = secondEvent.payload.nativeSources as { tasks: Array<{ attempts: Array<{ resultCommit: string | null; sha256: string }> }> };
+    expect(secondSources.tasks[0]?.attempts[0]).toMatchObject({ resultCommit: "c".repeat(40), sha256: canonicalJsonSha256(store.tasks.getAttempt("task", 1)) });
+    expect(first.record.observationHash).toBe(second.record.observationHash);
+    expect(firstEvent.payload.nativeSources).toEqual(sources);
+    expect(JSON.stringify(secondSources)).not.toContain("private-lineage-sentinel");
+    expect(JSON.stringify(secondSources)).not.toContain(dependencies.environment.runsPath);
+    expect(store.builds.getById("build").status).toBe("running");
+  });
+
+  it.each(["attempt", "changed-files"])("refuses %s drift across native evidence reads before retaining a decision", async (defect) => {
+    const { store, dependencies, observed } = await setup(true, true);
+    const nativeList = store.tasks.listForBuild.bind(store.tasks);
+    let reads = 0;
+    vi.spyOn(store.tasks, "listForBuild").mockImplementation((id) => {
+      reads += 1;
+      if (reads === 2) {
+        if (defect === "attempt") store.tasks.updateAttempt("task", 1, { status: "running", resultCommit: "d".repeat(40) });
+        else store.tasks.recordChangedFiles("task", 1, [{ path: "outside/ownership.ts", changeType: "modified", withinOwnership: false }]);
+      }
+      return nativeList(id);
+    });
+    await expect(evaluateGovernedBuild(dependencies, "build")).rejects.toThrow("GOVERNED_OBSERVATION_SOURCE_CHANGED");
+    expect(observed).not.toHaveBeenCalled();
+    expect(store.events.listForBuild("build").filter((event) => event.type === "governor.decision")).toEqual([]);
+    expect(store.builds.getById("build").status).toBe("running");
+    expect(store.tasks.getById("task").state).toBe("running");
+  });
+
   async function setup(withNativePlan = false, strictNativeEvidence = false, buildStatus: "running" | "ready" = "running") {
     fixture = createDatabaseFixture();
     const store = createDatabaseRepositories(fixture.database);

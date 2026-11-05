@@ -1057,6 +1057,16 @@ describe("historical native publication context", () => {
       expect(observation?.failureRepeatCount).toBe(0);
       expect(observation?.failureHistory).toEqual(history.snapshots);
       expect(observation?.evidence).toEqual({ items: [certificate.id], satisfied: [certificate.body.artifact.name], contradictory: [] });
+      const decisionEvent = f.store.events.listForBuild(f.buildId).filter((event) => event.type === "governor.decision").at(-1);
+      expect(decisionEvent?.payload.nativeSources).toMatchObject({
+        tasks: [{
+          id: f.taskId, backlogTaskId: retainedTask.backlogTaskId, baseCommit: retainedTask.baseCommit,
+          resultCommit: retainedTask.resultCommit, sha256: canonicalJsonSha256(retainedTask),
+          attempts: retainedAttempts.map((attempt) => ({ id: attempt.id, attempt: attempt.attempt, resultCommit: attempt.resultCommit, sha256: canonicalJsonSha256(attempt) })),
+        }],
+        certificates: [{ id: certificate.id, sha256: certificate.sha256, ...certificate.body.producer }],
+        events: { throughSequence: retainedEvents.at(-1)?.sequence, count: retainedEvents.length, sha256: canonicalJsonSha256(retainedEvents) },
+      });
       expect(f.store.tasks.getById(f.taskId)).toEqual(retainedTask);
       expect(f.store.tasks.listAttempts(f.taskId)).toEqual(retainedAttempts);
       expect(f.store.events.listForBuild(f.buildId).filter((event) => event.sequence <= (retainedEvents.at(-1)?.sequence ?? 0))).toEqual(retainedEvents);

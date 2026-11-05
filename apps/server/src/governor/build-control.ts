@@ -42,9 +42,19 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     || canonicalJsonSha256(handoff) !== binding.data.sha256
   ) throw new Error("GOVERNED_HANDOFF_DRIFT: build handoff no longer matches its immutable binding");
   const tasks = dependencies.store.tasks.listForBuild(buildId);
-  const changes = tasks.map((task) => ({
+  // Keep the actual attempt/changed-file reads used by the projection. Looking
+  // them up again just to describe provenance could name a later native state.
+  const readTaskSources = (sourceTasks = dependencies.store.tasks.listForBuild(buildId)) => sourceTasks.map((task) => ({
+    task,
+    attempts: dependencies.store.tasks.listAttempts(task.id).map((attempt) => ({
+      attempt,
+      changedFiles: dependencies.store.tasks.listChangedFiles(task.id, attempt.attempt),
+    })),
+  }));
+  const taskSources = readTaskSources(tasks);
+  const changes = taskSources.map(({ task, attempts }) => ({
     taskId: task.backlogTaskId,
-    paths: dependencies.store.tasks.listAttempts(task.id).flatMap((attempt) => dependencies.store.tasks.listChangedFiles(task.id, attempt.attempt).map((file) => file.path)),
+    paths: attempts.flatMap(({ changedFiles }) => changedFiles.map((file) => file.path)),
   }));
   // Bind historical projection inputs before the first current-verifier await,
   // including facts without an event producer such as changed-file records.
@@ -67,10 +77,10 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     : legacyEvidence;
   let currentFailure: TrafficControlFailure | null = null;
   const failureSources: FailureSource[] = [];
-  const failures: TrafficControlFailure[] = tasks.flatMap((task) =>
-    dependencies.store.tasks.listAttempts(task.id)
-      .filter((attempt) => attempt.errorCode !== null)
-      .map((attempt) => {
+  const failures: TrafficControlFailure[] = taskSources.flatMap(({ task, attempts }) =>
+    attempts
+      .filter(({ attempt }) => attempt.errorCode !== null)
+      .map(({ attempt, changedFiles }) => {
         const code = attempt.errorCode ?? "UNKNOWN";
         const retryable = DEFAULT_RETRYABLE_FAILURE_CODES.has(code);
         const failure: TrafficControlFailure = {
@@ -78,7 +88,7 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
           classification: retryable ? "transient" as const : "deterministic" as const,
           retryable,
           signature: attempt.errorMessage ?? code,
-          files: dependencies.store.tasks.listChangedFiles(task.id, attempt.attempt).map((file) => file.path),
+          files: changedFiles.map((file) => file.path),
           fingerprint: "",
         };
         failureSources.push({ buildId: attempt.buildId, taskId: task.id, attemptId: attempt.id, attempt: attempt.attempt, failure });
@@ -113,6 +123,10 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     requireHistoricalContext(equalNativeEvidence(current.map((item) => item.id), certificates.map((item) => item.id)) && equalNativeEvidence(historyInputs, historicalProjectionInputs(dependencies, buildId)));
     // No await after this full native record/event fence before projection.
   }
+  // Current-certificate reads can yield while attempt or changed-file records
+  // change without a task-state transition. Do not persist a decision from the
+  // earlier mixed input set. No await occurs between this fence and append.
+  if (!equalNativeEvidence(taskSources, readTaskSources())) throw new Error("GOVERNED_OBSERVATION_SOURCE_CHANGED: native task, attempt or changed-file inputs changed during evaluation");
   const changedOwners = new Map<string, Set<string>>();
   for (const change of changes) for (const changedPath of change.paths) {
     const owners = changedOwners.get(changedPath) ?? new Set<string>();
@@ -153,6 +167,24 @@ export async function evaluateGovernedBuild(dependencies: GovernorDependencies, 
     observation,
     recordedAt: nowIso(),
     previousRecordHash: typeof prior === "string" ? prior : null,
+    // Native journal context, not a new authority or a replacement for the
+    // governed observation hash. Null native revisions remain null. Hashes
+    // identify the sampled records without exporting raw errors or local paths.
+    nativeSources: {
+      build: { id: build.id, repositoryId: build.repositoryId, planId: build.planId, baseCommit: build.baseCommit, sha256: canonicalJsonSha256(build) },
+      handoff: { id: handoff.handoffId, sha256: binding.data.sha256, governedBaseCommit: handoff.repository.baseCommit },
+      tasks: taskSources.map(({ task, attempts }) => ({
+        id: task.id, buildId: task.buildId, backlogTaskId: task.backlogTaskId,
+        baseCommit: task.baseCommit, resultCommit: task.resultCommit, integrationCommit: task.integrationCommit,
+        sha256: canonicalJsonSha256(task),
+        attempts: attempts.map(({ attempt, changedFiles }) => ({
+          id: attempt.id, buildId: attempt.buildId, taskId: attempt.taskId, attempt: attempt.attempt,
+          resultCommit: attempt.resultCommit, sha256: canonicalJsonSha256(attempt), changedFilesSha256: canonicalJsonSha256(changedFiles),
+        })),
+      })),
+      events: { throughSequence: events.at(-1)?.sequence ?? 0, count: events.length, sha256: canonicalJsonSha256(events) },
+      certificates: certificates.map(({ id, sha256, body }) => ({ id, sha256, ...body.producer })),
+    },
   });
 }
 

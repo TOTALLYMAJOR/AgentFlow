@@ -63,6 +63,25 @@ describe("Governor control service", () => {
     expect(event.payload.observationState).toEqual({ phase: "INTEGRATING", attempt: 2, maxAttempts: 4 });
   });
 
+  it("retains a detached native source context without changing governed hashes or replay", () => {
+    const append = vi.fn();
+    const service = new GovernorControlService({ append });
+    const nativeSources = { build: { id: "build-1", sha256: "a".repeat(64) }, tasks: [{ id: "task-1", resultCommit: null }] };
+    const input = { contract, observation: observation(), recordedAt: "2026-09-17T12:00:00Z" };
+    const withoutSources = service.evaluate({ ...input, mode: "REPLAY" });
+    const live = service.evaluate({ ...input, nativeSources });
+    const replay = service.evaluate({ ...input, nativeSources, mode: "REPLAY" });
+    expect(live).toEqual(withoutSources);
+    expect(replay).toEqual(live);
+    expect(append).toHaveBeenCalledOnce();
+    const event = append.mock.calls[0]?.[0] as { payload: Record<string, unknown> } | undefined;
+    if (event === undefined) throw new Error("Native source context was not retained");
+    expect(event.payload.nativeSources).toEqual(nativeSources);
+    nativeSources.build.sha256 = "b".repeat(64);
+    nativeSources.tasks.push({ id: "later-task", resultCommit: null });
+    expect(event.payload.nativeSources).toEqual({ build: { id: "build-1", sha256: "a".repeat(64) }, tasks: [{ id: "task-1", resultCommit: null }] });
+  });
+
   it("fails closed for missing proof at integration", () => {
     const service = new GovernorControlService({ append: vi.fn() });
     const result = service.evaluate({ contract, observation: observation({ phase: "INTEGRATING" }), recordedAt: "2026-09-17T12:00:00Z" });
