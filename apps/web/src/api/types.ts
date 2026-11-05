@@ -247,6 +247,8 @@ export interface BuildSummary {
   actualElapsedSeconds?: number | null;
   pushStatus?: string | null;
   normalizedPlan?: {
+    // Captured display context only; native admission and recovery remain authoritative.
+    governedHandoff?: Record<string, unknown> | null;
     estimates?: {
       criticalPathTaskIds?: string[];
     };

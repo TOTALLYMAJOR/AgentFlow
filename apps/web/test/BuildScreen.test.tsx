@@ -4,13 +4,13 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { SWRConfig } from "swr";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BuildEvent, BuildSummary } from "../src/api/types.js";
+import type { BuildEvent, BuildSummary, TaskDetail } from "../src/api/types.js";
 import nativeCases from "./fixtures/governor-native-events.json";
 
 // Keep the real screen, SWR, native client and useBuildEvents. Only the existing
 // jsdom presentation boundary and browser request/EventSource transport are adapted.
 vi.mock("@primer/react", () => ({
-  Button: ({ children, onClick, disabled }: React.ButtonHTMLAttributes<HTMLButtonElement>) => <button onClick={onClick} disabled={disabled}>{children}</button>,
+  Button: ({ children, onClick, disabled, title, "aria-label": label }: React.ButtonHTMLAttributes<HTMLButtonElement>) => <button onClick={onClick} disabled={disabled} title={title} aria-label={label}>{children}</button>,
   Flash: ({ children }: { children: React.ReactNode }) => <div role="alert">{children}</div>,
   Label: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
   SkeletonBox: () => <span>Loading</span>,
@@ -42,6 +42,11 @@ let container: HTMLDivElement;
 let root: Root | null = null;
 let requests: Array<{ path: string; method: string }>;
 let buildReadFails = false;
+let buildFixture: BuildSummary;
+let taskFixtures: Map<string, TaskDetail>;
+let retryFailure: { code: string; message: string } | null;
+let deferredRetry: Promise<Response> | null;
+let retryMakesTaskReady = false;
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -49,11 +54,30 @@ beforeEach(() => {
   vi.stubGlobal("EventSource", NativeEventTransport);
   requests = [];
   buildReadFails = false;
+  buildFixture = currentBuild;
+  taskFixtures = new Map();
+  retryFailure = null;
+  deferredRetry = null;
+  retryMakesTaskReady = false;
   vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
     requests.push({ path: input, method: init?.method ?? "GET" });
     if (input === "/api/builds?scope=active") return buildReadFails
       ? Response.json({ error: { code: "FIXTURE_READ_FAILURE", message: "Native state unavailable" } }, { status: 503 })
-      : Response.json([currentBuild]);
+      : Response.json([buildFixture]);
+    for (const [id, detail] of taskFixtures) {
+      if (input === `/api/builds/build/tasks/${id}`) return Response.json(detail);
+      if (input === `/api/builds/build/tasks/${id}/diff`) return Response.json({ available: false, reason: "No fixture diff" });
+      if (input === `/api/builds/build/tasks/${id}/retry`) {
+        if (deferredRetry !== null) return deferredRetry;
+        if (retryFailure !== null) return Response.json({ error: retryFailure }, { status: 409 });
+        if (retryMakesTaskReady) {
+          const readyTask = { ...detail, state: "ready" };
+          taskFixtures.set(id, readyTask);
+          buildFixture = { ...buildFixture, tasks: buildFixture.tasks?.map((task) => task.id === id ? readyTask : task) ?? [] };
+        }
+        return Response.json({ queued: true });
+      }
+    }
     return Response.json([]);
   }));
   container = document.createElement("div");
@@ -85,6 +109,41 @@ function stream(): NativeEventTransport {
   const value = NativeEventTransport.instances.findLast((candidate) => !candidate.closed);
   if (value === undefined) throw new Error("Native event transport was not opened");
   return value;
+}
+
+function recoveryFixture(status: string, governed: boolean): void {
+  const detail: TaskDetail = {
+    id: "task", buildId: "build", backlogTaskId: "AF-001", title: "Recovery task",
+    state: "failed", attempt: 1, estimateHours: 1, branchName: null,
+    workerId: null, errorCode: null, errorMessage: null,
+    description: "Controlled recovery fixture", acceptanceCriteria: [],
+    dependencies: [], ownership: [], validationCommands: [], attempts: [],
+    approvals: [], artifacts: [], manifests: [], validations: [], changedFiles: [], events: [],
+  };
+  taskFixtures.set(detail.id, detail);
+  buildFixture = {
+    ...currentBuild, status, tasks: [detail],
+    ...(governed ? { normalizedPlan: { governedHandoff: { handoffId: "fixture-handoff" } } } : {}),
+  };
+}
+
+async function openTask(title = "Recovery task"): Promise<HTMLElement> {
+  const trigger = [...container.querySelectorAll("button")].find((button) => button.textContent.includes(title));
+  expect(trigger, `Task trigger for ${title}`).toBeDefined();
+  await act(async () => trigger?.click());
+  await vi.waitFor(async () => {
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(container.querySelector(".task-inspector h2")?.textContent).toBe(title);
+  });
+  const inspector = container.querySelector<HTMLElement>(".task-inspector");
+  if (inspector === null) throw new Error("Task inspector did not open");
+  return inspector;
+}
+
+function retryButton(inspector: HTMLElement): HTMLButtonElement {
+  const button = [...inspector.querySelectorAll("button")].find((candidate) => candidate.textContent === "Retry");
+  if (button === undefined) throw new Error("Retry button missing");
+  return button;
 }
 
 describe("paused Activity truth", () => {
@@ -127,5 +186,131 @@ describe("paused Activity truth", () => {
     expect(container.querySelector("button")).toBeNull();
     expect(container.textContent).not.toContain("Inspect Governor");
     expect(requests.every((request) => request.method === "GET")).toBe(true);
+  });
+});
+
+describe("Activity recovery controls", () => {
+  it.each(["paused", "interrupted"])("disables known governed retry and distinguishes existing-work Resume when %s", async (status) => {
+    recoveryFixture(status, true);
+    await render(); await settled();
+    const inspector = await openTask();
+    expect(retryButton(inspector).disabled).toBe(true);
+    expect(inspector.textContent).toContain("This governed build does not authorize a new task attempt.");
+    expect(inspector.textContent).toContain("Resume continues existing work");
+    expect(inspector.textContent).toContain("does not create a new task attempt");
+    expect(inspector.textContent).toContain("new plan with current approval");
+    expect(retryButton(inspector).title).not.toContain("Queue a new durable attempt");
+    expect(document.activeElement).toBe(inspector);
+    expect(requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  it("does not suggest Resume for a running governed build", async () => {
+    recoveryFixture("running", true);
+    await render(); await settled();
+    const inspector = await openTask();
+    expect(retryButton(inspector).disabled).toBe(true);
+    expect(inspector.textContent).not.toContain("Resume continues existing work");
+    expect(inspector.textContent).toContain("after this build has ended");
+    expect(inspector.textContent).toContain("new plan with current approval");
+  });
+
+  it("uses the native refusal code rather than its message and prevents another unsupported retry", async () => {
+    recoveryFixture("paused", false);
+    retryFailure = { code: "GOVERNED_RECOVERY_NOT_AUTHORIZED", message: "Fixture refusal with no retry keywords" };
+    await render(); await settled();
+    const inspector = await openTask();
+    expect(retryButton(inspector).disabled).toBe(false);
+    await act(async () => retryButton(inspector).click());
+    await vi.waitFor(() => expect(inspector.textContent).toContain("This governed build does not authorize a new task attempt."));
+    expect(inspector.textContent).toContain("Resume continues existing work");
+    expect(inspector.textContent).toContain("Fixture refusal with no retry keywords");
+    expect(retryButton(inspector).disabled).toBe(true);
+    expect(requests.filter((request) => request.method === "POST")).toEqual([
+      { path: "/api/builds/build/tasks/task/retry", method: "POST" },
+    ]);
+  });
+
+  it("preserves ordinary retry and revalidation without adding governed guidance", async () => {
+    recoveryFixture("paused", false);
+    await render(); await settled();
+    const inspector = await openTask();
+    await act(async () => retryButton(inspector).click());
+    await vi.waitFor(() => expect(requests.filter((request) => request.path === "/api/builds/build/tasks/task" && request.method === "GET").length).toBeGreaterThan(1));
+    expect(requests.filter((request) => request.method === "POST")).toEqual([
+      { path: "/api/builds/build/tasks/task/retry", method: "POST" },
+    ]);
+    expect(inspector.textContent).not.toContain("This governed build does not authorize");
+    expect(retryButton(inspector).disabled).toBe(false);
+  });
+
+  it("keeps unrelated errors generic even when the message resembles a governed refusal", async () => {
+    recoveryFixture("paused", false);
+    retryFailure = { code: "ANOTHER_NATIVE_FAILURE", message: "Governed build does not authorize retry: fixture storage unavailable" };
+    await render(); await settled();
+    const inspector = await openTask();
+    await act(async () => retryButton(inspector).click());
+    await vi.waitFor(() => expect(inspector.textContent).toContain(retryFailure?.message));
+    expect(inspector.textContent).not.toContain("This governed build does not authorize a new task attempt.");
+    expect(retryButton(inspector).disabled).toBe(false);
+  });
+
+  it("does not carry a late native refusal into a different task", async () => {
+    recoveryFixture("paused", false);
+    const first = taskFixtures.get("task");
+    if (first === undefined) throw new Error("Missing first task fixture");
+    const second = { ...first, id: "other-task", backlogTaskId: "AF-002", title: "Other recovery task" };
+    taskFixtures.set(second.id, second);
+    buildFixture = { ...buildFixture, tasks: [first, second] };
+    retryFailure = { code: "GOVERNED_RECOVERY_NOT_AUTHORIZED", message: "Refusal scoped to the selected task" };
+    await render(); await settled();
+    const inspector = await openTask();
+    await act(async () => retryButton(inspector).click());
+    await vi.waitFor(() => expect(inspector.textContent).toContain("This governed build does not authorize a new task attempt."));
+    const nextInspector = await openTask(second.title);
+    expect(nextInspector.textContent).not.toContain("Refusal scoped to the selected task");
+    expect(retryButton(nextInspector).disabled).toBe(false);
+  });
+
+  it("isolates an outstanding retry response when the selected task changes", async () => {
+    recoveryFixture("paused", false);
+    const first = taskFixtures.get("task");
+    if (first === undefined) throw new Error("Missing first task fixture");
+    const second = { ...first, id: "other-task", backlogTaskId: "AF-002", title: "Other recovery task" };
+    taskFixtures.set(second.id, second);
+    buildFixture = { ...buildFixture, tasks: [first, second] };
+    let resolveRetry: (response: Response) => void = () => { throw new Error("Deferred response not initialized"); };
+    deferredRetry = new Promise((resolve) => { resolveRetry = resolve; });
+    await render(); await settled();
+    const inspector = await openTask();
+    await act(async () => retryButton(inspector).click());
+    const nextInspector = await openTask(second.title);
+    await act(async () => resolveRetry(Response.json({ error: {
+      code: "GOVERNED_RECOVERY_NOT_AUTHORIZED", message: "Old task refusal arrived after selection changed",
+    } }, { status: 409 })));
+    expect(nextInspector.textContent).not.toContain("Old task refusal arrived after selection changed");
+    expect(nextInspector.textContent).not.toContain("This governed build does not authorize a new task attempt.");
+    expect(retryButton(nextInspector).disabled).toBe(false);
+  });
+
+  it("returns focus to the replacement task row after ordinary retry moves it between queues", async () => {
+    recoveryFixture("paused", false);
+    retryMakesTaskReady = true;
+    await render(); await settled();
+    const originalTrigger = container.querySelector<HTMLButtonElement>(".work-board button.task-row");
+    if (originalTrigger === null) throw new Error("Original task trigger missing");
+    expect(originalTrigger.closest("article")?.querySelector("h2")?.textContent).toBe("Needs you");
+    const inspector = await openTask();
+    await act(async () => retryButton(inspector).click());
+    await vi.waitFor(() => expect(inspector.querySelector(".metadata-grid")?.textContent).toContain("ready"));
+    const replacementTrigger = container.querySelector<HTMLButtonElement>(".work-board button.task-row[aria-pressed='true']");
+    if (replacementTrigger === null) throw new Error("Replacement task trigger missing");
+    expect(replacementTrigger.closest("article")?.querySelector("h2")?.textContent).toBe("Queued");
+    expect(originalTrigger.isConnected).toBe(false);
+    const close = inspector.querySelector<HTMLButtonElement>("button[aria-label='Close task inspector']");
+    if (close === null) throw new Error("Inspector Close missing");
+    await act(async () => close.click());
+    expect(container.querySelector(".task-inspector")).toBeNull();
+    expect(document.activeElement).toBe(replacementTrigger);
+    expect(replacementTrigger.getAttribute("aria-pressed")).toBe("false");
   });
 });

@@ -18,6 +18,8 @@ import { StatusBadge } from "./StatusBadge.js";
 
 interface TaskInspectorProps {
   buildId: string;
+  buildStatus: string;
+  governedBuild: boolean;
   taskId: string;
   liveEvents: BuildEvent[];
   onClose: () => void;
@@ -62,6 +64,8 @@ type AttemptDocumentKey = readonly [
 
 export function TaskInspector({
   buildId,
+  buildStatus,
+  governedBuild,
   taskId,
   liveEvents,
   onClose,
@@ -105,18 +109,28 @@ export function TaskInspector({
   );
   const [retrying, setRetrying] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [governedRetryRefused, setGovernedRetryRefused] = useState(false);
 
   useEffect(() => {
     inspectorRef.current?.focus();
   }, [taskId]);
 
   async function retryTask(): Promise<void> {
+    if (governedBuild || governedRetryRefused || retrying) {
+      return;
+    }
     setRetrying(true);
     setActionError(null);
     try {
       await postJson(`/api/builds/${buildId}/tasks/${taskId}/retry`);
       await Promise.all([task.mutate(), onRetried()]);
     } catch (cause) {
+      if (
+        cause instanceof ApiClientError &&
+        cause.code === "GOVERNED_RECOVERY_NOT_AUTHORIZED"
+      ) {
+        setGovernedRetryRefused(true);
+      }
       setActionError(
         cause instanceof Error ? cause.message : "The retry could not be queued.",
       );
@@ -173,7 +187,9 @@ export function TaskInspector({
     detail.events,
     liveEvents.filter((event) => event.taskId === taskId),
   );
-  const canRetry = retryableStates.has(detail.state);
+  const retryNotAuthorized = governedBuild || governedRetryRefused;
+  const showRecoveryGuidance = retryableStates.has(detail.state) && retryNotAuthorized;
+  const canRetry = retryableStates.has(detail.state) && !retryNotAuthorized;
 
   return (
     <aside
@@ -193,10 +209,13 @@ export function TaskInspector({
             size="small"
             leadingVisual={ArrowClockwiseIcon}
             disabled={!canRetry || retrying}
+            aria-describedby={showRecoveryGuidance ? "task-retry-guidance" : undefined}
             title={
-              canRetry
-                ? "Queue a new durable attempt"
-                : "Retry becomes available after failure or interruption"
+              retryNotAuthorized
+                ? "This governed build does not authorize a new task attempt"
+                : canRetry
+                  ? "Queue a new durable attempt"
+                  : "Retry becomes available after failure or interruption"
             }
             onClick={() => {
               void retryTask();
@@ -220,6 +239,20 @@ export function TaskInspector({
           {actionError}
         </Flash>
       )}
+
+      {showRecoveryGuidance ? (
+        <Flash id="task-retry-guidance" className="inspector-flash" variant="warning">
+          <strong>This governed build does not authorize a new task attempt.</strong>
+          {buildStatus === "paused" || buildStatus === "interrupted" ? (
+            <p>
+              Resume continues existing work after authority checks; it does not create a new task attempt.
+            </p>
+          ) : null}
+          <p>
+            New attempts require a new plan with current approval after this build has ended.
+          </p>
+        </Flash>
+      ) : null}
 
       <dl className="metadata-grid">
         <div>

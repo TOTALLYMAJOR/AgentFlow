@@ -73,6 +73,7 @@ export function BuildScreen({
   );
   const stream = useBuildEvents(active?.id ?? null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const technicalActivityRef = useRef<HTMLDetailsElement>(null);
   const focusReturnTargetRef = useRef<HTMLButtonElement | null>(null);
   const shouldRestoreFocusRef = useRef(false);
   const [pendingAction, setPendingAction] = useState<BuildAction | null>(null);
@@ -125,6 +126,12 @@ export function BuildScreen({
   }
 
   function closeTaskInspector(): void {
+    if (focusReturnTargetRef.current?.isConnected !== true) {
+      // Native readback can move a task to another queue and replace its trigger.
+      focusReturnTargetRef.current = technicalActivityRef.current?.querySelector<HTMLButtonElement>(
+        ".work-board button.task-row[aria-pressed='true']",
+      ) ?? null;
+    }
     shouldRestoreFocusRef.current = true;
     setSelectedTaskId(null);
   }
@@ -403,7 +410,7 @@ export function BuildScreen({
         />
       ) : null}
 
-      <details className="technical-work-details">
+      <details ref={technicalActivityRef} className="technical-work-details">
         <summary>View technical activity and evidence</summary>
         <div className="technical-work-details__content">
       <section className="metrics-grid" aria-label="Active build summary">
@@ -460,7 +467,10 @@ export function BuildScreen({
 
       {effectiveSelectedTaskId === null ? null : (
         <TaskInspector
+          key={`${active.id}:${effectiveSelectedTaskId}`}
           buildId={active.id}
+          buildStatus={active.status}
+          governedBuild={active.normalizedPlan?.governedHandoff != null}
           taskId={effectiveSelectedTaskId}
           liveEvents={stream.events}
           onClose={closeTaskInspector}
