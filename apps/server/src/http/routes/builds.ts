@@ -83,6 +83,16 @@ const terminalBuildStatuses: readonly BuildStatus[] = [
   "cancelled",
 ];
 
+const executionAuthorityReasons: Readonly<Record<string, string>> = {
+  GOVERNED_HANDOFF_DRIFT: "The recorded handoff no longer matches the immutable native plan.",
+  GOVERNED_HANDOFF_PATH_INVALID: "The governed handoff is outside the registered repository.",
+  GOVERNED_HANDOFF_NOT_EXECUTABLE: "The approved handoff no longer passes native authority checks.",
+  GOVERNED_EXECUTION_SNAPSHOT_STALE: "The repository no longer matches the exact execution snapshot.",
+  GOVERNED_PLAN_SNAPSHOT_DRIFT: "The captured build no longer matches its immutable native plan.",
+  GOVERNED_HANDOFF_SCOPE_DRIFT: "The native plan no longer matches the approved handoff scope.",
+  WALE_EXPERIMENT_REQUIRES_GOVERNED_PLAN: "The bound experiment requires a governed immutable native plan.",
+};
+
 export function registerBuildRoutes(
   app: FastifyInstance,
   context: AgentFlowContext,
@@ -118,6 +128,49 @@ export function registerBuildRoutes(
     const { id } = BuildIdParameters.parse(request.params);
     return serializeBuild(context, context.store.builds.getById(id));
   });
+
+  app.get("/api/builds/:id/execution-authority", async (request, reply) => {
+    const { id } = BuildIdParameters.parse(request.params);
+    reply.header("cache-control", "no-store");
+    const build = context.store.builds.getById(id);
+    const report = (
+      status: "passed" | "blocked" | "not_applicable" | "unknown",
+      details: { code?: string; message?: string } = {},
+    ) => ({ buildId: id, checkedAt: new Date().toISOString(), status, ...details });
+    const unavailable = () => report("unknown", { message: "No immutable native plan is available for this build." });
+    if (build.planId === null) return unavailable();
+    let plan;
+    try {
+      plan = context.store.plans.getById(build.planId);
+    } catch (cause) {
+      if (cause instanceof Error && cause.name === "EntityNotFoundError") return unavailable();
+      throw new Error("Execution-authority readback failed", { cause });
+    }
+    try {
+      // Reuse native checks even for ordinary plans: captured governed data or
+      // an experiment can make that apparent non-applicability a real refusal.
+      await context.coordinator.validateExecutionAuthority(build);
+    } catch (cause) {
+      if (cause instanceof AgentFlowError) {
+        if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(cause.code)) throw new Error("Execution-authority readback failed", { cause });
+        return report("blocked", {
+          code: cause.code,
+          message: executionAuthorityReasons[cause.code] ?? "Native execution-authority checks are blocked.",
+        });
+      }
+      // Typed schema/storage errors have richer global HTTP handlers. This
+      // reporting endpoint must keep their internal diagnostics unavailable.
+      throw new Error("Execution-authority readback failed", { cause });
+    }
+    const governed = plan.normalizedPlan.governedHandoff;
+    if (governed !== undefined && typeof governed.executionBaseCommit !== "string") {
+      return report("unknown", { message: "The native plan has no exact governed execution binding." });
+    }
+    // This is an as-of check result, not an execution capability or a human
+    // approval. Native execution controls continue to recheck independently.
+    return report(governed === undefined ? "not_applicable" : "passed");
+  });
+
   app.post("/api/builds/:id/start", async (request) => {
     const { id } = BuildIdParameters.parse(request.params);
     return serializeBuild(

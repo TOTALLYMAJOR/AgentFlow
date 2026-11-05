@@ -47,6 +47,8 @@ let taskFixtures: Map<string, TaskDetail>;
 let retryFailure: { code: string; message: string } | null;
 let deferredRetry: Promise<Response> | null;
 let retryMakesTaskReady = false;
+let extraBuilds: BuildSummary[];
+let authorityReads: Map<string, () => Promise<Response>>;
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -59,11 +61,20 @@ beforeEach(() => {
   retryFailure = null;
   deferredRetry = null;
   retryMakesTaskReady = false;
+  extraBuilds = [];
+  authorityReads = new Map();
   vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
     requests.push({ path: input, method: init?.method ?? "GET" });
     if (input === "/api/builds?scope=active") return buildReadFails
       ? Response.json({ error: { code: "FIXTURE_READ_FAILURE", message: "Native state unavailable" } }, { status: 503 })
-      : Response.json([buildFixture]);
+      : Response.json([buildFixture, ...extraBuilds]);
+    const authorityPath = /^\/api\/builds\/([^/]+)\/execution-authority$/u.exec(input);
+    if (authorityPath?.[1] !== undefined) {
+      const handler = authorityReads.get(authorityPath[1]);
+      return handler === undefined
+        ? Response.json({ buildId: authorityPath[1], checkedAt: "2026-11-05T10:00:00.000Z", status: "unknown" })
+        : handler();
+    }
     for (const [id, detail] of taskFixtures) {
       if (input === `/api/builds/build/tasks/${id}`) return Response.json(detail);
       if (input === `/api/builds/build/tasks/${id}/diff`) return Response.json({ available: false, reason: "No fixture diff" });
@@ -83,6 +94,157 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
+});
+
+const checkedAt = "2026-11-05T10:00:00.000Z";
+function authorityResult(status: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { buildId: "build", checkedAt, status, ...overrides };
+}
+function readAuthority(body: unknown, buildId = "build"): void {
+  authorityReads.set(buildId, async () => Response.json(body));
+}
+async function showGovernor(buildId = "build", mount = true): Promise<HTMLDetailsElement> {
+  if (mount) { await render(); await settled(); }
+  const sample = nativeCases.find((item) => item.name === "coordinator-readback");
+  if (sample === undefined) throw new Error("Missing actual native Governor fixture");
+  // Preserve the retained native payload. Cross-build cases explicitly adapt only
+  // the browser transport envelope, without claiming new native producer proof.
+  await act(async () => {
+    stream().open();
+    stream().send({ ...sample.decision, buildId });
+    stream().send({ ...sample.outcome, buildId });
+  });
+  const summary = [...container.querySelectorAll("summary")].find((item) => item.textContent === "Inspect Governor decision");
+  if (summary === undefined) throw new Error("Governor disclosure missing");
+  await act(async () => summary.click());
+  const detail = summary.closest("details");
+  if (detail === null) throw new Error("Governor detail missing");
+  return detail;
+}
+function fact(detail: HTMLElement, label: string): HTMLElement {
+  const term = [...detail.querySelectorAll("dt")].find((candidate) => candidate.textContent === label);
+  const value = term?.parentElement?.querySelector("dd");
+  if (value === null || value === undefined) throw new Error(`Missing ${label} fact`);
+  return value;
+}
+
+describe("current native execution-authority readback", () => {
+  it("shows a matching successful check as-of without upgrading recorded authority, chain or control permissions", async () => {
+    recoveryFixture("paused", true);
+    readAuthority(authorityResult("passed"));
+    const detail = await showGovernor();
+    await vi.waitFor(() => expect(fact(detail, "Current authority").textContent).toContain("Native execution checks passed"));
+    expect(fact(detail, "Current authority").textContent).toContain(checkedAt);
+    expect(fact(detail, "Current authority").textContent).toContain("Execution controls recheck before acting.");
+    expect(fact(detail, "Recorded authority digest").textContent).not.toBe("Unknown");
+    expect(fact(detail, "Proof boundary").textContent).toContain("Unknown");
+    expect(fact(detail, "Record-chain verification").textContent).toContain("Unverified");
+    const resume = [...container.querySelectorAll("button")].find((button) => button.textContent === "Resume");
+    expect(resume?.disabled).toBe(false);
+    const inspector = await openTask();
+    expect(retryButton(inspector).disabled).toBe(true);
+    expect(requests.some((request) => request.path === "/api/builds/build/execution-authority" && request.method === "GET")).toBe(true);
+    expect(requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  it("shows a blocked native check and safe reason as-of without disabling an existing Resume control", async () => {
+    readAuthority(authorityResult("blocked", { code: "GOVERNED_SOURCE_CHANGED", message: "The approved source snapshot changed." }));
+    const detail = await showGovernor();
+    await vi.waitFor(() => expect(fact(detail, "Current authority").textContent).toContain("Native execution checks blocked"));
+    expect(fact(detail, "Current authority").textContent).toContain(checkedAt);
+    expect(fact(detail, "Current authority").textContent).toContain("GOVERNED_SOURCE_CHANGED");
+    expect(fact(detail, "Current authority").textContent).toContain("The approved source snapshot changed.");
+    expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Resume")?.disabled).toBe(false);
+    expect(fact(detail, "Record-chain verification").textContent).toContain("Unverified");
+    expect(requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  it.each(["not_applicable", "unknown"])("keeps %s distinct from native checks passed", async (status) => {
+    readAuthority(authorityResult(status));
+    const detail = await showGovernor();
+    await vi.waitFor(() => expect(fact(detail, "Current authority").textContent).toContain(checkedAt));
+    expect(fact(detail, "Current authority").textContent).not.toContain("Native execution checks passed");
+    expect(fact(detail, "Current authority").textContent).toMatch(status === "unknown" ? /Unknown/u : /not applicable.*ordinary plan/iu);
+  });
+
+  const malformedReadbacks = [
+    ["foreign build", authorityResult("passed", { buildId: "other-build" })],
+    ["unknown status", authorityResult("approved")],
+    ["invalid date", authorityResult("passed", { checkedAt: "not a time" })],
+    ["impossible date", authorityResult("passed", { checkedAt: "2026-02-30T10:00:00.000Z" })],
+    ["missing date", { buildId: "build", status: "passed" }],
+    ["missing build", { checkedAt, status: "passed" }],
+    ["array body", [authorityResult("passed")]],
+    ["null body", null],
+    ["malformed code", authorityResult("passed", { code: { status: "passed" } })],
+    ["malformed reason", authorityResult("passed", { message: ["passed"] })],
+  ] as const;
+  it.each(malformedReadbacks)("keeps current authority Unknown for %s", async (_name, body) => {
+    readAuthority(body);
+    const detail = await showGovernor();
+    expect(fact(detail, "Current authority").textContent).toContain("Unknown");
+    expect(fact(detail, "Current authority").textContent).not.toContain("Native execution checks passed");
+    expect(fact(detail, "Record-chain verification").textContent).toContain("Unverified");
+    expect(requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  it("masks a cached successful check when the next native read fails", async () => {
+    readAuthority(authorityResult("passed"));
+    const detail = await showGovernor();
+    await vi.waitFor(() => expect(fact(detail, "Current authority").textContent).toContain("Native execution checks passed"));
+    authorityReads.set("build", async () => Response.json({ error: { code: "QA_READ_FAILED", message: "Controlled read failure" } }, { status: 503 }));
+    await act(async () => window.dispatchEvent(new Event("online")));
+    await vi.waitFor(() => expect(fact(detail, "Current authority").textContent).toContain("latest native check could not be read"));
+    expect(fact(detail, "Current authority").textContent).not.toContain("Native execution checks passed");
+    expect(fact(detail, "Record-chain verification").textContent).toContain("Unverified");
+  });
+
+  it.each([
+    ["a foreign build", authorityResult("passed", { buildId: "other-build" })],
+    ["an impossible date", authorityResult("passed", { checkedAt: "2026-02-30T10:00:00.000Z" })],
+    ["an unsupported status", authorityResult("approved")],
+  ])("masks a cached successful check when a new envelope has %s", async (_name, invalid) => {
+    readAuthority(authorityResult("passed"));
+    const detail = await showGovernor();
+    await vi.waitFor(() => expect(fact(detail, "Current authority").textContent).toContain("Native execution checks passed"));
+    readAuthority(invalid);
+    await act(async () => window.dispatchEvent(new Event("online")));
+    await vi.waitFor(() => expect(fact(detail, "Current authority").textContent).toContain("Unknown"));
+    expect(fact(detail, "Current authority").textContent).not.toContain("Native execution checks passed");
+  });
+
+  it("keeps a cached check explicitly as-of while a new read is outstanding", async () => {
+    readAuthority(authorityResult("passed"));
+    const detail = await showGovernor();
+    await vi.waitFor(() => expect(fact(detail, "Current authority").textContent).toContain("Native execution checks passed"));
+    let resolveRead: (value: Response) => void = () => { throw new Error("Deferred read not initialized"); };
+    const pending = new Promise<Response>((resolve) => { resolveRead = resolve; });
+    authorityReads.set("build", () => pending);
+    await act(async () => window.dispatchEvent(new Event("online")));
+    await vi.waitFor(() => expect(fact(detail, "Current authority").textContent).toContain("Rechecking"));
+    expect(fact(detail, "Current authority").textContent).toContain(checkedAt);
+    await act(async () => resolveRead(Response.json(authorityResult("blocked", { checkedAt: "2026-11-05T10:00:01.000Z" }))));
+    await vi.waitFor(() => expect(fact(detail, "Current authority").textContent).toContain("Native execution checks blocked"));
+    expect(fact(detail, "Current authority").textContent).not.toContain("Native execution checks passed");
+  });
+
+  it("does not transfer a late successful check to a newly selected build", async () => {
+    let resolveOld: (value: Response) => void = () => { throw new Error("Deferred read not initialized"); };
+    const pending = new Promise<Response>((resolve) => { resolveOld = resolve; });
+    authorityReads.set("build", () => pending);
+    extraBuilds = [{ ...currentBuild, id: "other-build", repositoryId: "other-repo", repositoryName: "Other fixture" }];
+    await render(); await settled();
+    const choice = [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Other fixture"));
+    if (choice === undefined) throw new Error("Other build choice missing");
+    await act(async () => choice.click());
+    await vi.waitFor(() => expect(stream().url).toContain("/api/builds/other-build/events/stream"));
+    const detail = await showGovernor("other-build", false);
+    await act(async () => resolveOld(Response.json(authorityResult("passed"))));
+    expect(fact(detail, "Current authority").textContent).toContain("Unknown");
+    expect(fact(detail, "Current authority").textContent).not.toContain("Native execution checks passed");
+    expect(fact(detail, "Record-chain verification").textContent).toContain("Unverified");
+    expect(requests.some((request) => request.path === "/api/builds/other-build/execution-authority" && request.method === "GET")).toBe(true);
+  });
 });
 afterEach(async () => {
   await act(async () => { root?.unmount(); });

@@ -16,9 +16,10 @@ import { publishNativeValidationEvidence, readVerifiedNativeValidationEvidence, 
 import { makeDesignIntelligenceReceipt } from "../src/integration/design-intelligence-receipt.js";
 import { DEFAULT_ORGANIZATION_POLICY } from "../src/governance/organization-policy.js";
 import type { AgentFlowContext } from "../src/http/context.js";
+import { AgentFlowError } from "../src/http/errors.js";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -793,6 +794,194 @@ describe("ordinary governed execution admission", () => {
       expect(provider).not.toHaveBeenCalled();
       expect(await admissionGit(root, ["rev-parse", "HEAD"])).toBe(head);
       expect(await admissionGit(root, ["status", "--porcelain=v1"])).toBe("");
+    });
+  });
+});
+
+describe("native execution-authority readback", () => {
+  async function snapshot(root: string, context: AgentFlowContext) {
+    const tables = context.store.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>;
+    const database = Object.fromEntries(tables.map(({ name }) => {
+      if (!/^[A-Za-z0-9_]+$/.test(name)) throw new Error("Unexpected fixture table name");
+      return [name, context.store.database.prepare('SELECT * FROM "' + name + '"').all().map(row => JSON.stringify(row)).sort()];
+    }));
+    async function runtimeFiles(directory: string, relative = ""): Promise<Record<string, string>> {
+      const files: Record<string, string> = {};
+      for (const entry of await readdir(path.join(directory, relative), { withFileTypes: true })) {
+        const name = path.join(relative, entry.name);
+        if (entry.isDirectory()) Object.assign(files, await runtimeFiles(directory, name));
+        else if (entry.isFile() && !/\.(?:db|sqlite3?)(?:-(?:wal|shm))?$/.test(name)) files[name] = createHash("sha256").update(await readFile(path.join(directory, name))).digest("hex");
+        else if (!entry.isFile()) files[name] = "non-file";
+      }
+      return files;
+    }
+    return {
+      database,
+      head: await admissionGit(root, ["rev-parse", "HEAD"]),
+      status: await admissionGit(root, ["status", "--porcelain=v1"]),
+      source: await Promise.all(["AGENTS.md", "BACKLOG.md", ".agentflow.yaml", "handoff.json", "src/index.js"].map(async file => [file, await readFile(path.join(root, file)).then(bytes => createHash("sha256").update(bytes).digest("hex"), () => null)])),
+      // SQLite bytes/locks and Git's optional index metadata are not a logical
+      // state invariant. Every native table and non-database runtime file is.
+      runtimeFiles: await runtimeFiles(path.join(path.dirname(root), "runtime")),
+    };
+  }
+
+  function actionTripwires(context: AgentFlowContext) {
+    const action = () => { throw new Error("READBACK_MUST_NOT_ACT"); };
+    return [
+      vi.spyOn(context.coordinator, "start").mockImplementation(action),
+      vi.spyOn(context.coordinator, "resume").mockImplementation(action),
+      vi.spyOn(context.coordinator, "pause").mockImplementation(action),
+      vi.spyOn(context.coordinator, "cancel").mockImplementation(action),
+      vi.spyOn(context.coordinator, "retry").mockImplementation(action),
+      vi.spyOn(context.coordinator, "requestTick").mockImplementation(action),
+      vi.spyOn(context.agentProviders, "get").mockImplementation(action),
+    ];
+  }
+
+  async function checkReadback(
+    fixture: { root: string; app: Awaited<ReturnType<typeof buildApp>>["app"]; context: AgentFlowContext; buildId: string },
+    expected: Record<string, unknown>,
+  ) {
+    const { root, app, context, buildId } = fixture;
+    const forbidden = actionTripwires(context);
+    const before = await snapshot(root, context);
+    const started = Date.now();
+    const response = await app.inject({ method: "GET", url: "/api/builds/" + buildId + "/execution-authority" });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.json()).toMatchObject({ buildId, ...expected });
+    const checkedAt = response.json<{ checkedAt: string }>().checkedAt;
+    expect(new Date(checkedAt).toISOString()).toBe(checkedAt);
+    expect(Date.parse(checkedAt)).toBeGreaterThanOrEqual(started);
+    expect(Date.parse(checkedAt)).toBeLessThanOrEqual(Date.now());
+    expect(await snapshot(root, context)).toEqual(before);
+    for (const operation of forbidden) expect(operation).not.toHaveBeenCalled();
+    return response;
+  }
+
+  it("reports current native checks without acting, and repeated reads stay inert", async () => {
+    await withAdmissionFixture(true, async fixture => {
+      const validate = vi.spyOn(fixture.context.coordinator, "validateExecutionAuthority");
+      await checkReadback(fixture, { status: "passed" });
+      await checkReadback(fixture, { status: "passed" });
+      expect(validate).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it.each(["src/index.js", "AGENTS.md"])("reports actual %s drift through the unchanged native guard", async file => {
+    await withAdmissionFixture(true, async fixture => {
+      await writeFile(path.join(fixture.root, file), "// Changed synthetic source or authority\n");
+      const validate = vi.spyOn(fixture.context.coordinator, "validateExecutionAuthority");
+      await checkReadback(fixture, { status: "blocked", code: "GOVERNED_HANDOFF_NOT_EXECUTABLE" });
+      expect(validate).toHaveBeenCalledExactlyOnceWith(fixture.context.store.builds.getById(fixture.buildId));
+    });
+  });
+
+  it("checks an explicit ordinary linked plan before reporting non-applicability", async () => {
+    await withAdmissionFixture(false, async fixture => {
+      const validate = vi.spyOn(fixture.context.coordinator, "validateExecutionAuthority");
+      await checkReadback(fixture, { status: "not_applicable" });
+      expect(validate).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("retains native captured-governed drift refusal even for an ordinary linked plan", async () => {
+    await withAdmissionFixture(false, async fixture => {
+      const build = fixture.context.store.builds.getById(fixture.buildId);
+      // Explicit corruption fixture, never a supported mutation path.
+      fixture.context.store.database.prepare("UPDATE builds SET normalized_plan_json = ? WHERE id = ?").run(JSON.stringify({ ...build.normalizedPlan, governedHandoff: { id: "corrupted" } }), build.id);
+      await checkReadback(fixture, { status: "blocked", code: "GOVERNED_HANDOFF_DRIFT" });
+    });
+  });
+
+  it("keeps an unbound captured build unknown instead of certifying its client hint", async () => {
+    await withAdmissionFixture(true, async fixture => {
+      // Explicit orphaning fixture; a missing immutable plan is not authority.
+      fixture.context.store.database.prepare("UPDATE builds SET plan_id = NULL WHERE id = ?").run(fixture.buildId);
+      const validate = vi.spyOn(fixture.context.coordinator, "validateExecutionAuthority");
+      await checkReadback(fixture, { status: "unknown" });
+      expect(validate).not.toHaveBeenCalled();
+    });
+  });
+
+  it("keeps a missing linked plan unknown without exposing its diagnostic", async () => {
+    await withAdmissionFixture(true, async fixture => {
+      vi.spyOn(fixture.context.store.plans, "getById").mockImplementation(() => { throw Object.assign(new Error("PRIVATE_PLAN_DIAGNOSTIC"), { name: "EntityNotFoundError" }); });
+      const response = await checkReadback(fixture, { status: "unknown" });
+      expect(response.body).not.toContain("PRIVATE_PLAN_DIAGNOSTIC");
+    });
+  });
+
+  it("does not certify native pre-snapshot compatibility as current governed authority", async () => {
+    await withAdmissionFixture(true, async fixture => {
+      const build = fixture.context.store.builds.getById(fixture.buildId);
+      if (build.planId === null) throw new Error("Expected a linked native plan");
+      const plan = fixture.context.store.plans.getById(build.planId);
+      if (plan.normalizedPlan.governedHandoff === undefined) throw new Error("Expected a governed native plan");
+      const legacy = { ...plan.normalizedPlan.governedHandoff };
+      delete legacy.executionBaseCommit;
+      // Actual legacy compatibility shape. The execution validator deliberately
+      // permits it, but that early return has not checked current authority.
+      // Create a separate legacy plan before native build creation locks it;
+      // never disable or bypass the immutable-plan trigger for fixture setup.
+      await fixture.app.inject({ method: "POST", url: "/api/builds/" + build.id + "/cancel" });
+      const legacyPlan = fixture.context.store.plans.create({ ...plan, id: "legacy-plan", normalizedPlan: { ...plan.normalizedPlan, governedHandoff: legacy } });
+      const legacyBuild = fixture.context.store.builds.create({ id: "legacy-build", repositoryId: build.repositoryId, planId: legacyPlan.id, backlogPath: plan.backlogPath, baseCommit: build.baseCommit, integrationBranch: "fixture/legacy", status: "ready", tasks: [] });
+      fixture.context.store.database.prepare("UPDATE builds SET backlog_sha256 = NULL, backlog_contents = '', normalized_plan_json = '{}' WHERE id = ?").run(legacyBuild.id);
+      const validate = vi.spyOn(fixture.context.coordinator, "validateExecutionAuthority");
+      await checkReadback({ ...fixture, buildId: legacyBuild.id }, { status: "unknown" });
+      expect(validate).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("keeps malformed retained handoff schema diagnostics out of the readback", async () => {
+    await withAdmissionFixture(true, async ({ root, app, context, buildId }) => {
+      const file = path.join(root, "handoff.json");
+      const handoff = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+      handoff.PRIVATE_NATIVE_SCHEMA_DIAGNOSTIC = true;
+      await writeFile(file, JSON.stringify(handoff));
+      const forbidden = actionTripwires(context);
+      const before = await snapshot(root, context);
+      const response = await app.inject({ method: "GET", url: "/api/builds/" + buildId + "/execution-authority" });
+      expect(response.statusCode, response.body).toBe(500);
+      expect(response.json()).toEqual({ error: { code: "INTERNAL_ERROR", message: "AgentFlow could not complete the request" } });
+      expect(response.body).not.toContain("PRIVATE_NATIVE_SCHEMA_DIAGNOSTIC");
+      expect(await snapshot(root, context)).toEqual(before);
+      for (const operation of forbidden) expect(operation).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each(["GOVERNED_HANDOFF_DRIFT", "NEW_NATIVE_AUTHORITY_REFUSAL"])("reports %s with bounded static text, never raw native diagnostics", async code => {
+    await withAdmissionFixture(true, async fixture => {
+      vi.spyOn(fixture.context.coordinator, "validateExecutionAuthority").mockRejectedValue(new AgentFlowError(code, "PRIVATE_NATIVE_DIAGNOSTIC", 409, { secret: "PRIVATE_DETAIL" }));
+      const response = await checkReadback(fixture, { status: "blocked", code });
+      expect(response.body).not.toContain("PRIVATE_NATIVE_DIAGNOSTIC");
+      expect(response.body).not.toContain("PRIVATE_DETAIL");
+      expect(response.json<{ message: string }>().message).not.toBe("");
+    });
+  });
+
+  it.each([new Error("PRIVATE_UNEXPECTED_FAILURE"), new AgentFlowError("INVALID NATIVE CODE", "PRIVATE_INVALID_CODE", 409), Object.assign(new Error("PRIVATE_NATIVE_ENTITY_DIAGNOSTIC"), { name: "EntityNotFoundError" })])("keeps unexpected read failures unavailable with the existing sanitized response", async failure => {
+    await withAdmissionFixture(true, async ({ root, app, context, buildId }) => {
+      vi.spyOn(context.coordinator, "validateExecutionAuthority").mockRejectedValue(failure);
+      const forbidden = actionTripwires(context);
+      const before = await snapshot(root, context);
+      const response = await app.inject({ method: "GET", url: "/api/builds/" + buildId + "/execution-authority" });
+      expect(response.statusCode, response.body).toBe(500);
+      expect(response.json()).toEqual({ error: { code: "INTERNAL_ERROR", message: "AgentFlow could not complete the request" } });
+      expect(await snapshot(root, context)).toEqual(before);
+      for (const operation of forbidden) expect(operation).not.toHaveBeenCalled();
+    });
+  });
+
+  it("preserves native 404 for an unknown requested build", async () => {
+    await withAdmissionFixture(true, async ({ app, context, root }) => {
+      const before = await snapshot(root, context);
+      const response = await app.inject({ method: "GET", url: "/api/builds/build_missing/execution-authority" });
+      expect(response.statusCode, response.body).toBe(404);
+      expect(response.json()).toMatchObject({ error: { code: "NOT_FOUND" } });
+      expect(await snapshot(root, context)).toEqual(before);
     });
   });
 });

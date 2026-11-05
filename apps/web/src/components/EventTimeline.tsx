@@ -1,9 +1,16 @@
 import { useId } from "react";
-import type { BuildEvent } from "../api/types.js";
+import type { BuildEvent, ExecutionAuthorityReadback } from "../api/types.js";
+
+interface AuthorityCheck {
+  readback: ExecutionAuthorityReadback | null;
+  readFailed: boolean;
+  checking: boolean;
+}
 
 interface EventTimelineProps {
   events: BuildEvent[];
   connected: boolean;
+  authorityCheck?: AuthorityCheck;
   title?: string;
   emptyMessage?: string;
 }
@@ -85,7 +92,29 @@ function OutcomeFacts({ event }: { event: BuildEvent }): React.JSX.Element {
   );
 }
 
-function GovernorRecord({ event, events }: { event: BuildEvent; events: BuildEvent[] }): React.JSX.Element {
+function CurrentAuthority({ buildId, check }: { buildId: string; check: AuthorityCheck | undefined }): React.JSX.Element {
+  if (check?.readFailed === true) {
+    return <>Unknown; the latest native check could not be read. Execution controls recheck before acting.{check.checking ? " Rechecking." : ""}</>;
+  }
+  const readback = check?.readback;
+  if (readback === undefined || readback === null || readback.buildId !== buildId) {
+    return <>Unknown; the recorded snapshot does not establish current authority.{check?.checking === true ? " Checking native execution authority." : ""}</>;
+  }
+  const captions: Record<ExecutionAuthorityReadback["status"], string> = {
+    passed: "Native execution checks passed",
+    blocked: "Native execution checks blocked",
+    not_applicable: "Governed execution-authority status is not applicable to this ordinary plan",
+    unknown: "Unknown; native execution authority could not be established",
+  };
+  return <>
+    {captions[readback.status]} as of <time dateTime={readback.checkedAt}>{readback.checkedAt}</time>.
+    {readback.status !== "passed" && readback.code !== undefined ? <> <code>{readback.code}</code>.</> : null}
+    {readback.status !== "passed" && readback.message ? <> {readback.message}</> : null}
+    {" "}Execution controls recheck before acting.{check?.checking === true ? " Rechecking." : ""}
+  </>;
+}
+
+function GovernorRecord({ event, events, authorityCheck }: { event: BuildEvent; events: BuildEvent[]; authorityCheck: AuthorityCheck | undefined }): React.JSX.Element {
   const payload = object(event.payload);
   const decision = object(payload.decision);
   const authority = object(payload.authorityObservation);
@@ -118,7 +147,7 @@ function GovernorRecord({ event, events }: { event: BuildEvent; events: BuildEve
             <Fact label="Record digest"><code>{hash}</code></Fact>
             <Fact label="Previous record digest"><code>{payload.previousRecordHash === null ? "None recorded" : digest(payload.previousRecordHash)}</code></Fact>
             <Fact label="Recorded authority digest"><code>{digest(authority.authorityStateSha256)}</code></Fact>
-            <Fact label="Current authority">Unknown; the recorded snapshot does not establish current authority.</Fact>
+            <Fact label="Current authority"><CurrentAuthority buildId={event.buildId} check={authorityCheck} /></Fact>
             <Fact label="Proof boundary">Unknown; not supplied as verified context by this event.</Fact>
             <Fact label="Record-chain verification">Unverified; recent records are not a complete verified chain.</Fact>
           </dl>
@@ -136,6 +165,7 @@ function GovernorRecord({ event, events }: { event: BuildEvent; events: BuildEve
 export function EventTimeline({
   events,
   connected,
+  authorityCheck,
   title = "Recent events",
   emptyMessage = "No native events have been received in this view yet.",
 }: EventTimelineProps): React.JSX.Element {
@@ -179,7 +209,7 @@ export function EventTimeline({
                 <time dateTime={event.occurredAt}>
                     {Number.isFinite(date.getTime()) ? date.toLocaleTimeString() : "Time unavailable"}
                 </time>
-                  {governor ? <GovernorRecord event={event} events={events} /> : null}
+                  {governor ? <GovernorRecord event={event} events={events} authorityCheck={authorityCheck} /> : null}
               </li>
             );
           })}

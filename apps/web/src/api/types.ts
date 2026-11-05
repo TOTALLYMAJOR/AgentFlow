@@ -263,6 +263,14 @@ export interface BuildSummary {
   workers?: WorkerSummary[];
 }
 
+export interface ExecutionAuthorityReadback {
+  buildId: string;
+  checkedAt: string;
+  status: "passed" | "blocked" | "not_applicable" | "unknown";
+  code?: string;
+  message?: string;
+}
+
 export interface PlanSummary {
   id: string;
   repositoryId: string;

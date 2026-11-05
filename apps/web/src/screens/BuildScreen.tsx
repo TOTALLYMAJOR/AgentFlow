@@ -12,6 +12,7 @@ import type {
   ApprovalSummary,
   ArtifactSummary,
   BuildSummary,
+  ExecutionAuthorityReadback,
   TaskManifest,
 } from "../api/types.js";
 import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
@@ -71,6 +72,18 @@ export function BuildScreen({
     apiFetch,
     { refreshInterval: 3_000 },
   );
+  const executionAuthority = useSWR<unknown, Error>(
+    active === null ? null : `/api/builds/${active.id}/execution-authority`,
+    apiFetch,
+    { refreshInterval: 4_000 },
+  );
+  const authorityCheck = {
+    readback: executionAuthority.error === undefined
+      ? validatedAuthorityReadback(executionAuthority.data, active?.id ?? null)
+      : null,
+    readFailed: executionAuthority.error !== undefined,
+    checking: executionAuthority.isValidating,
+  };
   const stream = useBuildEvents(active?.id ?? null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const technicalActivityRef = useRef<HTMLDetailsElement>(null);
@@ -498,11 +511,13 @@ export function BuildScreen({
         <EventTimeline
           events={stream.events}
           connected={stream.connected}
+          authorityCheck={authorityCheck}
           title="Recent durable events"
         />
         <EventTimeline
           events={recoveryEvents}
           connected={stream.connected}
+          authorityCheck={authorityCheck}
           title="Recovery and reconciliation"
             emptyMessage="No recovery events are present in this recent window."
         />
@@ -511,6 +526,31 @@ export function BuildScreen({
       </details>
     </>
   );
+}
+
+function validatedAuthorityReadback(value: unknown, buildId: string | null): ExecutionAuthorityReadback | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || buildId === null) return null;
+  const input = value as Record<string, unknown>;
+  const status = input.status;
+  if (input.buildId !== buildId ||
+      (status !== "passed" && status !== "blocked" && status !== "not_applicable" && status !== "unknown") ||
+      typeof input.checkedAt !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/u.test(input.checkedAt)) return null;
+  const date = new Date(input.checkedAt);
+  const canonical = input.checkedAt.replace(/(?:\.(\d{1,3}))?Z$/u,
+    (_match: string, fraction: string | undefined) => `.${(fraction ?? "").padEnd(3, "0")}Z`);
+  if (!Number.isFinite(date.getTime()) || date.toISOString() !== canonical) return null;
+  if (input.code !== undefined &&
+      (typeof input.code !== "string" || input.code.length > 160 || !/^[A-Z][A-Z0-9_]*$/u.test(input.code))) return null;
+  if (input.message !== undefined &&
+      (typeof input.message !== "string" || input.message.length > 2_000)) return null;
+  return {
+    buildId,
+    checkedAt: input.checkedAt,
+    status,
+    ...(input.code === undefined ? {} : { code: input.code }),
+    ...(input.message === undefined ? {} : { message: input.message }),
+  };
 }
 
 function plainBuildStatus(status: string): string {
